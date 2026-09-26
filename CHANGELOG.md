@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased — Phase 10 performance
+## Unreleased — Phase 11 compatibility
+
+### Added
+- **Browser test** (`tests/browser_camera.ps1`, ctest `browser_getusermedia`): a Chromium browser (Edge, Chrome or Brave), headless with a throwaway profile, opens IXC Camera through getUserMedia and counts frames (never shown or saved). Brave: 1280×720 → 29.9 FPS, 1920×1080 → 30.0 FPS. This is the capture path Chrome, Edge, Discord and Teams use.
+
+### Not tested (need the user or apps that aren’t installed)
+- Discord, Zoom, Teams, Windows Camera app, Chrome/Edge themselves; camera unplug, sleep/wake, reboot persistence. See docs/compatibility.md.
+
+## Phase 10 — Performance (2026-09-26)
 
 ### Measured
 - **30-minute soak** (`tests/soak.ps1`), IXC Camera 1080p30 with Portrait + Beauty + Blush + Warm Glow and face tracking, Ryzen 5 5600G: 54,520 frames, 30.02 FPS, 0 dropped, jitter 4.3 ms, max gap 48 ms, latency 45.6 ms. Camera service memory flat at 67.9–68.8 MB for the whole run (no leak), back to 14 MB when streaming stopped; handles stable (1066 → 1025); CPU steady at 43–47% of one core.

@@ -38,7 +38,7 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - `src/processing/gpu` D3D11 path (byte-identical to CPU; `test_gpu_pipeline.cpp`) · `backend_selector` (when to use the GPU) · `adaptive_processor`
 - Any change to `Nv12Processor` math must be mirrored in `gpu/pipeline.hlsl`. The exactness tests fail otherwise.
 - Benchmarks: `ixc_probe --bench-pipeline`, `--bench-gpu`, `--bench-gpu-memory`. Record results in docs/performance.md.
-- Phases 1–6 are done. Phase 7 (Smooth motion + face tracking, `src/face`, vendored `third_party/libfacedetection`) is committed. Phase 8 (effects, `src/effects`, `ixc_probe --bench-effects`) , Phase 9 (profiles UI, `app_settings`, hotkeys) and Phase 10 (soak `tests/soak.ps1`) done. The user allows committing and moving to the next phase without asking once tests pass.
+- Phases 1–6 are done. Phase 7 (Smooth motion + face tracking, `src/face`, vendored `third_party/libfacedetection`) is committed. Phase 8 (effects, `src/effects`, `ixc_probe --bench-effects`) , Phase 9 (profiles UI, `app_settings`, hotkeys) , Phase 10 (soak `tests/soak.ps1`) and Phase 11 (browser test) done. The user allows committing and moving to the next phase without asking once tests pass.
 - `src/face`: tracker/cadence are pure logic (`test_face.cpp`). The detector is compiled twice (lfd_scalar/lfd_avx2, no `/arch:AVX2`). Benchmark: `ixc_probe --bench-face N` (needs a person in view for detection numbers).
 - Frame Server stops a client with `SetStreamState(STOPPED)`, not an MEStreamStopped event. Free per-session resources there.
 
@@ -48,4 +48,6 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - The Lenovo rejects UVC control changes after the capture reader is flushed (`0xC00D36B6`), and rejects value 0 with the AUTO flag. Restore exposure before flushing, using the original value.
 - `tests/bench_baseline.ps1` starts the app, which republishes the user's saved profile. Use `-Profile` (applied after the app step) to benchmark other settings.
 - Writing files with PowerShell `UTF8Encoding($true)` adds a BOM: repo files have none.
+- `perl -pi` with non-ASCII in the replacement double-encodes the file's existing UTF-8 ("Wide character" warning). Use `perl -CSD`, or ASCII escapes plus the Edit tool.
+- The built-in browser pane blocks camera access; use `tests/browser_camera.ps1` (headless Chromium, throwaway profile).
 - The Snap Camera legacy virtual camera is installed (root-enumerated, RGB24 720p). IXC lists it as virtual.

@@ -22,7 +22,8 @@ Machine: Windows 11 Pro build 26200, Ryzen 5 5600G, RX 6600. Camera: Lenovo FHD 
 | OBS Studio 32.2.2 | **PASS (user-verified, v0.4.0)** | Detects "IXC Camera (Windows Virtual Camera)" as a Video Capture Device; live picture settings apply correctly |
 | Discord 1.0.9259 (installed) | **NOT TESTED — REQUIRES USER** | Chromium/Media Foundation path passes. It needs a manual check in Settings → Voice & Video → Camera |
 | Windows Camera app | NOT TESTED — not installed | |
-| Chrome / Edge | NOT TESTED — not installed | Same Media Foundation path as Discord |
+| Brave 1.x (Chromium) | **PASS (automated, `tests/browser_camera.ps1`)** | getUserMedia: 1280×720 → 29.8 FPS, 1920×1080 → 30.0 FPS; camera listed as "IXC Camera (Windows Virtual Camera)" |
+| Chrome / Edge | NOT TESTED — not installed | Same Chromium capture path as Brave (PASS); the test script uses them automatically when present |
 | Zoom, Microsoft Teams | NOT TESTED — not installed | |
 
 ## Behaviour

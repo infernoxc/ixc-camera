@@ -1,0 +1,36 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>IXC getUserMedia test</title></head>
+<body style="font:14px sans-serif">
+<pre id="out">running…</pre>
+<!-- The video element is never shown: frames are only counted, never displayed or saved. -->
+<video id="v" muted playsinline style="display:none"></video>
+<script>
+const out = document.getElementById('out');
+const log = s => { out.textContent += '\n' + s; };
+async function run(width, height) {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  const ixc = devs.find(d => /IXC Camera/i.test(d.label));
+  if (!ixc) { log('IXC Camera not found in: ' + devs.map(d => d.label).join(' | ')); return; }
+  const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: ixc.deviceId }, width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: 30 } } });
+  const track = stream.getVideoTracks()[0];
+  const v = document.getElementById('v');
+  v.srcObject = stream; await v.play();
+  let n = 0, t0 = performance.now(), maxGap = 0, last = t0;
+  await new Promise(res => {
+    const cb = (now) => { n++; maxGap = Math.max(maxGap, now - last); last = now; if (now - t0 < 8000) v.requestVideoFrameCallback(cb); else res(); };
+    v.requestVideoFrameCallback(cb);
+  });
+  const s = track.getSettings();
+  log(`${ixc.label}: ${s.width}x${s.height} @ ${s.frameRate} requested ${width}x${height} -> ${(n * 1000 / (last - t0)).toFixed(1)} fps rendered, max gap ${maxGap.toFixed(0)} ms, ${n} frames`);
+  track.stop();
+}
+(async () => {
+  try {
+    await navigator.mediaDevices.getUserMedia({ video: true }).then(s => s.getTracks().forEach(t => t.stop()));  // permission, labels
+    await run(1280, 720);
+    await run(1920, 1080);
+    log('DONE');
+    await fetch('/result', { method: 'POST', body: out.textContent });
+  } catch (e) { log('ERROR ' + e.name + ': ' + e.message); await fetch('/result', { method: 'POST', body: out.textContent }); }
+})();
+</script></body></html>

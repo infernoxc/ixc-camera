@@ -43,3 +43,6 @@ set_tests_properties(camera_enumerate camera_capture_nv12 camera_capture_rgb32 c
 # or when built with IXC_WITH_FACE_TRACKING=OFF.
 add_test(NAME face_engine_live COMMAND ixc_probe --bench-face 4)
 set_tests_properties(face_engine_live PROPERTIES TIMEOUT 120 LABELS "hardware" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+# A Chromium browser (Edge/Chrome/Brave, headless, throwaway profile) opens IXC Camera via getUserMedia.
+add_test(NAME browser_getusermedia COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_CURRENT_SOURCE_DIR}/browser_camera.ps1)
+set_tests_properties(browser_getusermedia PROPERTIES TIMEOUT 120 LABELS "hardware" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
