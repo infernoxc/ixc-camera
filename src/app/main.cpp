@@ -1,4 +1,5 @@
-// IXC Camera UI (Phase 3): camera selection, native format selection, live preview.
+// IXC Camera UI: camera selection, native format selection, live preview, and the IXC Camera
+// system camera status (which webcam it uses; changing it asks for administrator approval).
 //
 // Resource rules this window follows:
 //   * The physical camera is opened only while the preview runs, and it's released when the
@@ -15,6 +16,7 @@
 #include "diagnostics/log.h"
 #include "ixc/version.h"
 #include "profiles/profile_store.h"
+#include "virtual_camera/registration.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -51,9 +53,12 @@ enum ControlId : int {
     kIdStatus,
     kIdHint,
     kIdPrivacy,
+    kIdVcamStatus,
+    kIdVcamUse,
 };
 
 constexpr UINT kStateMessage = WM_APP + 11;
+constexpr UINT kVcamDoneMessage = WM_APP + 12;  // wParam = ixc_vcam.exe exit code
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
 
@@ -100,11 +105,20 @@ private:
     void UpdateStatus();
     void OnCaptureState(CaptureState s);
     void ShowPrivacyHelp(bool show);
+    void RefreshVcamStatus();
+    void UpdateVcamControls();
+    void UseSelectedForIxcCamera();
+    void OnVcamDone(DWORD exitCode);
+    static void CALLBACK OnVcamProcessExit(void* ctx, BOOLEAN timedOut);
 
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
     HWND cameraLabel_ = nullptr, camera_ = nullptr, formatLabel_ = nullptr, format_ = nullptr, startStop_ = nullptr;
     HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr;
+    HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
+    vcam::Status vcam_;
+    HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
+    HANDLE vcamWait_ = nullptr;
     HFONT font_ = nullptr;
     UINT dpi_ = 96;
     HDEVNOTIFY devNotify_ = nullptr;
@@ -147,6 +161,7 @@ bool MainWindow::Create(int showCmd) {
 
     LoadProfile();
     RefreshCameras();
+    RefreshVcamStatus();
     ShowWindow(hwnd_, showCmd);
     return true;
 }
@@ -166,6 +181,8 @@ void MainWindow::CreateControls() {
     hint_ = make(WC_STATICW, L"", SS_LEFT, kIdHint);
     privacy_ = make(WC_BUTTONW, L"Open camera privacy settings", BS_PUSHBUTTON | WS_TABSTOP, kIdPrivacy);
     ShowWindow(privacy_, SW_HIDE);
+    vcamStatus_ = make(WC_STATICW, L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, kIdVcamStatus);
+    vcamUse_ = make(WC_BUTTONW, L"Use this webcam for IXC Camera", BS_PUSHBUTTON | WS_TABSTOP, kIdVcamUse);
     preview_.Clear(L"Choose a camera and select Start preview.");
 }
 
@@ -174,7 +191,7 @@ void MainWindow::ApplyFont() {
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi_);
     font_ = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_}) {
+    for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_, vcamStatus_, vcamUse_}) {
         SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
 }
@@ -203,7 +220,7 @@ void MainWindow::Layout() {
     MoveWindow(startStop_, x, y, buttonW, rowH, TRUE);
 
     const bool privacyVisible = IsWindowVisible(privacy_) != FALSE;
-    const int bottomH = rowH * 2 + gap + (privacyVisible ? rowH + gap : 0);
+    const int bottomH = rowH * 3 + 2 * gap + (privacyVisible ? rowH + gap : 0);
     const int previewTop = y + rowH + gap;
     const int previewH = std::max(0, h - previewTop - bottomH - pad);
     MoveWindow(preview_.hwnd(), pad, previewTop, w - 2 * pad, previewH, TRUE);
@@ -213,7 +230,110 @@ void MainWindow::Layout() {
     by += rowH;
     MoveWindow(hint_, pad, by, w - 2 * pad, rowH, TRUE);
     by += rowH + gap;
-    if (privacyVisible) MoveWindow(privacy_, pad, by, Scale(240), rowH, TRUE);
+    if (privacyVisible) {
+        MoveWindow(privacy_, pad, by, Scale(240), rowH, TRUE);
+        by += rowH + gap;
+    }
+    // IXC Camera row: status text, then the "use this webcam" button on the right.
+    const int useW = Scale(230);
+    MoveWindow(vcamStatus_, pad, by, std::max(0, w - 2 * pad - useW - gap), rowH, TRUE);
+    MoveWindow(vcamUse_, w - pad - useW, by, useW, rowH, TRUE);
+}
+
+// ---- IXC Camera system camera ----------------------------------------------------------------------
+
+void MainWindow::RefreshVcamStatus() {
+    vcam_ = vcam::QueryStatus();
+    std::wstring text;
+    if (!vcam_.comRegistered || !vcam_.dllFileExists) {
+        text = L"IXC Camera is not installed. Run the IXC Camera installer to make it available to other apps.";
+    } else if (!vcam_.cameraPresent) {
+        text = L"IXC Camera is installed but not active. Choose a webcam and select \"Use this webcam for IXC Camera\".";
+    } else {
+        text = L"IXC Camera is available to other apps";
+        text += vcam_.wrappedCameraName.empty() ? L"." : L" and uses " + W(vcam_.wrappedCameraName) + L".";
+    }
+    SetWindowTextW(vcamStatus_, text.c_str());
+    UpdateVcamControls();
+}
+
+void MainWindow::UpdateVcamControls() {
+    const int sel = static_cast<int>(SendMessageW(camera_, CB_GETCURSEL, 0, 0));
+    bool enable = vcamProcess_ == nullptr && vcam_.comRegistered && vcam_.dllFileExists && sel >= 0 &&
+                  static_cast<size_t>(sel) < cameras_.size();
+    if (enable) {
+        const CameraInfo& c = cameras_[static_cast<size_t>(sel)];
+        // Only physical cameras can feed IXC Camera; it's already using this one if they match.
+        enable = !c.isSoftwareDevice && !(vcam_.cameraPresent && SameDevice(c.symbolicLink, vcam_.wrappedCameraLink));
+    }
+    EnableWindow(vcamUse_, enable);
+}
+
+void MainWindow::UseSelectedForIxcCamera() {
+    const int sel = static_cast<int>(SendMessageW(camera_, CB_GETCURSEL, 0, 0));
+    if (sel < 0 || static_cast<size_t>(sel) >= cameras_.size() || vcamProcess_) return;
+    const CameraInfo& cam = cameras_[static_cast<size_t>(sel)];
+    const std::filesystem::path tool = std::filesystem::path(vcam_.registeredDllPath).parent_path() / L"ixc_vcam.exe";
+    if (!std::filesystem::exists(tool)) {
+        SetWindowTextW(vcamStatus_, L"The IXC Camera installation is incomplete (ixc_vcam.exe is missing). Reinstall IXC Camera.");
+        return;
+    }
+    // The preview holds the webcam; release it so the change and apps can use it.
+    if (previewing_) StopPreview(L"Preview stopped while IXC Camera is being updated.");
+
+    const std::wstring args = L"register --camera \"" + cam.symbolicLink + L"\"";
+    SHELLEXECUTEINFOW sei{sizeof(sei)};
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.hwnd = hwnd_;
+    sei.lpVerb = L"runas";  // Windows shows its administrator approval prompt
+    sei.lpFile = tool.c_str();
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        const DWORD err = GetLastError();
+        SetWindowTextW(vcamStatus_, err == ERROR_CANCELLED ? L"No change made: administrator approval was declined."
+                                                           : W(Error{HRESULT_FROM_WIN32(err), "LaunchIxcVcam",
+                                                                     "IXC Camera could not start the camera update."}.Describe()).c_str());
+        return;
+    }
+    vcamProcess_ = sei.hProcess;
+    SetWindowTextW(vcamStatus_, (L"Switching IXC Camera to " + W(cam.name) + L"…").c_str());
+    UpdateVcamControls();
+    // Event-driven: a thread-pool wait fires once when the tool exits (no polling).
+    if (!RegisterWaitForSingleObject(&vcamWait_, vcamProcess_, &MainWindow::OnVcamProcessExit, this, INFINITE, WT_EXECUTEONLYONCE)) {
+        vcamWait_ = nullptr;
+        WaitForSingleObject(vcamProcess_, 30000);
+        DWORD code = 1;
+        GetExitCodeProcess(vcamProcess_, &code);
+        OnVcamDone(code);
+    }
+}
+
+void CALLBACK MainWindow::OnVcamProcessExit(void* ctx, BOOLEAN) {
+    auto* self = static_cast<MainWindow*>(ctx);
+    DWORD code = 1;
+    GetExitCodeProcess(self->vcamProcess_, &code);
+    PostMessageW(self->hwnd_, kVcamDoneMessage, code, 0);
+}
+
+void MainWindow::OnVcamDone(DWORD exitCode) {
+    if (vcamWait_) {
+        UnregisterWaitEx(vcamWait_, nullptr);  // fired once already; don't block
+        vcamWait_ = nullptr;
+    }
+    if (vcamProcess_) {
+        CloseHandle(vcamProcess_);
+        vcamProcess_ = nullptr;
+    }
+    RefreshVcamStatus();
+    if (exitCode != 0) {
+        const std::wstring msg = L"IXC Camera could not switch webcams (ixc_vcam exit code " + std::to_wstring(exitCode) +
+                                 L"). Details: %TEMP%\\ixc-install.log or run \"ixc_vcam status\".";
+        SetWindowTextW(vcamStatus_, msg.c_str());
+        log::Error("vcam", "ixc_vcam register failed with exit code " + std::to_string(exitCode));
+    } else {
+        log::Info("vcam", "IXC Camera now uses " + vcam_.wrappedCameraName);
+    }
 }
 
 // ---- profile ------------------------------------------------------------------------------------
@@ -506,11 +626,17 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case kIdCamera:
-                    if (HIWORD(wp) == CBN_SELCHANGE) OnCameraSelected();
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        OnCameraSelected();
+                        UpdateVcamControls();
+                    }
                     return 0;
                 case kIdStartStop:
                     if (previewing_) StopPreview(L"Preview stopped. The camera is released.");
                     else StartPreview();
+                    return 0;
+                case kIdVcamUse:
+                    UseSelectedForIxcCamera();
                     return 0;
                 case kIdPrivacy:
                     ShellExecuteW(hwnd_, L"open", L"ms-settings:privacy-webcam", nullptr, nullptr, SW_SHOWNORMAL);
@@ -531,6 +657,10 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
 
+        case kVcamDoneMessage:
+            OnVcamDone(static_cast<DWORD>(wp));
+            return 0;
+
         case kStateMessage:
             OnCaptureState(static_cast<CaptureState>(wp));
             return 0;
@@ -540,6 +670,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             else if (wp == kDeviceRefreshTimer) {
                 KillTimer(hwnd_, kDeviceRefreshTimer);
                 RefreshCameras();
+                RefreshVcamStatus();  // IXC Camera itself appears/disappears as a device
             }
             return 0;
 
@@ -560,6 +691,8 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                 session_.Reset();
             }
             if (devNotify_) UnregisterDeviceNotification(devNotify_);
+            if (vcamWait_) UnregisterWaitEx(vcamWait_, INVALID_HANDLE_VALUE);  // waits for an in-flight callback
+            if (vcamProcess_) CloseHandle(vcamProcess_);
             if (font_) DeleteObject(font_);
             PostQuitMessage(0);
             return 0;

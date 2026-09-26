@@ -22,11 +22,19 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - `tests/ui_smoke.ps1 -Exe build/release/src/app/IXCCamera.exe` drives the UI. It checks preview pixels numerically and never saves camera images (they may show the user).
 - `ixc_probe --capture N` / `--cycles N` for measurements. Record results in docs/performance.md with the machine name.
 
+## IXC Camera system camera (Phase 4)
+- Install/upgrade: `scripts/install-ixc.ps1 -BuildDir build/release` (elevated). Uninstall: `-Uninstall`. Status: `ixc_vcam status`.
+- Always test the source DLL in-process first (`ixc_probe --source-test <dll>`). A crash inside Frame Server takes down every camera on the machine.
+- After an upgrade, Frame Server may still run the old DLL. On the dev machine, restart it (`Restart-Service FrameServer`) only when no camera app is running. The installer never does this.
+- Trace the source: `scripts/trace-vcam.ps1 -Start` … `-Stop`.
+- PowerShell 5.1: `R` is an alias (Invoke-History), and `Start-Process -ArgumentList @(...)` doesn't quote arguments containing spaces. Pass one quoted string.
+
 ## Layout
 - `src/common` strings, JSON, file I/O · `src/diagnostics` log, errors · `src/profiles` profile model/store
 - `src/camera` enumeration, format selection, capture session, stats, reconnect · `src/processing` colour conversion
-- `src/app` Win32 UI + preview · `src/tools/ixc_probe` diagnostics
-- Phases 1–3 are done. Next is Phase 4 (Windows 11 software virtual camera via MFCreateVirtualCamera). The open questions are in docs/architecture.md.
+- `src/app` Win32 UI + preview · `src/tools/ixc_probe` diagnostics · `src/tools/ixc_vcam` registration
+- `src/virtual_camera/source` IXCCameraSource.dll (Activate → MediaSource → MediaStream::ProcessSample hook) · `src/virtual_camera/registration.*`
+- Phases 1–4 are done. Next is Phase 5 (basic processing in ProcessSample: crop, mirror, colour, sharpness, zoom). The first decision is how settings reach the source inside Frame Server (docs/architecture.md, open question 1).
 
 ## Facts learned on the dev machine
 - The Lenovo FHD Webcam sends 1080p30/720p30 as MJPG. Its "NV12 30 FPS" modes are decoded by Windows Frame Server.

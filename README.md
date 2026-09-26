@@ -2,7 +2,7 @@
 
 A lightweight, local-first webcam enhancer for Windows 11. IXC Camera takes a normal webcam, applies image correction and optional face-aware effects, and exposes the result as a system camera called **IXC Camera**. Standard Windows camera apps can then select it like any hardware camera.
 
-> **Status: early development (v0.2.0, Phase 3 of 14).** Camera enumeration, format selection, capture with automatic reconnect, and a live preview work. The **IXC Camera system camera doesn't exist yet** (Phase 4), and there are no effects and no installer. See [CHANGELOG.md](CHANGELOG.md) and [docs/performance.md](docs/performance.md).
+> **Status: early development (v0.3.0, Phase 4 of 14).** **IXC Camera works as a selectable system camera** in Media Foundation and DirectShow apps. It currently passes the webcam picture through unchanged; effects come next. Install with `scripts/install-ixc.ps1` (administrator). There's no packaged installer yet. See [CHANGELOG.md](CHANGELOG.md), [docs/compatibility.md](docs/compatibility.md) and [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
 ## Design goals
 

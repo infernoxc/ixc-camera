@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0 — Phase 4 IXC Camera system camera (2026-09-26)
+
+### Added
+- **`IXCCameraSource.dll`**: Media Foundation virtual camera source, loaded by Windows Frame Server only while an app uses IXC Camera. It wraps the physical webcam that Frame Server hands over, exposes the webcam's real NV12 modes, forwards camera controls, and has a single per-frame hook for the future image pipeline. User mode only, no driver.
+- `ixc_vcam` tool: `status`, `register [--camera …]`, `unregister`.
+- `scripts/install-ixc.ps1`: development installer and uninstaller. It checks prerequisites, installs to Program Files, rolls back on failure, records a SHA-256 manifest, and deletes in-use DLLs at reboot instead of restarting the camera service.
+- App: IXC Camera status line and a **"Use this webcam for IXC Camera"** button (asks for administrator approval).
+- `ixc_probe`: `--source-test` (loads the DLL in-process), `--list-dshow`, `--dshow-capture`.
+- `scripts/trace-vcam.ps1`: captures the source's TraceLogging events.
+- CTest: 4 IXC Camera tests (in-process source, Media Foundation capture, DirectShow capture, open/close cycles); skipped when not installed.
+- `docs/compatibility.md`, `KNOWN_LIMITATIONS.md`.
+
+### Fixed
+- **Capture reconnect retried forever** when a camera opened but failed every read (e.g. busy with another app). The backoff now resets only after a real frame arrives.
+- `MF_E_HW_MFT_FAILED_START_STREAMING` is now classified as "camera busy" (transient), not "device lost".
+- Build: SDK headers are now treated as external (`/external:W0`), so `/W4 /WX` applies to IXC code only.
+
+### Found and fixed during Phase 4 testing (before release)
+- The source published its stream deselected, so Source-Reader apps got `E_INVALIDARG` on start.
+- A second session subscribed twice to the physical stream's events (`MF_E_MULTIPLE_SUBSCRIBERS`).
+- The installer's reboot-deletion call silently did nothing (PowerShell passed `""` for null), and its rollback stopped at the first failing step.
+
+### Verified on the developer machine
+- 59/59 unit tests; 9/9 CTest suites (4 physical-camera, 4 IXC Camera); UI smoke test 13/13.
+- IXC Camera works through Media Foundation and DirectShow; install, uninstall, reinstall and in-use upgrade all verified. See `docs/compatibility.md` and `docs/performance.md`.
+
+### Not verified
+- OBS and Discord UI (installed, need a manual check), reboot persistence, unplug during an IXC session, sleep/wake, the UAC button flow, low-end hardware.
+
 ## 0.2.0 — Phase 3 camera capture (2026-09-26)
 
 ### Added

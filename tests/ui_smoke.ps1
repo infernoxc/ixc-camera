@@ -55,6 +55,7 @@ public static class Ui {
 
 $BM_CLICK = 0x00F5; $WM_CLOSE = 0x0010
 $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 106; $IdHint = 107
+$IdVcamStatus = 109; $IdVcamUse = 110   # must match ControlId in src/app/main.cpp
 $failures = @()
 function Check([bool]$ok, [string]$what) { if ($ok) { "  PASS  $what" } else { "  FAIL  $what"; $script:failures += $what } }
 
@@ -74,6 +75,14 @@ $status = [Ui]::GetDlgItem($hwnd, $IdStatus); $hint = [Ui]::GetDlgItem($hwnd, $I
 if ([Ui]::ComboCount($camera) -eq 0) { [Ui]::PostMessageW($hwnd, $WM_CLOSE, 0, 0) | Out-Null; 'SKIP: no camera'; exit 77 }
 Check ([Ui]::ComboCount($format) -gt 1) 'format list populated from the camera'
 Check ([Ui]::ComboText($format) -like 'Auto*') 'Auto format preselected'
+$vcamStatus = [Ui]::GetDlgItem($hwnd, $IdVcamStatus); $vcamUse = [Ui]::GetDlgItem($hwnd, $IdVcamUse)
+$vcamText = [Ui]::Text($vcamStatus)
+"ixc cam: $vcamText  [button '$([Ui]::Text($vcamUse))' enabled: $([Ui]::IsWindowEnabled($vcamUse))]"
+Check ($vcamText -like 'IXC Camera*') 'IXC Camera status line shown'
+if ($vcamText -like '*available to other apps and uses*') {
+    # The selected webcam is the one IXC Camera already uses, so the button must be disabled.
+    Check (-not [Ui]::IsWindowEnabled($vcamUse)) '"Use this webcam" disabled for the webcam IXC Camera already uses'
+}
 
 $idle = (Get-Process -Id $p.Id); $idle.Refresh()
 $idleMb = $idle.PrivateMemorySize64 / 1MB

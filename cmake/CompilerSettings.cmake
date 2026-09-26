@@ -21,6 +21,7 @@ set(IXC_CXX_FLAGS
     /EHsc
     /sdl           # additional security checks
     /Zi            # PDBs for every config (symbols are not shipped in the installer)
+    /external:anglebrackets /external:W0  # SDK headers (<...>) are not ours: warnings apply to IXC code only
     /w14265        # class has virtual functions but non-virtual destructor
     /w14062        # enumerator not handled in switch
     /w14242 /w14254 /w14263 /w14287 /w14296 /w14311 /w14545 /w14546 /w14547

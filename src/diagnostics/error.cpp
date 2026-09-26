@@ -53,13 +53,15 @@ ErrorClass ClassifyHResult(HRESULT hr) {
             return ErrorClass::AccessDenied;
 
         case MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED:
-        case MF_E_HW_MFT_FAILED_START_STREAMING:
         case HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED):
         case HRESULT_FROM_WIN32(ERROR_DEVICE_REMOVED):
         case HRESULT_FROM_WIN32(ERROR_GEN_FAILURE):
             return ErrorClass::DeviceLost;
 
         case MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED:
+        // Observed when another app already streams the physical camera in a different mode:
+        // the camera is busy, not gone.
+        case MF_E_HW_MFT_FAILED_START_STREAMING:
         case HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION):
         case HRESULT_FROM_WIN32(ERROR_BUSY):
         case HRESULT_FROM_WIN32(ERROR_TIMEOUT):

@@ -33,8 +33,31 @@ This document describes the target architecture. Items marked **(planned)** don'
 - **Never reset silently.** Profile loading clamps bad values and returns a warning for every change. An unreadable profile is reported and left on disk, never overwritten.
 - **Actionable errors.** Failures carry an HRESULT, the system message and a stable stage name (`ixc::Error::Describe()`).
 
-## Open design questions (to be settled in Phase 4)
+## IXC Camera system camera (Phase 4, implemented)
 
-1. **Where the media source reads its profile.** Frame Server hosts custom media sources in a service context, which may not be able to read the user's `%LOCALAPPDATA%`. Candidates are passing the active profile path or contents at registration time, or a per-user ACL'd location under `%ProgramData%\IXC Camera`. This must be verified on the machine, not assumed.
-2. **Registration lifetime.** Session vs. system lifetime and current-user vs. all-users (`MFVirtualCameraLifetime`, `MFVirtualCameraAccess`). The goal is that the camera survives reboots without the UI running.
-3. **Sharing the physical webcam.** How IXC behaves when another app already holds the Lenovo camera (Frame Server shared mode vs. exclusive control).
+`IXCCameraSource.dll` (190 KB) is an in-process COM server. Its registered class is an `IMFActivate`. Windows Frame Server (the camera service) creates it when an app opens IXC Camera.
+
+```
+app opens "IXC Camera (Windows Virtual Camera)"
+  → Frame Server loads IXCCameraSource.dll, creates Activate, sets attributes
+  → Activate::ActivateObject
+       asks for MF_VIRTUALCAMERA_ASSOCIATED_CAMERA_SOURCES (build 22621+): Frame Server hands over
+       the physical camera it already manages (fallback: open by stored symbolic link)
+  → MediaSource wraps it: one colour stream, NV12 types only, camera controls (IKsControl) forwarded
+  → app selects a mode → Start → physical stream starts → each frame passes MediaStream::ProcessSample
+       (identity today; the image pipeline plugs in here)
+  → app stops → physical stream stops; the service drops back to 0% CPU
+```
+
+Decisions, verified on the dev machine:
+- **Registration**: `MFCreateVirtualCamera(SoftwareCameraSource, Lifetime_System, Access_AllUsers, "IXC Camera", CLSID)`, then `AddDeviceSourceInfo(<physical link>)` and `Start`. This is done once by the installer (admin). No IXC process runs afterwards. Removal calls `Remove()`.
+- **Why wrap through Frame Server**: the physical webcam stays managed by Windows, and switching between the physical camera and IXC Camera is instant and reliable (tested). IXC never opens the device exclusively on its own.
+- **Why NV12 only**: every exposed mode must be processable by IXC effects. MJPG is decoded by Windows anyway.
+- **Stream published as selected**: apps relying on the default selection (Source Reader) otherwise start with no stream. This was found and fixed during testing.
+- **No file logging in the service**: TraceLogging provider `IXC.Camera.Source` ({6880FEE1-8B41-4322-ACF6-E6C1BF585B50}), captured with `scripts/trace-vcam.ps1`.
+- **Footprint**: `%ProgramFiles%\IXC Camera\`, `HKLM\Software\Classes\CLSID\{3011A045-BC7A-469D-86D0-2800938E32BF}`, `HKLM\Software\IXC Camera` (records the wrapped webcam, since Windows doesn't expose it). Nothing else.
+
+## Open design questions
+
+1. **Where the media source reads its settings** (needed once effects exist, Phase 5+). The source runs in the Frame Server service account and can't read the user's `%LOCALAPPDATA%`. Candidates: settings passed as virtual-camera attributes at registration, or a read-only copy under `%ProgramData%\IXC Camera` written by the app. To be decided and verified in Phase 5.
+2. **Processing a webcam another app controls** (Windows shared mode, `IMFSensorDevice::SetSensorDeviceMode(Shared)`). This would let IXC Camera run while another app uses the physical webcam, at that app's format. Deferred.

@@ -125,6 +125,7 @@ private:
     CaptureState state_ = CaptureState::Stopped;
     Error lastError_;
     bool stopRequested_ = true;
+    bool awaitingFirstFrame_ = false;  // backoff resets only after a real frame
     CaptureFormat activeFormat_;
     FrameLayout layout_;
     ReconnectPolicy policy_;

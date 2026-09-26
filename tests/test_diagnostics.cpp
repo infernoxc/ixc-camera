@@ -29,6 +29,8 @@ IXC_TEST(Error_ClassifiesCameraFailures) {
     IXC_CHECK(ClassifyHResult(E_ACCESSDENIED) == ErrorClass::AccessDenied);
     IXC_CHECK(ClassifyHResult(MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED) == ErrorClass::DeviceLost);
     IXC_CHECK(ClassifyHResult(MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED) == ErrorClass::Transient);
+    IXC_CHECK(ClassifyHResult(MF_E_HW_MFT_FAILED_START_STREAMING) == ErrorClass::Transient);  // camera busy
+    IXC_CHECK(ClassifyHResult(HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION)) == ErrorClass::Transient);
     IXC_CHECK(ClassifyHResult(MF_E_INVALIDMEDIATYPE) == ErrorClass::Unsupported);
     IXC_CHECK(ClassifyHResult(E_POINTER) == ErrorClass::Fatal);
     IXC_CHECK_EQ(ToString(ErrorClass::DeviceLost), std::string_view("DeviceLost"));

@@ -25,5 +25,6 @@ add_library(ixc_processing STATIC
     processing/color.cpp)
 target_link_libraries(ixc_processing PUBLIC ixc_core)
 
+add_subdirectory(virtual_camera)
 add_subdirectory(app)
 add_subdirectory(tools)

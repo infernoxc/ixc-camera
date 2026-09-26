@@ -333,6 +333,7 @@ Error CaptureSession::OpenLocked() {
         reader_ = reader;
         source_ = source;
         activeFormat_ = chosen;
+        awaitingFirstFrame_ = true;
         layout_ = layout;
         SetState(CaptureState::Streaming, {});
     }
@@ -409,6 +410,13 @@ STDMETHODIMP CaptureSession::OnReadSample(HRESULT hrStatus, DWORD, DWORD flags, 
             stats_.OnFrame(arrivalUs, timestamp / 10, latencyUs);
         }
         frames_.Put(ComPtr<IMFSample>(sample));
+        {
+            std::lock_guard lock(mu_);
+            if (awaitingFirstFrame_) {
+                awaitingFirstFrame_ = false;
+                policy_.Reset();  // the stream is genuinely healthy again
+            }
+        }
         std::lock_guard lock(listenerMu_);
         if (listener_) listener_->OnFrameAvailable();
     }
@@ -484,10 +492,8 @@ void CaptureSession::AttemptReconnect() {
     }
     const Error err = OpenLocked();
     if (SUCCEEDED(err.hr)) {
-        {
-            std::lock_guard lock(mu_);
-            policy_.Reset();
-        }
+        // The backoff is reset only when a frame actually arrives (OnReadSample). A camera that
+        // opens but then fails every read (e.g. held by another app) must still run out of retries.
         Notify(CaptureState::Streaming, {});
         return;
     }

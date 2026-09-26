@@ -49,6 +49,29 @@ On this machine the CPU differences sit within background noise. Decoding adds a
 | UI process CPU previewing (~20 FPS) | 3.7% of one core |
 | Minimize | stops capture and releases the camera |
 
+## Phase 4: IXC Camera system camera, pass-through (2026-09-26)
+
+Same machine and camera. IXC's source runs inside the Windows camera service (Frame Server), so its cost is measured on that service process. Each streaming row is 8 s at 1080p30 NV12, with the camera delivering ~20–25 FPS in room light.
+
+| Frame Server process | CPU (one core) | Private memory | Threads |
+|---|---|---|---|
+| Idle, no app using any camera | 0.00% | 7.4 MB | 17 |
+| App reads the **Lenovo directly** as NV12 (Windows decodes MJPG) | 9.72% | 51.5 MB | 26 |
+| App reads **IXC Camera** (NV12) | 11.25% | 51.6 MB | 24 |
+| App reads the Lenovo as MJPG (no decode) | 1.34% | 48.1 MB | 22 |
+| Right after the app closed | 0.19% | 7.6 MB | 18 |
+| ~1 minute after the app closed | 0.00% | 7.6 MB | 18 |
+
+**IXC's pass-through costs about 1.5% of one core and no extra memory** over reading the webcam directly in the same format. The rest is Windows' MJPG → NV12 decode, which any app asking for NV12 pays for.
+
+| Measurement | Value |
+|---|---|
+| Latency, capture → app, through IXC Camera | 37.4 ms mean (37.5 ms direct: no measurable added latency) |
+| Open → first frame, IXC Camera | 202 ms mean, 209 ms max (30 cycles) |
+| App process growth over 30 IXC cycles | +0.10 MB, +2 handles |
+| Frame Server growth over 30 cycles | +99 handles / +1.1 MB via IXC vs **+97 handles / +0.7 MB direct**. This is Windows bookkeeping, not IXC |
+| IXCCameraSource.dll size | 190 KB (static CRT, no dependencies beyond Windows) |
+
 ## Pending (not measured)
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
 - 30-minute burn-in: scheduled for Phase 10.

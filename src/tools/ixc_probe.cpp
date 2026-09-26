@@ -19,7 +19,10 @@
 #include "diagnostics/error.h"
 
 #include <windows.h>
+#include <dshow.h>
 #include <mfapi.h>
+#include <mferror.h>
+#include <mfreadwrite.h>
 #include <psapi.h>
 
 #include <algorithm>
@@ -41,13 +44,14 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, Capture, Cycles } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
     FormatRequest request{1920, 1080, 30};
     OutputFormat output = OutputFormat::Nv12;
     std::string subtype;  // restrict native mode selection, e.g. "MJPG"
+    std::string sourceDll;  // --source-test
     bool requireCamera = false;
 };
 
@@ -56,6 +60,10 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (a == "--list") o.mode = Options::Mode::List;
+        else if (a == "--list-dshow") o.mode = Options::Mode::ListDirectShow;
+        else if (a == "--dshow-capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::DirectShowCapture; o.seconds = std::atoi(v); }
+        else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
+        else if (a == "--seconds") { const char* v = next(); if (!v) return false; o.seconds = std::atoi(v); }
         else if (a == "--capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::Capture; o.seconds = std::atoi(v); }
         else if (a == "--cycles") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::Cycles; o.cycles = std::atoi(v); }
         else if (a == "--camera") { const char* v = next(); if (!v) return false; o.camera = v; }
@@ -136,7 +144,7 @@ public:
 
     void OnFrameAvailable() override { SetEvent(event_); }
     void OnStateChanged(CaptureState s, const Error& e) override {
-        std::printf("  [state] %s%s%s\n", ToString(s), FAILED(e.hr) ? " — " : "", FAILED(e.hr) ? e.Describe().c_str() : "");
+        std::printf("  [state] %s%s%s\n", ToString(s), FAILED(e.hr) ? " - " : "", FAILED(e.hr) ? e.Describe().c_str() : "");
         std::fflush(stdout);
     }
 
@@ -188,8 +196,9 @@ bool PickCamera(const Options& o, CameraInfo& out, int& exitCode) {
         for (const auto& c : cams) {
             if (c.name.find(o.camera) != std::string::npos) { out = c; return true; }
         }
-        std::printf("error: no camera matches \"%s\"\n", o.camera.c_str());
-        exitCode = 1;
+        // Not present (e.g. IXC Camera not installed on a CI runner): a skip, unless required.
+        std::printf("no camera matches \"%s\"\n", o.camera.c_str());
+        exitCode = o.requireCamera ? 1 : kExitSkip;
         return false;
     }
     for (const auto& c : cams) {
@@ -198,6 +207,288 @@ bool PickCamera(const Options& o, CameraInfo& out, int& exitCode) {
     std::printf("no physical camera found\n");
     exitCode = o.requireCamera ? 1 : kExitSkip;
     return false;
+}
+
+bool Resolve(const Options& o, CaptureConfig& cfg, int& exitCode);
+
+// Loads the IXC media source DLL directly (no registration, no Frame Server), activates it
+// against a physical camera through the symbolic-link fallback, and reads frames through it.
+// This validates the source before it's ever loaded into the shared Windows camera service.
+int SourceTest(const Options& o) {
+    CaptureConfig cfg;
+    int exitCode = 0;
+    if (!Resolve(o, cfg, exitCode)) return exitCode;
+
+    wchar_t fullPath[MAX_PATH];
+    if (!GetFullPathNameW(Utf8ToWide(o.sourceDll).c_str(), MAX_PATH, fullPath, nullptr)) return 1;
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR requires an absolute path.
+    HMODULE dll = LoadLibraryExW(fullPath, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dll) {
+        std::printf("error: cannot load %s (%lu)\n", o.sourceDll.c_str(), GetLastError());
+        return 1;
+    }
+    using GetClassObjectFn = HRESULT(STDAPICALLTYPE*)(REFCLSID, REFIID, void**);
+    auto getClassObject = reinterpret_cast<GetClassObjectFn>(GetProcAddress(dll, "DllGetClassObject"));
+    // {3011A045-BC7A-469D-86D0-2800938E32BF} and the physical-link attribute, as in vcam_ids.h
+    const GUID clsid = {0x3011a045, 0xbc7a, 0x469d, {0x86, 0xd0, 0x28, 0x00, 0x93, 0x8e, 0x32, 0xbf}};
+    const GUID attrLink = {0xcb5a6a96, 0x8cbe, 0x498b, {0x8b, 0x00, 0x95, 0x13, 0x88, 0x43, 0x43, 0xfb}};
+
+    int rc = 1;
+    {
+        ComPtr<IClassFactory> factory;
+        ComPtr<IMFActivate> activate;
+        ComPtr<IMFMediaSource> source;
+        ComPtr<IMFSourceReader> reader;
+        HRESULT hr = getClassObject ? getClassObject(clsid, IID_PPV_ARGS(&factory)) : E_NOINTERFACE;
+        if (SUCCEEDED(hr)) hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&activate));
+        if (SUCCEEDED(hr)) hr = activate->SetString(attrLink, cfg.symbolicLink.c_str());
+        if (SUCCEEDED(hr)) hr = activate->ActivateObject(IID_PPV_ARGS(&source));
+        if (FAILED(hr)) {
+            std::printf("error: %s\n", Error{hr, "ActivateSource", "The IXC media source could not be activated."}.Describe().c_str());
+        } else {
+            ComPtr<IMFAttributes> ra;
+            MFCreateAttributes(&ra, 1);
+            ra->SetUINT32(MF_LOW_LATENCY, TRUE);
+            hr = MFCreateSourceReaderFromMediaSource(source.Get(), ra.Get(), &reader);
+            std::vector<CaptureFormat> exposed;
+            for (DWORD i = 0; SUCCEEDED(hr) && i < 1024; ++i) {
+                ComPtr<IMFMediaType> t;
+                if (FAILED(reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &t))) break;
+                CaptureFormat f;
+                if (FormatFromMediaType(t.Get(), f)) exposed.push_back(f);
+            }
+            size_t nonNv12 = 0;
+            for (const auto& f : exposed) if (!IsEqualGUID(f.subtype, MFVideoFormat_NV12)) ++nonNv12;
+            const auto distinct = NormalizeFormats(exposed);
+            std::printf("source exposes %zu media types (%zu distinct), %zu not NV12\n", exposed.size(), distinct.size(), nonNv12);
+            for (size_t i = 0; i < distinct.size() && i < 6; ++i) std::printf("  %s\n", Describe(distinct[i]).c_str());
+            if (distinct.size() > 6) std::printf("  ...\n");
+
+            // Select the requested mode among the exposed ones and stream synchronously.
+            std::optional<size_t> pick = SelectFormat(distinct, o.request);
+            ComPtr<IMFMediaType> chosen;
+            for (DWORD i = 0; pick && i < 1024; ++i) {
+                ComPtr<IMFMediaType> t;
+                if (FAILED(reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &t))) break;
+                CaptureFormat f;
+                if (FormatFromMediaType(t.Get(), f) && f.SameMode(distinct[*pick])) { chosen = t; break; }
+            }
+            if (chosen) hr = reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, chosen.Get());
+            else hr = MF_E_INVALIDMEDIATYPE;
+
+            std::uint64_t frames = 0, errors = 0;
+            double lumaMean = -1;
+            LARGE_INTEGER f0, t0, t1;
+            QueryPerformanceFrequency(&f0);
+            QueryPerformanceCounter(&t0);
+            t1 = t0;  // the loop may not run if mode selection failed
+            const ProcessSample before = SampleProcess();
+            while (SUCCEEDED(hr)) {
+                QueryPerformanceCounter(&t1);
+                if (static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f0.QuadPart) >= o.seconds) break;
+                DWORD flags = 0;
+                LONGLONG ts = 0;
+                ComPtr<IMFSample> sample;
+                const HRESULT rhr = reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &ts, &sample);
+                if (FAILED(rhr) || (flags & MF_SOURCE_READERF_ERROR)) { ++errors; hr = FAILED(rhr) ? rhr : E_FAIL; break; }
+                if (!sample) continue;
+                ++frames;
+                ComPtr<IMFMediaBuffer> buf;
+                BYTE* data = nullptr;
+                DWORD len = 0;
+                if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buf)) && SUCCEEDED(buf->Lock(&data, nullptr, &len))) {
+                    const DWORD n = std::min<DWORD>(len, distinct[*pick].width * distinct[*pick].height);
+                    std::uint64_t sum = 0, cnt = 0;
+                    for (DWORD i = 0; i < n; i += 64) { sum += data[i]; ++cnt; }
+                    if (cnt) lumaMean = static_cast<double>(sum) / static_cast<double>(cnt);
+                    buf->Unlock();
+                }
+            }
+            const ProcessSample after = SampleProcess();
+            const double secs = static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f0.QuadPart);
+            if (pick) std::printf("streamed %s through the IXC source\n", Describe(distinct[*pick]).c_str());
+            std::printf("frames: %llu in %.1f s (%.2f fps), errors: %llu, luma mean %.1f\n", static_cast<unsigned long long>(frames), secs,
+                        secs > 0 ? static_cast<double>(frames) / secs : 0.0, static_cast<unsigned long long>(errors), lumaMean);
+            std::printf("private bytes: %.1f MB -> %.1f MB\n", before.privateBytes / 1048576.0, after.privateBytes / 1048576.0);
+            if (FAILED(hr)) std::printf("stream error: %s\n", Error{hr, "ReadSample", "Streaming through the IXC source failed."}.Describe().c_str());
+
+            const bool pass = SUCCEEDED(hr) && frames > 0 && nonNv12 == 0 && !exposed.empty();
+            std::printf("RESULT: %s\n", pass ? "PASS" : "FAIL");
+            rc = pass ? 0 : 1;
+        }
+        reader.Reset();
+        if (source) source->Shutdown();
+        if (activate) activate->ShutdownObject();
+    }
+    // Leave the DLL loaded: MF work queues may still reference it briefly (process exits next).
+    return rc;
+}
+
+// ---- DirectShow capture test (how OBS "Video Capture Device" and older apps read cameras) ------
+// qedit.h is no longer in the SDK; the Sample Grabber interfaces are declared here. The filter
+// itself still ships with Windows (qedit.dll).
+MIDL_INTERFACE("0579154A-2B53-4994-B0D0-E773148EFF85")
+ISampleGrabberCB : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SampleCB(double time, IMediaSample* sample) = 0;
+    virtual HRESULT STDMETHODCALLTYPE BufferCB(double time, BYTE* buffer, long length) = 0;
+};
+MIDL_INTERFACE("6B652FFF-11FE-4fce-92AD-0266B5D7C78F")
+ISampleGrabber : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetOneShot(BOOL oneShot) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetMediaType(const AM_MEDIA_TYPE* type) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetConnectedMediaType(AM_MEDIA_TYPE* type) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetBufferSamples(BOOL buffer) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCurrentBuffer(long* size, long* buffer) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetCurrentSample(IMediaSample** sample) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetCallback(ISampleGrabberCB* callback, long whichMethod) = 0;
+};
+constexpr CLSID kClsidSampleGrabber = {0xC1F400A0, 0x3F08, 0x11d3, {0x9F, 0x0B, 0x00, 0x60, 0x08, 0x03, 0x9E, 0x37}};
+constexpr CLSID kClsidNullRenderer = {0xC1F400A4, 0x3F08, 0x11d3, {0x9F, 0x0B, 0x00, 0x60, 0x08, 0x03, 0x9E, 0x37}};
+
+class GrabberCounter final : public ISampleGrabberCB {
+public:
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(ISampleGrabberCB)) { *ppv = this; return S_OK; }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return 2; }   // stack object; lifetime managed by the caller
+    STDMETHODIMP_(ULONG) Release() override { return 1; }
+    STDMETHODIMP SampleCB(double, IMediaSample* s) override {
+        ++frames;
+        BYTE* p = nullptr;
+        if (s && SUCCEEDED(s->GetPointer(&p)) && p) {
+            const long n = s->GetActualDataLength();
+            std::uint64_t sum = 0, cnt = 0;
+            for (long i = 0; i < n; i += 64) { sum += p[i]; ++cnt; }
+            if (cnt) meanByte = static_cast<double>(sum) / static_cast<double>(cnt);
+        }
+        return S_OK;
+    }
+    STDMETHODIMP BufferCB(double, BYTE*, long) override { return S_OK; }
+    std::atomic<std::uint64_t> frames{0};
+    std::atomic<double> meanByte{-1};
+};
+
+int DirectShowCapture(const Options& o) {
+    const std::string want = o.camera.empty() ? "IXC Camera" : o.camera;
+    ComPtr<ICreateDevEnum> devEnum;
+    ComPtr<IEnumMoniker> monikers;
+    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum));
+    if (SUCCEEDED(hr)) hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &monikers, 0);
+    if (hr != S_OK) { std::printf("error: no DirectShow video devices\n"); return 1; }
+
+    ComPtr<IBaseFilter> source;
+    std::string name;
+    ComPtr<IMoniker> m;
+    while (!source && monikers->Next(1, &m, nullptr) == S_OK) {
+        ComPtr<IPropertyBag> bag;
+        VARIANT v;
+        VariantInit(&v);
+        if (SUCCEEDED(m->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&bag))) && SUCCEEDED(bag->Read(L"FriendlyName", &v, nullptr)) &&
+            v.vt == VT_BSTR && WideToUtf8(v.bstrVal).find(want) != std::string::npos) {
+            name = WideToUtf8(v.bstrVal);
+            hr = m->BindToObject(nullptr, nullptr, IID_PPV_ARGS(&source));
+            if (FAILED(hr)) std::printf("error: %s\n", Error{hr, "BindCaptureFilter", "Could not create the DirectShow filter."}.Describe().c_str());
+        }
+        VariantClear(&v);
+        m.Reset();
+    }
+    if (!source) {
+        if (name.empty()) {  // not present at all: skip unless required
+            std::printf("DirectShow device \"%s\" not found\n", want.c_str());
+            return o.requireCamera ? 1 : kExitSkip;
+        }
+        return 1;  // present but the filter couldn't be created (error printed above)
+    }
+
+    ComPtr<IGraphBuilder> graph;
+    ComPtr<ICaptureGraphBuilder2> builder;
+    ComPtr<IBaseFilter> grabberFilter, nullRenderer;
+    ComPtr<ISampleGrabber> grabber;
+    ComPtr<IMediaControl> control;
+    GrabberCounter counter;
+    const char* stage = "CreateGraph";
+    hr = CoCreateInstance(CLSID_FilterGraph, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&graph));
+    if (SUCCEEDED(hr)) hr = CoCreateInstance(CLSID_CaptureGraphBuilder2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&builder));
+    if (SUCCEEDED(hr)) hr = builder->SetFiltergraph(graph.Get());
+    if (SUCCEEDED(hr)) { stage = "AddFilters"; hr = graph->AddFilter(source.Get(), L"Camera"); }
+    if (SUCCEEDED(hr)) hr = CoCreateInstance(kClsidSampleGrabber, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&grabberFilter));
+    if (SUCCEEDED(hr)) hr = grabberFilter.As(&grabber);
+    if (SUCCEEDED(hr)) {
+        AM_MEDIA_TYPE mt{};
+        mt.majortype = MEDIATYPE_Video;
+        hr = grabber->SetMediaType(&mt);
+    }
+    if (SUCCEEDED(hr)) hr = grabber->SetCallback(&counter, 0);
+    if (SUCCEEDED(hr)) hr = graph->AddFilter(grabberFilter.Get(), L"Grabber");
+    if (SUCCEEDED(hr)) hr = CoCreateInstance(kClsidNullRenderer, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&nullRenderer));
+    if (SUCCEEDED(hr)) hr = graph->AddFilter(nullRenderer.Get(), L"Null");
+    if (SUCCEEDED(hr)) { stage = "RenderStream"; hr = builder->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, source.Get(), grabberFilter.Get(), nullRenderer.Get()); }
+    if (SUCCEEDED(hr)) hr = graph.As(&control);
+    if (SUCCEEDED(hr)) { stage = "Run"; hr = control->Run(); }
+    if (FAILED(hr)) {
+        std::printf("camera: %s\nerror: %s\nRESULT: FAIL\n", name.c_str(), Error{hr, stage, "DirectShow capture failed."}.Describe().c_str());
+        if (control) control->Stop();
+        return 1;
+    }
+
+    AM_MEDIA_TYPE connected{};
+    std::string fmt = "unknown";
+    if (SUCCEEDED(grabber->GetConnectedMediaType(&connected))) {
+        if (connected.formattype == FORMAT_VideoInfo && connected.pbFormat && connected.cbFormat >= sizeof(VIDEOINFOHEADER)) {
+            const auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%ldx%ld %s", vih->bmiHeader.biWidth, std::labs(vih->bmiHeader.biHeight),
+                          SubtypeName(connected.subtype).c_str());
+            fmt = buf;
+        }
+        if (connected.cbFormat) CoTaskMemFree(connected.pbFormat);
+        if (connected.pUnk) connected.pUnk->Release();
+    }
+    Sleep(static_cast<DWORD>(o.seconds) * 1000);
+    control->Stop();
+    const auto frames = counter.frames.load();
+    std::printf("camera: %s (DirectShow)\nconnected format: %s\nframes: %llu in %d s (%.2f fps), sample value mean %.1f\n", name.c_str(),
+                fmt.c_str(), static_cast<unsigned long long>(frames), o.seconds, static_cast<double>(frames) / o.seconds,
+                counter.meanByte.load());
+    std::printf("RESULT: %s\n", frames > 0 ? "PASS" : "FAIL");
+    return frames > 0 ? 0 : 1;
+}
+
+// Video capture devices as DirectShow applications (OBS, many conferencing apps) see them.
+int ListDirectShow() {
+    ComPtr<ICreateDevEnum> devEnum;
+    HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum));
+    if (FAILED(hr)) {
+        std::printf("error: %s\n", Error{hr, "CreateDevEnum", "DirectShow device enumeration unavailable."}.Describe().c_str());
+        return 1;
+    }
+    ComPtr<IEnumMoniker> monikers;
+    hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &monikers, 0);
+    int n = 0;
+    std::printf("DirectShow video input devices:\n");
+    if (hr == S_OK) {
+        ComPtr<IMoniker> m;
+        while (monikers->Next(1, &m, nullptr) == S_OK) {
+            ComPtr<IPropertyBag> bag;
+            if (SUCCEEDED(m->BindToStorage(nullptr, nullptr, IID_PPV_ARGS(&bag)))) {
+                VARIANT name, path;
+                VariantInit(&name);
+                VariantInit(&path);
+                bag->Read(L"FriendlyName", &name, nullptr);
+                bag->Read(L"DevicePath", &path, nullptr);
+                std::printf("  [%d] %s\n      %s\n", n, name.vt == VT_BSTR ? WideToUtf8(name.bstrVal).c_str() : "?",
+                            path.vt == VT_BSTR ? WideToUtf8(path.bstrVal).c_str() : "(no device path)");
+                VariantClear(&name);
+                VariantClear(&path);
+            }
+            ++n;
+            m.Reset();
+        }
+    }
+    std::printf("total: %d\n", n);
+    return 0;
 }
 
 int List() {
@@ -442,7 +733,7 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     Options o;
     if (!ParseArgs(argc, argv, o)) {
-        std::printf("usage: ixc_probe --list | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
+        std::printf("usage: ixc_probe --list | --list-dshow | --dshow-capture <sec> | --source-test <dll> [--seconds N] | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
                     "                 [--output native|nv12|rgb32] [--subtype NV12|MJPG|YUY2] [--require-camera]\n");
         return 2;
     }
@@ -455,6 +746,9 @@ int main(int argc, char** argv) {
         } else {
             switch (o.mode) {
                 case Options::Mode::List: rc = List(); break;
+                case Options::Mode::ListDirectShow: rc = ListDirectShow(); break;
+                case Options::Mode::DirectShowCapture: rc = DirectShowCapture(o); break;
+                case Options::Mode::SourceTest: rc = SourceTest(o); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;
