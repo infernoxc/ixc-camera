@@ -40,7 +40,7 @@ HRESULT Activate::GetPhysicalSource(ComPtr<IMFMediaSource>& source) {
     WCHAR* link = nullptr;
     UINT32 len = 0;
     HRESULT hr = attrs_->GetAllocatedString(kAttrPhysicalLink, &link, &len);
-    if (FAILED(hr)) return MF_E_NOT_FOUND;
+    if (FAILED(hr) || !link) return MF_E_NOT_FOUND;
     ComPtr<IMFAttributes> devAttrs;
     hr = MFCreateAttributes(&devAttrs, 2);
     if (SUCCEEDED(hr)) hr = devAttrs->SetGUID(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID);

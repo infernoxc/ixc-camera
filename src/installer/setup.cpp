@@ -358,7 +358,8 @@ bool UninstallCore(bool keepSettings, bool removeUserData) {
 int CheckPlatform() {
     using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
     OSVERSIONINFOW v{sizeof(v)};
-    auto fn = reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion")));
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    auto fn = ntdll ? reinterpret_cast<RtlGetVersionFn>(reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlGetVersion"))) : nullptr;
     if (!fn || fn(&v) != 0 || v.dwMajorVersion < 10 || v.dwBuildNumber < 22000) {
         Log(L"unsupported Windows build %lu", v.dwBuildNumber);
         Dialog(L"Windows 11 is required", L"IXC Camera uses the Windows 11 software camera feature (Windows 11 build 22000 or newer).",
