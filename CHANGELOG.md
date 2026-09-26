@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased — Phase 9 profiles and hotkeys
+## Unreleased — Phase 10 performance
+
+### Measured
+- **30-minute soak** (`tests/soak.ps1`), IXC Camera 1080p30 with Portrait + Beauty + Blush + Warm Glow and face tracking, Ryzen 5 5600G: 54,520 frames, 30.02 FPS, 0 dropped, jitter 4.3 ms, max gap 48 ms, latency 45.6 ms. Camera service memory flat at 67.9–68.8 MB for the whole run (no leak), back to 14 MB when streaming stopped; handles stable (1066 → 1025); CPU steady at 43–47% of one core.
+
+### Changed
+- Face tracking never uses the 320×180 input on PCs with under 4 GB RAM (saves ~3 MB of detector memory in the camera service there).
+
+### Added
+- `tests/soak.ps1` long-duration test (CPU, memory, handles every 30 s; frame statistics).
+
+## Phase 9 — Profiles and hotkeys (2026-09-26)
 
 ### Added
 - **Named profiles** in the app: the Profile box lists saved profiles (select to switch); type a new name and select Save to create one; Delete (with confirmation, never the last profile); Import… (validated, clamped with a warning count, never overwrites an existing profile) and Export… for backup. Switching keeps the camera and format in use and applies everything else live, including in IXC Camera. The active profile is remembered in `app-settings.json`.

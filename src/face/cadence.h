@@ -25,6 +25,7 @@ struct CadenceConfig {
     double movingHz = 8, stableHz = 3, searchHz = 4, idleHz = 2;
     double idleAfterMs = 5000;      // searching this long without a face → idleHz
     double largeMaxMediumMs = 6;    // Large allowed only when Medium costs less than this
+    bool allowLarge = true;         // false on low-RAM PCs: Large costs ~6 MB of detector memory
     int fixedIntervalFrames = 0;    // user override (profile): detect every N frames; 0 = adaptive
 };
 

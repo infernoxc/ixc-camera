@@ -53,6 +53,7 @@ bool FaceEngine::Start(const EngineConfig& config) {
     CadenceConfig cc;
     cc.budget = std::clamp(config.cpuBudget, 0.02, 0.5);
     cc.fixedIntervalFrames = std::max(0, config.fixedIntervalFrames);
+    cc.allowLarge = config.allowLargeInput;
     {
         std::lock_guard lock(mu_);
         stop_ = false;

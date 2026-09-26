@@ -44,7 +44,7 @@ void Cadence::OnDetection(double costMs, double nowMs, int faces, float smallest
     // Larger input for small or undetected faces, only on fast CPUs.
     const bool fast = mediumCost_ > 0 && mediumCost_ < cfg_.largeMaxMediumMs;
     const bool wantLarge = (faces > 0 && smallestFace < 0.12f) || (faces == 0 && nowMs - lastFaceMs_ > 2000);
-    if (size_ == InputSize::Medium && fast && wantLarge) {
+    if (size_ == InputSize::Medium && fast && wantLarge && cfg_.allowLarge) {
         Resize(InputSize::Large);
     } else if (size_ == InputSize::Large && faces > 0 && smallestFace > 0.2f) {
         Resize(InputSize::Medium);

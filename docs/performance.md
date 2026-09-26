@@ -199,5 +199,5 @@ The full results are in [face-tracking-design.md](face-tracking-design.md) ("Fin
 
 ## Pending (not measured)
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
-- 30-minute burn-in: scheduled for Phase 10.
+- 30-minute burn-in: done in Phase 10 (CHANGELOG, `tests/soak.ps1`): no drift.
 - GPU utilization: no GPU work exists yet (Phase 6).

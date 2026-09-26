@@ -294,3 +294,12 @@ IXC_TEST(Face_DownscaleNormalizesDarkFrames) {
     IXC_CHECK(DownscaleNv12ToBgr(p, {}, bgr.data(), 16, 9, true, &gain));
     IXC_CHECK_EQ(gain, 1.0f);  // bright frames are never darkened
 }
+
+IXC_TEST(Face_CadenceNeverUsesLargeInputOnLowRam) {
+    CadenceConfig c;
+    c.allowLarge = false;
+    Cadence k(c);
+    k.Reset(0);
+    for (int i = 0; i < 6; ++i) k.OnDetection(4.0, i * 100.0, 1, 0.08f);  // small face, fast CPU
+    IXC_CHECK(k.Size() == InputSize::Medium);
+}

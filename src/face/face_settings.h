@@ -5,6 +5,8 @@
 #include "face/face_engine.h"
 #include "profiles/profile.h"
 
+#include <windows.h>
+
 namespace ixc::face {
 
 // CPU budget for detection, as a fraction of ONE core. Lower tiers leave more room for the
@@ -25,12 +27,15 @@ inline EngineConfig EngineConfigFor(const Profile& p) {
     c.maxFaces = p.faceTracking.maxFaces;
     c.fixedIntervalFrames = p.faceTracking.detectionIntervalFrames;
     c.cpuBudget = BudgetForTier(p.tier);
+    // The 320x180 input holds ~6 MB of detector buffers in the camera service: not on low-RAM PCs.
+    MEMORYSTATUSEX m{sizeof(m)};
+    c.allowLargeInput = !GlobalMemoryStatusEx(&m) || m.ullTotalPhys >= 4ull * 1024 * 1024 * 1024 - 256ull * 1024 * 1024;
     return c;
 }
 
 inline bool SameEngineConfig(const EngineConfig& a, const EngineConfig& b) {
     return a.maxFaces == b.maxFaces && a.fixedIntervalFrames == b.fixedIntervalFrames && a.cpuBudget == b.cpuBudget &&
-           a.minConfidence == b.minConfidence && a.forcePortable == b.forcePortable;
+           a.minConfidence == b.minConfidence && a.forcePortable == b.forcePortable && a.allowLargeInput == b.allowLargeInput;
 }
 
 }  // namespace ixc::face
