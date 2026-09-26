@@ -37,9 +37,14 @@
 - While tracking, the camera service holds ~6–7 MB more memory (the detector's working buffers at 320×180; ~3 MB at 240×135), all released when tracking stops. Real low-end hardware hasn't been measured (docs/face-tracking-design.md).
 
 ## Not yet implemented (later phases)
-- Effects (Phase 8).
+- Effect packages from disk (built-in effects only so far); per-effect strength (one shared strength slider); hotkeys (Phase 9).
 - Packaged installer `IXC-Camera-Setup-x64.exe` with an Apps & Features entry (Phase 12). The development installer is `scripts/install-ixc.ps1`.
 - Code signing.
 
 ## Low-end hardware
 - No measurements exist yet on Ultra Low / Low hardware. All numbers come from the developer's Ryzen system.
+
+## Effects
+- Portrait is an approximation without segmentation: the subject is an ellipse around the tracked head and shoulders, so hands, hair and objects outside it are blurred too. It is the most expensive effect (~6 ms per 1080p frame on the reference Ryzen; expect 2–4× that on low-end CPUs). Prefer 720p on weak PCs.
+- Effects add their processing time to the latency (all effects at 1080p: +8–9 ms).
+- Blush and Beauty follow the largest face only.

@@ -15,6 +15,7 @@
 #include "common/strings.h"
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
+#include "effects/effects.h"
 #include "face/face_settings.h"
 #include "ixc/version.h"
 #include "processing/image_pipeline.h"
@@ -548,8 +549,11 @@ void MainWindow::UpdatePipeline() {
     Profile effective = profile_;
     effective.image.exposureEv += smoothEv_;
     preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
-    // Face tracking follows the profile (off = no thread, no memory).
-    if (profile_.faceTracking.enabled) {
+    auto fx = effects::CompileEffects(profile_.effects, fullRange);
+    const bool effectsNeedFaces = fx->needsFaces;
+    preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
+    // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
+    if (profile_.faceTracking.enabled || effectsNeedFaces) {
         const face::EngineConfig fc = face::EngineConfigFor(profile_);
         preview_.SetFaceTracking(&fc);
     } else {
@@ -598,7 +602,7 @@ void MainWindow::UpdateStatus() {
         swprintf_s(buf, L"%s • %s • receiving %.1f FPS • dropped %llu", name.c_str(), W(Describe(fmt)).c_str(), st.fps,
                    static_cast<unsigned long long>(session_->DroppedFrames()));
     }
-    if (profile_.faceTracking.enabled) {
+    if (profile_.faceTracking.enabled || !profile_.effects.empty()) {
         const face::EngineStatus fs = preview_.FaceStatus();
         wchar_t f[160];
         if (fs.state == face::EngineState::Tracking || fs.state == face::EngineState::Searching) {

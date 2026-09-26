@@ -194,6 +194,31 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
                                                 p.width, p.width, p.width, p.height};
                 if (processor_.Process(p, out, *pipeline_, pipelineGeneration_)) p = {out.y, out.uv, out.yStride, out.uvStride, p.width, p.height};
             }
+            // Effects, exactly as IXC Camera applies them (in place on the processed frame).
+            if (effects_ && effects_->Active()) {
+                const size_t frameBytes = static_cast<size_t>(p.width) * static_cast<size_t>(p.height) * 3 / 2;
+                if (p.y != processed_.data()) {  // pipeline was neutral: work on a copy
+                    if (processed_.size() != frameBytes) processed_.assign(frameBytes, 0);
+                    for (int y = 0; y < p.height; ++y)
+                        memcpy(processed_.data() + static_cast<size_t>(y) * p.width, p.y + static_cast<size_t>(y) * p.yStride, static_cast<size_t>(p.width));
+                    std::uint8_t* uvDst = processed_.data() + static_cast<size_t>(p.width) * p.height;
+                    for (int y = 0; y < p.height / 2; ++y)
+                        memcpy(uvDst + static_cast<size_t>(y) * p.width, p.uv + static_cast<size_t>(y) * p.uvStride, static_cast<size_t>(p.width));
+                    p = {processed_.data(), uvDst, p.width, p.width, p.width, p.height};
+                }
+                face::FaceSnapshot snap;
+                if (effects_->needsFaces) face_.Snapshot(now, snap);
+                effects::FrameContext ctx;
+                ctx.faces = &snap;
+                ctx.fullRange = YuvFormatFor(layout_).fullRange;
+                if (pipeline_) {
+                    ctx.map = {static_cast<float>(pipeline_->srcX), static_cast<float>(pipeline_->srcY), static_cast<float>(pipeline_->srcW),
+                               static_cast<float>(pipeline_->srcH), pipeline_->mirror};
+                }
+                const processing::Nv12Frame fx{processed_.data(), processed_.data() + static_cast<size_t>(p.width) * p.height, p.width, p.width,
+                                               p.width, p.height};
+                renderer_.Apply(fx, *effects_, ctx);
+            }
 
             const size_t need = static_cast<size_t>(dstW) * static_cast<size_t>(dstH);
             if (bgra_.size() != need) bgra_.assign(need, 0);  // reallocates only when the preview is resized

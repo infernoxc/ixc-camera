@@ -54,10 +54,17 @@ void AdjustmentsPanel::Create(HWND parent, HINSTANCE instance, int firstId, Prof
     }
     mirror_ = make(WC_BUTTONW, L"Mirror (flip left-right)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
     reset_ = make(WC_BUTTONW, L"Reset picture", BS_PUSHBUTTON | WS_TABSTOP, id++);
-    gpu_ = make(WC_BUTTONW, L"Use the graphics card for zoom when it's faster", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, id++);
-    smooth_ = make(WC_BUTTONW, L"Smooth motion: keep full frame rate in low light", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, id++);
-    face_ = make(WC_BUTTONW, L"Face tracking (used by face effects)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
-    faceOverlay_ = make(WC_BUTTONW, L"Show face markers in preview (not sent to apps)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    gpu_ = make(WC_BUTTONW, L"GPU zoom when faster", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    smooth_ = make(WC_BUTTONW, L"Smooth motion (low light)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    face_ = make(WC_BUTTONW, L"Face tracking", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    faceOverlay_ = make(WC_BUTTONW, L"Show face markers", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    effectsHeader_ = make(WC_STATICW, L"Effects (strength)", SS_LEFT | SS_CENTERIMAGE, id++);
+    for (const auto& e : effects::Catalog()) effectBoxes_.push_back(make(WC_BUTTONW, e.name, BS_AUTOCHECKBOX | WS_TABSTOP, id++));
+    effectLabel_ = make(WC_STATICW, L"Effect strength", SS_LEFT | SS_CENTERIMAGE, id++);
+    effectTrack_ = make(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, id++);
+    SendMessageW(effectTrack_, TBM_SETRANGEMIN, FALSE, 0);
+    SendMessageW(effectTrack_, TBM_SETRANGEMAX, FALSE, 100);
+    SendMessageW(effectTrack_, TBM_SETPAGESIZE, 0, 10);
     Refresh();
 }
 
@@ -70,6 +77,9 @@ void AdjustmentsPanel::SetFont(HFONT font) {
     set(smooth_);
     set(face_);
     set(faceOverlay_);
+    set(effectsHeader_);
+    set(effectLabel_);
+    for (HWND b : effectBoxes_) set(b);
     for (auto& s : sliders_) {
         set(s.labelWnd);
         set(s.valueWnd);
@@ -78,6 +88,7 @@ void AdjustmentsPanel::SetFont(HFONT font) {
 
 int AdjustmentsPanel::Layout(int x, int y, int width, int rowHeight, int gap) {
     const int labelW = width * 40 / 100, valueW = width * 16 / 100, trackW = width - labelW - valueW;
+    const int half = width / 2;
     int cy = y;
     MoveWindow(header_, x, cy, width, rowHeight, TRUE);
     cy += rowHeight;
@@ -88,18 +99,26 @@ int AdjustmentsPanel::Layout(int x, int y, int width, int rowHeight, int gap) {
         cy += rowHeight;
     }
     cy += gap / 2;
-    MoveWindow(mirror_, x, cy, width, rowHeight, TRUE);
+    // Compact two-column rows: the panel must fit a 768-pixel-high laptop screen.
+    MoveWindow(mirror_, x, cy, half, rowHeight, TRUE);
+    MoveWindow(reset_, x + half, cy, half, rowHeight, TRUE);
     cy += rowHeight + gap / 2;
-    MoveWindow(reset_, x, cy, width / 2, rowHeight, TRUE);
-    cy += rowHeight + gap;
-    MoveWindow(gpu_, x, cy, width, rowHeight * 2, TRUE);  // two lines: it's a sentence
-    cy += rowHeight * 2;
-    MoveWindow(smooth_, x, cy, width, rowHeight * 2, TRUE);
-    cy += rowHeight * 2;
-    MoveWindow(face_, x, cy, width, rowHeight, TRUE);
+    MoveWindow(gpu_, x, cy, half, rowHeight, TRUE);
+    MoveWindow(smooth_, x + half, cy, half, rowHeight, TRUE);
     cy += rowHeight;
-    MoveWindow(faceOverlay_, x + 16, cy, width - 16, rowHeight, TRUE);
+    MoveWindow(face_, x, cy, half, rowHeight, TRUE);
+    MoveWindow(faceOverlay_, x + half, cy, half, rowHeight, TRUE);
+    cy += rowHeight + gap / 2;
+    MoveWindow(effectsHeader_, x, cy, labelW, rowHeight, TRUE);
+    MoveWindow(effectLabel_, 0, 0, 0, 0, TRUE);  // the header names the strength slider
+    MoveWindow(effectTrack_, x + labelW, cy, width - labelW, rowHeight, TRUE);
     cy += rowHeight;
+    const int colW = width / 3;
+    for (size_t i = 0; i < effectBoxes_.size(); ++i) {  // three columns
+        const int col = static_cast<int>(i % 3);
+        MoveWindow(effectBoxes_[i], x + col * colW, cy, colW, rowHeight, TRUE);
+        if (col == 2 || i + 1 == effectBoxes_.size()) cy += rowHeight;
+    }
     return cy - y;
 }
 
@@ -122,9 +141,25 @@ void AdjustmentsPanel::Refresh() {
     SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(faceOverlay_, BM_SETCHECK, faceOverlayOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
     EnableWindow(faceOverlay_, profile_->faceTracking.enabled);
+    const auto& cat = effects::Catalog();
+    for (size_t i = 0; i < effectBoxes_.size() && i < cat.size(); ++i) {
+        const auto it = std::find_if(profile_->effects.begin(), profile_->effects.end(), [&](const EffectEntry& e) { return e.id == cat[i].id; });
+        SendMessageW(effectBoxes_[i], BM_SETCHECK, it != profile_->effects.end() ? BST_CHECKED : BST_UNCHECKED, 0);
+        if (it != profile_->effects.end()) effectStrength_ = static_cast<int>(std::lround(it->strength));
+    }
+    SendMessageW(effectTrack_, TBM_SETPOS, TRUE, effectStrength_);
 }
 
 bool AdjustmentsPanel::OnScroll(HWND control) {
+    if (control == effectTrack_) {
+        const int pos = static_cast<int>(SendMessageW(effectTrack_, TBM_GETPOS, 0, 0));
+        if (pos != effectStrength_) {
+            effectStrength_ = pos;
+            for (auto& e : profile_->effects) e.strength = pos;
+            if (onChange_ && !profile_->effects.empty()) onChange_();
+        }
+        return true;
+    }
     for (auto& s : sliders_) {
         if (s.track != control) continue;
         const int pos = static_cast<int>(SendMessageW(s.track, TBM_GETPOS, 0, 0));
@@ -147,6 +182,17 @@ bool AdjustmentsPanel::OnCommand(HWND control, int code) {
     }
     if (control == gpu_ && code == BN_CLICKED) {
         profile_->gpu = SendMessageW(gpu_, BM_GETCHECK, 0, 0) == BST_CHECKED ? GpuMode::Auto : GpuMode::Off;
+        if (onChange_) onChange_();
+        return true;
+    }
+    for (size_t i = 0; i < effectBoxes_.size(); ++i) {
+        if (control != effectBoxes_[i] || code != BN_CLICKED) continue;
+        const std::string id = effects::Catalog()[i].id;
+        auto& list = profile_->effects;
+        std::erase_if(list, [&](const EffectEntry& e) { return e.id == id; });
+        if (SendMessageW(effectBoxes_[i], BM_GETCHECK, 0, 0) == BST_CHECKED && list.size() < kMaxEnabledEffects) {
+            list.push_back({id, static_cast<double>(effectStrength_)});
+        }
         if (onChange_) onChange_();
         return true;
     }

@@ -3,6 +3,7 @@
 // Picture adjustment controls (sliders + mirror + reset) bound to a Profile.
 // Plain Win32 trackbars: no animation, keyboard accessible (Tab / arrow keys / Page keys).
 
+#include "effects/effects.h"
 #include "profiles/profile.h"
 
 #include <windows.h>
@@ -48,6 +49,9 @@ private:
     std::vector<Slider> sliders_;
     HWND header_ = nullptr, mirror_ = nullptr, reset_ = nullptr, gpu_ = nullptr, smooth_ = nullptr;
     HWND face_ = nullptr, faceOverlay_ = nullptr;
+    HWND effectsHeader_ = nullptr, effectLabel_ = nullptr, effectTrack_ = nullptr;
+    std::vector<HWND> effectBoxes_;  // one per effects::Catalog() entry
+    int effectStrength_ = 70;        // applied to every enabled effect
     bool faceOverlayOn_ = true;
     int firstId_ = 0;
 };

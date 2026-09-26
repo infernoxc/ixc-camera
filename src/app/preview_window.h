@@ -10,6 +10,7 @@
 // Phase 6 replaces this with a Direct3D 11 swap chain fed by the GPU pipeline.
 
 #include "camera/capture_session.h"
+#include "effects/effects.h"
 #include "face/face_engine.h"
 #include "processing/color.h"
 #include "processing/gpu/adaptive_processor.h"
@@ -51,6 +52,8 @@ public:
     // Draw the tracked faces over the preview (preview only; never sent to apps).
     void SetFaceOverlay(bool on);
     face::EngineStatus FaceStatus() const { return face_.Status(); }
+    // IXC effects applied after the pipeline (nullptr = none).
+    void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) { effects_ = std::move(cfg); dirty_ = sample_ != nullptr; }
 
     static constexpr UINT kFrameMessage = WM_APP + 10;
 
@@ -78,6 +81,8 @@ private:
     face::FaceEngine face_;
     face::EngineConfig faceConfig_;
     bool faceOverlay_ = true;
+    std::shared_ptr<const effects::EffectConfig> effects_;
+    effects::EffectRenderer renderer_;
     HPEN facePen_ = nullptr, landmarkPen_ = nullptr;
 };
 

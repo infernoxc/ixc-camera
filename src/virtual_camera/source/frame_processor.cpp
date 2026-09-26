@@ -185,7 +185,8 @@ void FrameProcessor::UpdateFaceTracking() {
     face::EngineConfig cfg;
     {
         std::lock_guard lock(mu_);
-        want = profile_.faceTracking.enabled && nv12_ && type_ != nullptr;
+        // Face-aware effects need the tracker even when "face tracking" itself isn't ticked.
+        want = (profile_.faceTracking.enabled || (effects_ && effects_->needsFaces)) && nv12_ && type_ != nullptr;
         cfg = face::EngineConfigFor(profile_);
     }
     if (want) {
@@ -248,6 +249,7 @@ void FrameProcessor::ReloadSettings() {
 void FrameProcessor::Recompile() {
     ++generation_;  // new settings: the CPU/GPU decision is made again
     if (!nv12_ || width_ == 0 || height_ == 0) {
+        effects_.reset();
         auto identity = std::make_shared<processing::PipelineParams>();
         params_ = std::move(identity);
         return;
@@ -256,6 +258,7 @@ void FrameProcessor::Recompile() {
     Profile effective = profile_;
     effective.image.exposureEv += compensationEv_;
     params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
+    effects_ = effects::CompileEffects(profile_.effects, fullRange_);
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases
@@ -332,6 +335,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     UINT32 width = 0, height = 0;
     bool nv12 = false;
     std::uint64_t generation = 0;
+    std::shared_ptr<const effects::EffectConfig> fx;
     {
         std::lock_guard lock(mu_);
         params = params_;
@@ -340,6 +344,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         width = width_;
         height = height_;
         nv12 = nv12_;
+        fx = effects_ && effects_->Active() ? effects_ : nullptr;
     }
     // Record once per session whether frames live in GPU memory (decides the GPU strategy).
     bool knowInput;
@@ -363,7 +368,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         ++counters_.passedThrough;
         return ComPtr<IMFSample>(input);
     };
-    if (!input || !params || params->identity || !nv12 || !type) return passThrough();
+    if (!input || !params || (params->identity && !fx) || !nv12 || !type) return passThrough();
 
     ComPtr<IMFVideoSampleAllocatorEx> allocator;
     HRESULT hr;
@@ -390,7 +395,30 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         if (ok) {
             const processing::Nv12Planes in{src.y(), src.uv(), src.pitch(), src.pitch(), static_cast<int>(width), static_cast<int>(height)};
             const processing::Nv12Frame o{dst.y(), dst.uv(), dst.pitch(), dst.pitch(), static_cast<int>(width), static_cast<int>(height)};
-            ok = processor_.Process(in, o, *params, generation);
+            if (params->identity) {
+                // Effects only: start from an exact copy of the camera frame.
+                for (UINT32 y = 0; y < height; ++y) memcpy(o.y + static_cast<size_t>(y) * o.yStride, in.y + static_cast<size_t>(y) * in.yStride, width);
+                for (UINT32 y = 0; y < height / 2; ++y) memcpy(o.uv + static_cast<size_t>(y) * o.uvStride, in.uv + static_cast<size_t>(y) * in.uvStride, width);
+            } else {
+                ok = processor_.Process(in, o, *params, generation);
+            }
+            if (ok && fx) {
+                face::FaceSnapshot snap;
+                if (fx->needsFaces) {
+                    std::lock_guard fl(faceMu_);
+                    face_.Snapshot(face::FaceEngine::NowMs(), snap);
+                }
+                effects::FrameContext ctx;
+                ctx.faces = &snap;
+                ctx.fullRange = fullRange_;
+                if (!params->geometryIdentity) {
+                    ctx.map = {static_cast<float>(params->srcX), static_cast<float>(params->srcY), static_cast<float>(params->srcW),
+                               static_cast<float>(params->srcH), params->mirror};
+                } else {
+                    ctx.map.mirror = params->mirror;
+                }
+                renderer_.Apply(o, *fx, ctx);
+            }
         }
     }
     if (!ok) {

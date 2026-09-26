@@ -153,6 +153,24 @@ if (Test-Path (Split-Path $settingsFile)) {
     Start-Sleep -Milliseconds 1500
     Check ((Get-Content $settingsFile -Raw) -match '"enabled": false') 'Face tracking off is published'
     Check (-not ([Ui]::Text($status) -match 'face')) 'Face tracking off: nothing running'
+    # Effects (ids 244.. in catalog order): all controls fit in the window; Portrait and Mono apply live.
+    $IdBlush = 244; $IdPortrait = 246; $IdMono = 249; $IdEffectTrack = 253
+    $win = New-Object Ui+RECT; [Ui]::GetWindowRect($hwnd, [ref]$win) | Out-Null
+    $trk = New-Object Ui+RECT; [Ui]::GetWindowRect([Ui]::GetDlgItem($hwnd, $IdEffectTrack), [ref]$trk) | Out-Null
+    Check ($trk.B -le $win.B -and $trk.B -gt $trk.T) "effect controls fit in the window (strength slider bottom $($trk.B) <= window $($win.B))"
+    $sd0 = [Ui]::PreviewStats($preview)[1]
+    foreach ($id in $IdPortrait, $IdMono, $IdBlush) { [Ui]::SendMessageW([Ui]::GetDlgItem($hwnd, $id), $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+    Start-Sleep -Milliseconds 2500
+    $pub = Get-Content $settingsFile -Raw
+    Check ($pub -match 'portrait\.soft' -and $pub -match 'color\.mono' -and $pub -match 'blush\.tone') 'enabled effects are published'
+    $fxStatus = [Ui]::Text($status); "status:  $fxStatus"
+    Check ($fxStatus -match 'face: (searching|tracking)') 'face-aware effects start face tracking'
+    $st2 = [Ui]::PreviewStats($preview)
+    "preview: luma std-dev {0:N1} -> {1:N1} with Portrait + Mono + Blush" -f $sd0, $st2[1]
+    Check ($st2[0] -gt 0.5 -and $st2[1] -gt 3) 'preview stays live with effects on'
+    foreach ($id in $IdPortrait, $IdMono, $IdBlush) { [Ui]::SendMessageW([Ui]::GetDlgItem($hwnd, $id), $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+    Start-Sleep -Milliseconds 1500
+    Check ((Get-Content $settingsFile -Raw) -match '"effects": \[\]') 'effects off are published'
     Check ((Get-Process -Id $p.Id).Threads.Count -lt $threadsOn) "Face tracking thread exits when off ($threadsOff -> $threadsOn -> $((Get-Process -Id $p.Id).Threads.Count) threads)"
 }
 

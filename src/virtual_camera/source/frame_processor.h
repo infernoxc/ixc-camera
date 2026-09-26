@@ -13,6 +13,7 @@
 // frame path only swaps in the compiled result.
 
 #include "camera/smooth_motion.h"
+#include "effects/effects.h"
 #include "face/face_engine.h"
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
@@ -96,6 +97,10 @@ private:
     face::FaceEngine face_;
     face::EngineConfig faceConfig_;  // under faceMu_
     double frameIntervalMs_ = 33.3;  // under mu_
+
+    // Effects (Phase 8): compiled config swapped under mu_; the renderer is frame-thread only.
+    std::shared_ptr<const effects::EffectConfig> effects_;
+    effects::EffectRenderer renderer_;
 };
 
 }  // namespace ixc::vcam

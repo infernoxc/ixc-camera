@@ -102,6 +102,10 @@ else()
     target_compile_definitions(ixc_face PUBLIC IXC_FACE_TRACKING=0)
 endif()
 
+# ixc_effects: built-in IXC effects applied to the processed frame (Phase 8).
+add_library(ixc_effects STATIC effects/effects.cpp)
+target_link_libraries(ixc_effects PUBLIC ixc_face)
+
 add_subdirectory(virtual_camera)
 add_subdirectory(app)
 add_subdirectory(tools)

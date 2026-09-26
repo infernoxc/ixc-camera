@@ -17,6 +17,7 @@
 #include "camera/format_select.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
+#include "effects/effects.h"
 #include "face/downscale.h"
 #include "face/face_engine.h"
 #include "processing/gpu/gpu_pipeline.h"
@@ -53,7 +54,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -81,6 +82,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--set-exposure") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.exposure = std::string(v) == "auto" ? 100 : std::atoi(v); }
         else if (a == "--set-ae-priority") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.aePriority = std::atoi(v); }
         else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
+        else if (a == "--bench-effects") o.mode = Options::Mode::BenchEffects;
         else if (a == "--bench-face") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::BenchFace; o.seconds = std::atoi(v); }
         else if (a == "--source-effect-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceEffectTest; o.sourceDll = v; }
         else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
@@ -1258,6 +1260,55 @@ int BenchFace(const Options& o) {
     return 0;
 }
 
+// Per-effect cost on a synthetic textured frame with a face (no camera needed).
+int BenchEffects() {
+    std::printf("%-16s %10s %10s %10s\n", "effect", "720p ms", "1080p ms", "scratch KB");
+    const face::FaceSnapshot snap = [] {
+        face::FaceSnapshot s;
+        s.count = 1;
+        auto& f = s.faces[0];
+        f.box = {0.42f, 0.25f, 0.16f, 0.28f};
+        f.lm = {{0.47f, 0.35f}, {0.53f, 0.35f}, {0.5f, 0.41f}, {0.475f, 0.46f}, {0.525f, 0.46f}};
+        f.landmarksValid = true;
+        return s;
+    }();
+    std::vector<std::string> ids;
+    for (const auto& e : effects::Catalog()) ids.push_back(e.id);
+    ids.push_back("all");
+    for (const auto& id : ids) {
+        std::vector<EffectEntry> list;
+        if (id == "all") {
+            for (const auto& e : effects::Catalog()) list.push_back({e.id, 70});
+        } else {
+            list.push_back({id, 70});
+        }
+        const auto cfg = effects::CompileEffects(list, false);
+        double ms[2] = {0, 0};
+        size_t scratch = 0;
+        const int sizes[2][2] = {{1280, 720}, {1920, 1080}};
+        for (int s = 0; s < 2; ++s) {
+            const int w = sizes[s][0], h = sizes[s][1];
+            std::vector<std::uint8_t> buf(static_cast<size_t>(w) * h * 3 / 2);
+            for (size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<std::uint8_t>(i < static_cast<size_t>(w) * h ? 60 + (i * 2654435761u >> 26) % 120 : 110 + i % 30);
+            const processing::Nv12Frame fr{buf.data(), buf.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            effects::EffectRenderer r;
+            effects::FrameContext ctx;
+            ctx.faces = &snap;
+            for (int i = 0; i < 10; ++i) r.Apply(fr, *cfg, ctx);  // warm-up + face fade-in
+            LARGE_INTEGER f0, t0, t1;
+            QueryPerformanceFrequency(&f0);
+            QueryPerformanceCounter(&t0);
+            constexpr int kIters = 40;
+            for (int i = 0; i < kIters; ++i) r.Apply(fr, *cfg, ctx);
+            QueryPerformanceCounter(&t1);
+            ms[s] = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f0.QuadPart) / kIters;
+            scratch = r.ScratchBytes();
+        }
+        std::printf("%-16s %10.2f %10.2f %10.1f\n", id.c_str(), ms[0], ms[1], scratch / 1024.0);
+    }
+    return 0;
+}
+
 int Capture(const Options& o) {
     CaptureConfig cfg;
     int exitCode = 0;
@@ -1462,6 +1513,7 @@ int main(int argc, char** argv) {
                 case Options::Mode::CameraControls: rc = CameraControls(o); break;
                 case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
                 case Options::Mode::BenchFace: rc = BenchFace(o); break;
+                case Options::Mode::BenchEffects: rc = BenchEffects(); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;

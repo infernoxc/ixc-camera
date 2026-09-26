@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased — Phase 7 (in progress)
+## Unreleased — Phase 8 effects
+
+### Added
+- **Effect framework** (`src/effects`): built-in, original effects described by metadata (category, face needs, cost class, fallback), compiled once per settings change and rendered in place on the processed frame by a renderer with fixed, reused scratch memory. Nothing external is loaded or executed.
+- **Effects:** Blush Tone (landmark-anchored cheeks, box fallback, fades without a face), Basic Beauty (edge-preserving skin smoothing inside the face), Portrait (soft blurred, muted, vignetted background around the tracked head and shoulders; centred subject without a face), Warm Glow, Cool Breeze, Mono, Vivid, Soft Light (lookup tables).
+- The IXC Camera source and the app preview apply the same effects (WYSIWYG). Face-aware effects start face tracking automatically.
+- App: an Effects section (8 checkboxes + a strength slider). The panel is re-laid out compactly so it fits a 768-pixel-high screen (UI test checks it).
+- `ixc_probe --bench-effects`; 6 unit tests (120 total); UI smoke checks for effects.
+
+### Measured (Ryzen 5 5600G, `--bench-effects`, per frame)
+- 1080p: Blush 0.04 ms, Beauty 1.0 ms, Portrait 6.2 ms, each colour/light effect 1.3 ms, all 8 together 8.2 ms. 720p: all 3.7 ms.
+- IXC Camera, 1080p, Portrait + Beauty + Blush + Warm: 9.4 ms per frame in the service, 28.9 FPS, latency 45.8 ms (37 ms without effects), 63 MB.
+
+### Fixed during this phase
+- Portrait first took 39 ms per 1080p frame in the service (per-pixel floating-point blending). It was rewritten with per-column tables, span splitting and integer blends: 6.2 ms.
+
+## Phase 7 — Smooth motion and face tracking (2026-09-26)
 
 ### Fixed
 - **Choppy video in low light** (reported in OBS). The root cause was the webcam's automatic exposure, which dropped the Lenovo FHD Webcam to an uneven 14–20 FPS on "30 FPS" modes. It was the same with the webcam direct; IXC's pipeline, queues and negotiation were measured clean. New **Smooth motion** (on by default, app checkbox, profile `smoothMotion`): fixes the exposure to one that fits a frame, verifies that the frame rate recovers, compensates brightness in software (≤ +1.5 EV) and restores automatic exposure when the session ends. Result: IXC in OBS's format went from ~20 FPS / 64 ms gaps to 30.0 FPS, 4.4 ms jitter and 0 long gaps. See docs/performance.md.
