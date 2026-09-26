@@ -36,11 +36,11 @@ struct SkinSpec {
     float smoothing, radiusDiv, edge;
 };
 constexpr SkinSpec kBlushSkin{1.0f, 20, 24};  // softer than Basic Beauty (reference is very smooth)
-constexpr TintSpec kBlushFace{0, 0, 0, 2, -6, 3};  // whole-face peach warmth: radii from the face box
+constexpr TintSpec kBlushFace{0, 0, 0, 2, -10, 1};  // whole-face peach warmth: radii from the face box
 constexpr TintSpec kBlushEyes{0.22f, 0.40f, 0.22f, 0, -4, 2};
 constexpr TintSpec kBlushNose{0.02f, 0.22f, 0.18f, 0, -3, 2};
 constexpr TintSpec kBlushCheeks{0, 0.34f, 0.24f, 0, 0, 0};  // the reference shows no distinct cheek patches
-constexpr TintSpec kBlushLips{0.08f, 0.62f, 0.30f, 4, -3, 22, 55};
+constexpr TintSpec kBlushLips{0.08f, 0.62f, 0.30f, 4, -12, 18, 55};  // coral: blue held down
 
 float BlushCurve(float v) {
     if (v <= kBlushCurveIn[0]) return v;
