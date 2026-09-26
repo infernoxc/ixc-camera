@@ -33,3 +33,6 @@ captures/
 diagnostics-export/
 *.mp4
 *.mkv
+
+# Release output (scripts/package-release.ps1)
+/dist/

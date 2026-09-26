@@ -31,6 +31,13 @@ Details are in [docs/build.md](docs/build.md).
 - [Architecture](docs/architecture.md)
 - [Build](docs/build.md)
 - [Preflight report](docs/preflight-report.md)
+- [Installer and exit codes](docs/installer.md)
+- [Performance measurements](docs/performance.md)
+- [Compatibility](docs/compatibility.md)
+- [Face tracking design and benchmark](docs/face-tracking-design.md)
+- [Security audit](docs/security-audit.md)
+- [Release notes 0.9.0](docs/release-notes-0.9.0.md)
+- [Known limitations](KNOWN_LIMITATIONS.md)
 - [Security policy](SECURITY.md)
 
 ## License

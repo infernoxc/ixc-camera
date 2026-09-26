@@ -1,5 +1,14 @@
 # Changelog
 
+## Phase 14 — Release packaging (2026-09-26)
+
+### Added
+- `scripts/package-release.ps1`: builds `dist/IXC-Camera-<version>/` with the installer, a source archive (`git archive` of the committed tree), licences, release notes and `SHA256SUMS.txt`. It uploads nothing.
+- Release notes: docs/release-notes-0.9.0.md. README links every document.
+
+### Changed
+- The browser test skips (exit 77) when IXC Camera isn't installed, e.g. on CI runners.
+
 ## Phase 13 — Security and release audit (2026-09-26)
 
 ### Added
