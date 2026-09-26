@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Blush Tone** now reproduces the user's reference "Blush Tone Time" lens look instead of a generic cheek blush:
+  - measured rosy grade: a luma curve plus chroma scaling fitted from 68,000 aligned pixels;
+  - smooth, soft skin with an even peach warmth;
+  - faint pink under the eyes and on the nose tip;
+  - coral-pink lips (beard excluded);
+  - no timestamp overlay (as requested).
+- Tuned over four side-by-side iterations against the reference. Details: docs/blush-tone.md. Cost: 1.5 ms per 720p frame, 3.4 ms per 1080p frame.
+
+### Added
+- `ixc_probe --snapshot file.bmp` (DirectShow capture) and `--apply-effects in.bmp out.bmp [--effects ids] [--strength N]`, which also prints colours at landmark points, for visual matching against reference frames.
+
 ## Phase 14 — Release packaging (2026-09-26)
 
 ### Added

@@ -20,6 +20,7 @@
 #include "effects/effects.h"
 #include "face/downscale.h"
 #include "face/face_engine.h"
+#include "face/tracker.h"
 #include "processing/gpu/gpu_pipeline.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
@@ -42,6 +43,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -54,7 +56,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects, ApplyEffects } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -67,6 +69,9 @@ struct Options {
     bool requireCamera = false;
     bool smoothMotion = false;
     bool noSmooth = false;
+    std::string snapshot;  // --snapshot file.bmp (DirectShow capture): last frame, for visual comparison
+    std::string applyIn, applyOut, applyEffects = "blush.tone";  // --apply-effects in.bmp out.bmp [--effects a,b] [--strength N]
+    double applyStrength = 100;
 };
 
 bool ParseArgs(int argc, char** argv, Options& o) {
@@ -83,6 +88,9 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--set-ae-priority") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.aePriority = std::atoi(v); }
         else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
         else if (a == "--bench-effects") o.mode = Options::Mode::BenchEffects;
+        else if (a == "--apply-effects") { const char* src = next(); const char* dst = next(); if (!src || !dst) return false; o.mode = Options::Mode::ApplyEffects; o.applyIn = src; o.applyOut = dst; }
+        else if (a == "--effects") { const char* v = next(); if (!v) return false; o.applyEffects = v; }
+        else if (a == "--strength") { const char* v = next(); if (!v) return false; o.applyStrength = std::atof(v); }
         else if (a == "--bench-face") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::BenchFace; o.seconds = std::atoi(v); }
         else if (a == "--source-effect-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceEffectTest; o.sourceDll = v; }
         else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
@@ -109,6 +117,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         } else if (a == "--require-camera") o.requireCamera = true;
         else if (a == "--smooth-motion") o.smoothMotion = true;
         else if (a == "--no-smooth-motion") o.noSmooth = true;
+        else if (a == "--snapshot") { const char* v = next(); if (!v) return false; o.snapshot = v; }
         else return false;
     }
     return o.mode != Options::Mode::None && o.seconds > 0 && o.seconds <= 7200 && o.cycles > 0 && o.cycles <= 10000;
@@ -668,6 +677,10 @@ public:
             std::uint64_t sum = 0, cnt = 0;
             for (long i = 0; i < n; i += 64) { sum += p[i]; ++cnt; }
             if (cnt) meanByte = static_cast<double>(sum) / static_cast<double>(cnt);
+            if (keepLast) {  // --snapshot (diagnostic tool): keep a copy of the newest frame
+                std::lock_guard lock(lastMu);
+                last.assign(p, p + n);
+            }
         }
         return S_OK;
     }
@@ -675,6 +688,9 @@ public:
     static constexpr std::uint64_t kMaxRecords = 4096;
     std::atomic<std::uint64_t> frames{0};
     std::atomic<double> meanByte{-1};
+    bool keepLast = false;
+    std::mutex lastMu;
+    std::vector<BYTE> last;
     std::vector<long long> arrivalQpc = std::vector<long long>(kMaxRecords);
     std::vector<double> stamp = std::vector<double>(kMaxRecords);
 };
@@ -766,6 +782,11 @@ int DirectShowCapture(const Options& o) {
     if (SUCCEEDED(hr)) {
         AM_MEDIA_TYPE mt{};
         mt.majortype = MEDIATYPE_Video;
+        if (!o.snapshot.empty()) {  // RGB24 so the frame can be written as a BMP
+            mt.subtype = MEDIASUBTYPE_RGB24;
+            mt.formattype = FORMAT_VideoInfo;
+            counter.keepLast = true;
+        }
         hr = grabber->SetMediaType(&mt);
     }
     if (SUCCEEDED(hr)) hr = grabber->SetCallback(&counter, 0);
@@ -818,11 +839,14 @@ int DirectShowCapture(const Options& o) {
         return 1;
     }
 
+    long snapW = 0, snapH = 0;
     AM_MEDIA_TYPE connected{};
     std::string fmt = "unknown";
     if (SUCCEEDED(grabber->GetConnectedMediaType(&connected))) {
         if (connected.formattype == FORMAT_VideoInfo && connected.pbFormat && connected.cbFormat >= sizeof(VIDEOINFOHEADER)) {
             const auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);
+            snapW = vih->bmiHeader.biWidth;
+            snapH = std::labs(vih->bmiHeader.biHeight);
             char buf[128];
             const double connectedFps = vih->AvgTimePerFrame ? 10'000'000.0 / static_cast<double>(vih->AvgTimePerFrame) : 0;
             std::snprintf(buf, sizeof(buf), "%ldx%ld %s @ %.2f fps%s", vih->bmiHeader.biWidth, std::labs(vih->bmiHeader.biHeight),
@@ -836,6 +860,32 @@ int DirectShowCapture(const Options& o) {
     const ProcessSample p0 = SampleProcess();
     Sleep(static_cast<DWORD>(o.seconds) * 1000);
     control->Stop();
+    if (!o.snapshot.empty()) std::printf("snapshot: frame %ldx%ld, buffer %zu bytes\n", snapW, snapH, counter.last.size());
+    if (!o.snapshot.empty() && snapW > 0 && snapH > 0) {
+        std::lock_guard lock(counter.lastMu);
+        const size_t rowBytes = (static_cast<size_t>(snapW) * 3 + 3) & ~size_t{3};
+        if (counter.last.size() >= rowBytes * static_cast<size_t>(snapH)) {
+            BITMAPFILEHEADER fh{};
+            BITMAPINFOHEADER ih{};
+            ih.biSize = sizeof(ih);
+            ih.biWidth = snapW;
+            ih.biHeight = snapH;  // DirectShow RGB24 is bottom-up, like a BMP
+            ih.biPlanes = 1;
+            ih.biBitCount = 24;
+            ih.biCompression = BI_RGB;
+            fh.bfType = 0x4D42;
+            fh.bfOffBits = sizeof(fh) + sizeof(ih);
+            fh.bfSize = fh.bfOffBits + static_cast<DWORD>(rowBytes * snapH);
+            FILE* bf = nullptr;
+            if (fopen_s(&bf, o.snapshot.c_str(), "wb") == 0 && bf) {
+                fwrite(&fh, sizeof(fh), 1, bf);
+                fwrite(&ih, sizeof(ih), 1, bf);
+                fwrite(counter.last.data(), 1, rowBytes * snapH, bf);
+                fclose(bf);
+                std::printf("snapshot: %s (%ldx%ld)\n", o.snapshot.c_str(), snapW, snapH);
+            }
+        }
+    }
     const ProcessSample p1 = SampleProcess();
     const auto frames = counter.frames.load();
     std::printf("camera: %s (DirectShow)\nconnected format: %s\nframes: %llu in %d s (%.2f fps), sample value mean %.1f\n", name.c_str(),
@@ -1260,6 +1310,173 @@ int BenchFace(const Options& o) {
     return 0;
 }
 
+// Runs IXC's effects on a still frame (24-bit BMP) with a real face detection, for side-by-side
+// comparison with a reference look. The images stay local (visual tuning only).
+int ApplyEffectsToBmp(const Options& o) {
+    auto load = [](const std::string& path, int& w, int& h, std::vector<std::uint8_t>& rgb) {
+        FILE* f = nullptr;
+        if (fopen_s(&f, path.c_str(), "rb") || !f) return false;
+        BITMAPFILEHEADER fh{};
+        BITMAPINFOHEADER ih{};
+        bool ok = fread(&fh, sizeof(fh), 1, f) == 1 && fread(&ih, sizeof(ih), 1, f) == 1 && fh.bfType == 0x4D42 && ih.biBitCount == 24;
+        if (ok) {
+            w = ih.biWidth;
+            h = std::abs(ih.biHeight);
+            const size_t row = (static_cast<size_t>(w) * 3 + 3) & ~size_t{3};
+            std::vector<std::uint8_t> raw(row * h);
+            fseek(f, static_cast<long>(fh.bfOffBits), SEEK_SET);
+            ok = fread(raw.data(), 1, raw.size(), f) == raw.size();
+            rgb.resize(static_cast<size_t>(w) * h * 3);  // top-down, B,G,R
+            for (int y = 0; y < h && ok; ++y) {
+                const int src = ih.biHeight > 0 ? h - 1 - y : y;
+                memcpy(&rgb[static_cast<size_t>(y) * w * 3], &raw[static_cast<size_t>(src) * row], static_cast<size_t>(w) * 3);
+            }
+        }
+        fclose(f);
+        return ok;
+    };
+    int w = 0, h = 0;
+    std::vector<std::uint8_t> rgb;
+    if (!load(o.applyIn, w, h, rgb) || w < 64 || h < 64) {
+        std::printf("error: cannot read %s (24-bit BMP)\n", o.applyIn.c_str());
+        return 1;
+    }
+    w &= ~1;
+    h &= ~1;
+    // RGB -> NV12, BT.709 video range (what the camera path delivers at HD).
+    std::vector<std::uint8_t> nv12(static_cast<size_t>(w) * h * 3 / 2);
+    const int stride = w;
+    const size_t srcRow = static_cast<size_t>(w) * 3;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const std::uint8_t* p = &rgb[static_cast<size_t>(y) * srcRow + static_cast<size_t>(x) * 3];
+            const double R = p[2], G = p[1], B = p[0];
+            nv12[static_cast<size_t>(y) * stride + x] = static_cast<std::uint8_t>(std::clamp(16 + 0.1826 * R + 0.6142 * G + 0.0620 * B + 0.5, 0.0, 255.0));
+        }
+    }
+    std::uint8_t* uv = nv12.data() + static_cast<size_t>(w) * h;
+    for (int y = 0; y < h / 2; ++y) {
+        for (int x = 0; x < w / 2; ++x) {
+            double R = 0, G = 0, B = 0;
+            for (int k = 0; k < 4; ++k) {
+                const std::uint8_t* p = &rgb[static_cast<size_t>(y * 2 + k / 2) * srcRow + static_cast<size_t>(x * 2 + k % 2) * 3];
+                R += p[2] / 4.0;
+                G += p[1] / 4.0;
+                B += p[0] / 4.0;
+            }
+            uv[static_cast<size_t>(y) * stride + x * 2] = static_cast<std::uint8_t>(std::clamp(128 - 0.1006 * R - 0.3386 * G + 0.4392 * B + 0.5, 0.0, 255.0));
+            uv[static_cast<size_t>(y) * stride + x * 2 + 1] = static_cast<std::uint8_t>(std::clamp(128 + 0.4392 * R - 0.3989 * G - 0.0403 * B + 0.5, 0.0, 255.0));
+        }
+    }
+    const processing::YuvFormat fmt{processing::YuvMatrix::Bt709, false};
+    const processing::Nv12Planes planes{nv12.data(), uv, stride, stride, w, h};
+    // Face: one detection at 320x180, turned into a tracked face.
+    face::FaceSnapshot snap;
+    {
+        std::vector<std::uint8_t> detIn(320 * 180 * 3);
+        face::DownscaleNv12ToBgr(planes, fmt, detIn.data(), 320, 180);
+        face::Detector det(face::BestSimdPath());
+        face::Detection d[4];
+        const int n = det.Detect(detIn.data(), 320, 180, 320 * 3, 0.5f, d, 4);
+        face::Tracker tr;
+        tr.Update(d, n, 0, 1);
+        tr.Predict(0, snap);
+        std::printf("faces: %d%s\n", snap.count, snap.count && snap.faces[0].landmarksValid ? " (landmarks ok)" : "");
+    }
+    std::vector<EffectEntry> list;
+    for (size_t p = 0; p <= o.applyEffects.size();) {
+        const size_t q = o.applyEffects.find(',', p);
+        const std::string id = o.applyEffects.substr(p, q == std::string::npos ? std::string::npos : q - p);
+        if (!id.empty()) list.push_back({id, o.applyStrength});
+        if (q == std::string::npos) break;
+        p = q + 1;
+    }
+    const auto cfg = effects::CompileEffects(list, false);
+    effects::EffectRenderer r;
+    effects::FrameContext ctx;
+    ctx.faces = &snap;
+    std::vector<std::uint8_t> work;
+    for (int i = 0; i < 30; ++i) {  // lets face effects fade in fully
+        work = nv12;
+        const processing::Nv12Frame fr{work.data(), work.data() + static_cast<size_t>(w) * h, stride, stride, w, h};
+        r.Apply(fr, *cfg, ctx);
+    }
+    // Colour at landmark-relative skin/lip points (mean RGB of a small square), before and after.
+    if (snap.count > 0) {
+        const face::TrackedFace& tf = snap.faces[0];
+        const face::Landmarks& l = tf.lm;
+        const float ed = std::hypot((l.rightEye.x - l.leftEye.x) * w, (l.rightEye.y - l.leftEye.y) * h);
+        const float ex = (l.leftEye.x + l.rightEye.x) / 2 * w, ey = (l.leftEye.y + l.rightEye.y) / 2 * h;
+        const struct { const char* name; float x, y; } pts[] = {
+            {"forehead", ex, ey - 0.55f * ed},
+            {"cheek L", l.leftEye.x * w - 0.05f * ed, l.leftEye.y * h + 0.62f * ed},
+            {"cheek R", l.rightEye.x * w + 0.05f * ed, l.rightEye.y * h + 0.62f * ed},
+            {"under-eye L", l.leftEye.x * w, l.leftEye.y * h + 0.25f * ed},
+            {"nose tip", l.nose.x * w, l.nose.y * h},
+            {"lips", (l.mouthLeft.x + l.mouthRight.x) / 2 * w, (l.mouthLeft.y + l.mouthRight.y) / 2 * h + 0.06f * ed},
+        };
+        const int rad = std::max(2, static_cast<int>(ed * 0.06f));
+        auto mean = [&](const std::uint8_t* yp, const std::uint8_t* uvp, float cx, float cy, double out[3]) {
+            double r = 0, g = 0, b = 0;
+            int n = 0;
+            for (int y = static_cast<int>(cy) - rad; y <= static_cast<int>(cy) + rad; ++y) {
+                for (int x = static_cast<int>(cx) - rad; x <= static_cast<int>(cx) + rad; ++x) {
+                    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+                    const std::uint8_t* c = uvp + static_cast<size_t>(y / 2) * stride + (x / 2) * 2;
+                    const std::uint32_t v = processing::YuvToBgra(yp[static_cast<size_t>(y) * stride + x], c[0], c[1], fmt);
+                    b += v & 0xFF;
+                    g += (v >> 8) & 0xFF;
+                    r += (v >> 16) & 0xFF;
+                    ++n;
+                }
+            }
+            out[0] = n ? r / n : 0;
+            out[1] = n ? g / n : 0;
+            out[2] = n ? b / n : 0;
+        };
+        std::printf("eye distance %.0f px\n%-12s %-20s %-20s\n", ed, "point", "input R/G/B", "output R/G/B");
+        for (const auto& p : pts) {
+            double a[3], b[3];
+            mean(nv12.data(), uv, p.x, p.y, a);
+            mean(work.data(), work.data() + static_cast<size_t>(w) * h, p.x, p.y, b);
+            std::printf("%-12s %5.0f %5.0f %5.0f      %5.0f %5.0f %5.0f\n", p.name, a[0], a[1], a[2], b[0], b[1], b[2]);
+        }
+    }
+    // NV12 -> BMP
+    const size_t row = (static_cast<size_t>(w) * 3 + 3) & ~size_t{3};
+    std::vector<std::uint8_t> outBmp(row * h);
+    const std::uint8_t* wy = work.data();
+    const std::uint8_t* wuv = work.data() + static_cast<size_t>(w) * h;
+    for (int y = 0; y < h; ++y) {
+        std::uint8_t* dst = &outBmp[static_cast<size_t>(h - 1 - y) * row];
+        for (int x = 0; x < w; ++x) {
+            const std::uint8_t* c = wuv + static_cast<size_t>(y / 2) * stride + (x / 2) * 2;
+            const std::uint32_t v = processing::YuvToBgra(wy[static_cast<size_t>(y) * stride + x], c[0], c[1], fmt);
+            dst[x * 3] = static_cast<std::uint8_t>(v);
+            dst[x * 3 + 1] = static_cast<std::uint8_t>(v >> 8);
+            dst[x * 3 + 2] = static_cast<std::uint8_t>(v >> 16);
+        }
+    }
+    BITMAPFILEHEADER fh{};
+    BITMAPINFOHEADER ih{};
+    ih.biSize = sizeof(ih);
+    ih.biWidth = w;
+    ih.biHeight = h;
+    ih.biPlanes = 1;
+    ih.biBitCount = 24;
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(ih);
+    fh.bfSize = fh.bfOffBits + static_cast<DWORD>(outBmp.size());
+    FILE* f = nullptr;
+    if (fopen_s(&f, o.applyOut.c_str(), "wb") || !f) return 1;
+    fwrite(&fh, sizeof(fh), 1, f);
+    fwrite(&ih, sizeof(ih), 1, f);
+    fwrite(outBmp.data(), 1, outBmp.size(), f);
+    fclose(f);
+    std::printf("wrote %s with %s\n", o.applyOut.c_str(), o.applyEffects.c_str());
+    return 0;
+}
+
 // Per-effect cost on a synthetic textured frame with a face (no camera needed).
 int BenchEffects() {
     std::printf("%-16s %10s %10s %10s\n", "effect", "720p ms", "1080p ms", "scratch KB");
@@ -1514,6 +1731,7 @@ int main(int argc, char** argv) {
                 case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
                 case Options::Mode::BenchFace: rc = BenchFace(o); break;
                 case Options::Mode::BenchEffects: rc = BenchEffects(); break;
+                case Options::Mode::ApplyEffects: rc = ApplyEffectsToBmp(o); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;

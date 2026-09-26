@@ -9,8 +9,8 @@ namespace ixc::effects {
 namespace {
 
 const std::vector<EffectInfo> kCatalog = {
-    {"blush.tone", L"Blush Tone", "face", true, true, Cost::VeryLow,
-     "fades out without a face; cheeks are estimated from the face box when landmarks are unreliable"},
+    {"blush.tone", L"Blush Tone", "face", true, true, Cost::Low,
+     "rosy grade always applies; the face treatment fades out without a face and uses box estimates without landmarks"},
     {"beauty.basic", L"Basic Beauty", "face", true, false, Cost::Low, "fades out without a face"},
     {"portrait.soft", L"Portrait", "portrait", true, false, Cost::Moderate, "uses a centred subject when no face is tracked"},
     {"color.warm", L"Warm Glow", "color", false, false, Cost::VeryLow, "none needed"},
@@ -19,6 +19,39 @@ const std::vector<EffectInfo> kCatalog = {
     {"color.vivid", L"Vivid", "color", false, false, Cost::VeryLow, "none needed"},
     {"lighting.soft", L"Soft Light", "lighting", false, false, Cost::VeryLow, "none needed"},
 };
+
+// ---- Blush Tone parameters (measured; see docs/blush-tone.md) -----------------------------------------
+// Global luma curve: shadows deeper, mid-tones lifted, highlights rolled off (video-range levels).
+constexpr float kBlushCurveIn[] = {16, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124, 132, 140, 148, 156, 164, 172, 180, 188, 196, 204, 212, 220, 228, 235};
+constexpr float kBlushCurveOut[] = {16, 24, 29, 38.7f, 47.1f, 60, 70, 78.3f, 87.9f, 97.2f, 107.3f, 116.8f, 122.3f, 130.5f, 138.2f, 146.8f, 155.4f,
+                                    162.1f, 168.7f, 175.5f, 182.3f, 189.9f, 196.8f, 202.8f, 207.2f, 210.7f, 211.7f, 214};
+constexpr float kBlushUScale = 0.779f;  // blue-yellow axis damped
+constexpr float kBlushVScale = 1.254f;  // red-green axis boosted: the rosy look
+constexpr float kBlushVOffset = -2.0f;
+struct TintSpec {
+    float drop, rx, ry, dY, dU, dV;  // centre offset/radii in eye distances (lips: mouth widths)
+    int lumaFloor = 60;
+};
+struct SkinSpec {
+    float smoothing, radiusDiv, edge;
+};
+constexpr SkinSpec kBlushSkin{1.0f, 20, 24};  // softer than Basic Beauty (reference is very smooth)
+constexpr TintSpec kBlushFace{0, 0, 0, 2, -6, 3};  // whole-face peach warmth: radii from the face box
+constexpr TintSpec kBlushEyes{0.22f, 0.40f, 0.22f, 0, -4, 2};
+constexpr TintSpec kBlushNose{0.02f, 0.22f, 0.18f, 0, -3, 2};
+constexpr TintSpec kBlushCheeks{0, 0.34f, 0.24f, 0, 0, 0};  // the reference shows no distinct cheek patches
+constexpr TintSpec kBlushLips{0.08f, 0.62f, 0.30f, 4, -3, 22, 55};
+
+float BlushCurve(float v) {
+    if (v <= kBlushCurveIn[0]) return v;
+    for (size_t i = 1; i < std::size(kBlushCurveIn); ++i) {
+        if (v <= kBlushCurveIn[i]) {
+            const float t = (v - kBlushCurveIn[i - 1]) / (kBlushCurveIn[i] - kBlushCurveIn[i - 1]);
+            return kBlushCurveOut[i - 1] + t * (kBlushCurveOut[i] - kBlushCurveOut[i - 1]);
+        }
+    }
+    return kBlushCurveOut[std::size(kBlushCurveOut) - 1] + (v - 235) * 0.5f;
+}
 
 std::uint8_t Clamp8(float v) { return static_cast<std::uint8_t>(std::clamp(v + 0.5f, 0.0f, 255.0f)); }
 float Smoothstep(float e0, float e1, float x) {
@@ -63,7 +96,19 @@ std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry
         const std::string_view id = e.id;
         if (id == "portrait.soft") faceStrength[0] = s;
         else if (id == "beauty.basic") faceStrength[1] = s;
-        else if (id == "blush.tone") faceStrength[2] = s;
+        else if (id == "blush.tone") {
+            faceStrength[2] = s;
+            // Global grade of the look (measured curve, defined on video-range levels).
+            cfg->grade = true;
+            for (auto& v : cfg->yLut) {
+                const float video = fullRange ? 16 + v * (219.0f / 255) : static_cast<float>(v);
+                float out = video + (BlushCurve(video) - video) * s;
+                if (fullRange) out = (out - 16) * (255.0f / 219);
+                v = Clamp8(out);
+            }
+            mapC(cfg->uLut, [&](float u) { return 128 + (u - 128) * (1 + (kBlushUScale - 1) * s); });
+            mapC(cfg->vLut, [&](float v) { return 128 + (v - 128) * (1 + (kBlushVScale - 1) * s) + kBlushVOffset * s; });
+        }
         else {
             cfg->grade = true;
             if (id == "color.warm") {
@@ -133,44 +178,84 @@ void EffectRenderer::UpdateFace(const processing::Nv12Frame& f, const FrameConte
     }
     face_.cheekL = px(cl);
     face_.cheekR = px(cr);
+    if (best->landmarksValid) {
+        face_.eyeL = px(l.leftEye);
+        face_.eyeR = px(l.rightEye);
+        face_.nose = px(l.nose);
+        face_.mouthL = px(l.mouthLeft);
+        face_.mouthR = px(l.mouthRight);
+    } else {  // typical frontal proportions within the box
+        const face::RectF& s = best->box;
+        face_.eyeL = px({s.x + 0.32f * s.w, s.y + 0.40f * s.h});
+        face_.eyeR = px({s.x + 0.68f * s.w, s.y + 0.40f * s.h});
+        face_.nose = px({s.x + 0.50f * s.w, s.y + 0.60f * s.h});
+        face_.mouthL = px({s.x + 0.36f * s.w, s.y + 0.78f * s.h});
+        face_.mouthR = px({s.x + 0.64f * s.w, s.y + 0.78f * s.h});
+    }
+    face_.eyeDist = eyeDist;
     face_.cheekRx = 0.34f * eyeDist;
     face_.cheekRy = 0.24f * eyeDist;
     face_.valid = face_.w > 8 && face_.h > 8;
 }
 
-void EffectRenderer::Blush(const processing::Nv12Frame& f, float a) {
-    a *= presence_;
-    if (!face_.valid || a < 0.01f || face_.cheekRx < 2) return;
-    for (const face::PointF& c : {face_.cheekL, face_.cheekR}) {
-        // Chroma (half resolution): a soft rose tint; luma: slightly deeper.
-        const float cx = c.x / 2, cy = c.y / 2, rx = face_.cheekRx / 2, ry = face_.cheekRy / 2;
-        const int x0 = std::max(0, static_cast<int>(cx - rx)), x1 = std::min(f.width / 2 - 1, static_cast<int>(cx + rx));
-        const int y0 = std::max(0, static_cast<int>(cy - ry)), y1 = std::min(f.height / 2 - 1, static_cast<int>(cy + ry));
-        for (int y = y0; y <= y1; ++y) {
+// Soft elliptical tint (luma delta dY, chroma deltas dU/dV) with a (1-d)^2 falloff. lumaFloor > 0
+// fades the tint out on dark pixels (beard, open mouth, nostrils) so only skin/lip tones change.
+void EffectRenderer::Tint(const processing::Nv12Frame& f, face::PointF c, float rx, float ry, float dY, float dU, float dV, float a,
+                          int lumaFloor) {
+    if (rx < 1 || ry < 1 || a < 0.005f) return;
+    auto gate = [&](int luma) { return lumaFloor > 0 ? Smoothstep(static_cast<float>(lumaFloor), static_cast<float>(lumaFloor + 35), static_cast<float>(luma)) : 1.0f; };
+    const int x0 = std::max(0, static_cast<int>(c.x - rx)), x1 = std::min(f.width - 1, static_cast<int>(c.x + rx));
+    const int y0 = std::max(0, static_cast<int>(c.y - ry)), y1 = std::min(f.height - 1, static_cast<int>(c.y + ry));
+    if (dU != 0 || dV != 0) {
+        for (int y = y0 / 2; y <= y1 / 2; ++y) {
             std::uint8_t* row = f.uv + static_cast<std::ptrdiff_t>(y) * f.uvStride;
-            const float dy = (static_cast<float>(y) - cy) / ry;
-            for (int x = x0; x <= x1; ++x) {
-                const float dx = (static_cast<float>(x) - cx) / rx, d = dx * dx + dy * dy;
+            const std::uint8_t* lumaRow = f.y + static_cast<std::ptrdiff_t>(y * 2) * f.yStride;
+            const float dy = (static_cast<float>(y * 2) - c.y) / ry;
+            for (int x = x0 / 2; x <= x1 / 2; ++x) {
+                const float dx = (static_cast<float>(x * 2) - c.x) / rx, d = dx * dx + dy * dy;
                 if (d >= 1) continue;
-                const float m = (1 - d) * (1 - d) * a;
-                row[2 * x] = Clamp8(row[2 * x] - 8 * m);          // U: a little less blue
-                row[2 * x + 1] = Clamp8(row[2 * x + 1] + 26 * m);  // V: more red
+                const float m = (1 - d) * (1 - d) * a * gate(lumaRow[x * 2]);
+                row[2 * x] = Clamp8(row[2 * x] + dU * m);
+                row[2 * x + 1] = Clamp8(row[2 * x + 1] + dV * m);
             }
         }
-        const int Y0 = std::max(0, y0 * 2), Y1 = std::min(f.height - 1, y1 * 2 + 1);
-        const int X0 = std::max(0, x0 * 2), X1 = std::min(f.width - 1, x1 * 2 + 1);
-        for (int y = Y0; y <= Y1; ++y) {
+    }
+    if (dY != 0) {
+        for (int y = y0; y <= y1; ++y) {
             std::uint8_t* row = f.y + static_cast<std::ptrdiff_t>(y) * f.yStride;
-            const float dy = (static_cast<float>(y) - c.y) / face_.cheekRy;
-            for (int x = X0; x <= X1; ++x) {
-                const float dx = (static_cast<float>(x) - c.x) / face_.cheekRx, d = dx * dx + dy * dy;
-                if (d < 1) row[x] = Clamp8(row[x] - 5 * (1 - d) * (1 - d) * a);
+            const float dy = (static_cast<float>(y) - c.y) / ry;
+            for (int x = x0; x <= x1; ++x) {
+                const float dx = (static_cast<float>(x) - c.x) / rx, d = dx * dx + dy * dy;
+                if (d < 1) row[x] = Clamp8(row[x] + dY * (1 - d) * (1 - d) * a * gate(row[x]));
             }
         }
     }
 }
 
-void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a) {
+// "Blush Tone": an independent reimplementation of the look of a reference lens the user supplied,
+// matched against lens-on/lens-off frames (docs/blush-tone.md). The global grade comes from
+// EffectConfig; this adds the face treatment: soft glowing skin, rosy under-eyes and nose tip, and
+// a coral-pink lip tint (dark beard/mouth pixels are left alone).
+void EffectRenderer::Blush(const processing::Nv12Frame& f, float a) {
+    a *= presence_;
+    if (!face_.valid || a < 0.01f || face_.eyeDist < 4) return;
+    Beauty(f, a * kBlushSkin.smoothing, kBlushSkin.radiusDiv, kBlushSkin.edge);
+    Tint(f, {face_.x + face_.w / 2, face_.y + face_.h * 0.5f}, face_.w * 0.62f, face_.h * 0.72f, kBlushFace.dY, kBlushFace.dU, kBlushFace.dV, a, 60);
+    const float ed = face_.eyeDist;
+    for (const face::PointF& e : {face_.eyeL, face_.eyeR}) {
+        Tint(f, {e.x, e.y + kBlushEyes.drop * ed}, kBlushEyes.rx * ed, kBlushEyes.ry * ed, kBlushEyes.dY, kBlushEyes.dU, kBlushEyes.dV, a, 60);
+    }
+    Tint(f, {face_.nose.x, face_.nose.y + kBlushNose.drop * ed}, kBlushNose.rx * ed, kBlushNose.ry * ed, kBlushNose.dY, kBlushNose.dU,
+         kBlushNose.dV, a, 60);
+    for (const face::PointF& c : {face_.cheekL, face_.cheekR}) {
+        Tint(f, c, kBlushCheeks.rx * ed, kBlushCheeks.ry * ed, kBlushCheeks.dY, kBlushCheeks.dU, kBlushCheeks.dV, a, 60);
+    }
+    const float mw = std::hypot(face_.mouthR.x - face_.mouthL.x, face_.mouthR.y - face_.mouthL.y);
+    const face::PointF mc{(face_.mouthL.x + face_.mouthR.x) / 2, (face_.mouthL.y + face_.mouthR.y) / 2 + kBlushLips.drop * mw};
+    Tint(f, mc, kBlushLips.rx * mw, kBlushLips.ry * mw, kBlushLips.dY, kBlushLips.dU, kBlushLips.dV, a, kBlushLips.lumaFloor);
+}
+
+void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a, float radiusDiv, float edge) {
     a *= presence_;
     if (!face_.valid || a < 0.01f) return;
     // Region: the face box widened for cheeks, raised for the forehead.
@@ -180,7 +265,7 @@ void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a) {
     const int y0 = std::max(0, static_cast<int>(cy - hh)), y1 = std::min(f.height, static_cast<int>(cy + hh));
     const int rw = x1 - x0, rh = y1 - y0;
     if (rw < 8 || rh < 8) return;
-    const int r = std::clamp(static_cast<int>(face_.w / 30), 2, 10);  // blur radius scales with the face
+    const int r = std::clamp(static_cast<int>(face_.w / radiusDiv), 2, 14);  // blur radius scales with the face
     const size_t n = static_cast<size_t>(rw) * rh;
     if (tmp_.size() < n) tmp_.resize(n);    // grows only for a bigger face; reused afterwards
     if (blur_.size() < n) blur_.resize(n);
@@ -207,7 +292,7 @@ void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a) {
     }
     // Edge-preserving blend inside a soft ellipse: small differences (skin texture) are smoothed,
     // large ones (eyes, brows, mouth, outline) are kept.
-    constexpr float kEdge = 16;
+    const float kEdge = edge;
     for (int y = 0; y < rh; ++y) {
         std::uint8_t* row = f.y + static_cast<std::ptrdiff_t>(y0 + y) * f.yStride + x0;
         const std::uint8_t* b = blur_.data() + static_cast<size_t>(y) * rw;

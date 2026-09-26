@@ -75,11 +75,15 @@ private:
         float x = 0, y = 0, w = 0, h = 0;  // box
         face::PointF cheekL, cheekR;       // output pixels
         float cheekRx = 0, cheekRy = 0;
+        face::PointF eyeL, eyeR, nose, mouthL, mouthR;  // output pixels (estimated from the box without landmarks)
+        float eyeDist = 0;
         bool valid = false;
     };
     void UpdateFace(const processing::Nv12Frame& f, const FrameContext& ctx);
     void Blush(const processing::Nv12Frame& f, float a);
-    void Beauty(const processing::Nv12Frame& f, float a);
+    void Tint(const processing::Nv12Frame& f, face::PointF c, float rx, float ry, float dY, float dU, float dV, float a, int lumaFloor);
+    // radiusDiv: blur radius = face width / radiusDiv; edge: luma difference kept as detail.
+    void Beauty(const processing::Nv12Frame& f, float a, float radiusDiv = 30, float edge = 16);
     void Portrait(const processing::Nv12Frame& f, float a);
     void Grade(const processing::Nv12Frame& f, const EffectConfig& cfg);
 
