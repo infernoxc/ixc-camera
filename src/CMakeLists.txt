@@ -6,7 +6,8 @@ add_library(ixc_core STATIC
     diagnostics/error.cpp
     diagnostics/log.cpp
     profiles/profile.cpp
-    profiles/profile_store.cpp)
+    profiles/profile_store.cpp
+    profiles/active_profile.cpp)
 target_include_directories(ixc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ixc_core PUBLIC ixc_settings)
 
@@ -22,7 +23,8 @@ target_link_libraries(ixc_camera PUBLIC ixc_core mfplat mf mfreadwrite mfuuid cf
 
 # ixc_processing: image processing (CPU paths now; GPU pipeline in Phase 6).
 add_library(ixc_processing STATIC
-    processing/color.cpp)
+    processing/color.cpp
+    processing/image_pipeline.cpp)
 target_link_libraries(ixc_processing PUBLIC ixc_core)
 
 add_subdirectory(virtual_camera)

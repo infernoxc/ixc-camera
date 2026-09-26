@@ -11,6 +11,9 @@
 
 #include "camera/capture_session.h"
 #include "processing/color.h"
+#include "processing/image_pipeline.h"
+
+#include <memory>
 
 #include <windows.h>
 #include <mfobjects.h>
@@ -35,7 +38,9 @@ public:
     // Drops the held frame and conversion buffer, and shows the placeholder text.
     void Clear(const wchar_t* placeholder);
     void FrameMessageHandled() { framePending_.store(false); }
-    void SetMirror(bool mirror);
+    // The same image pipeline IXC Camera applies, so the preview shows what apps receive.
+    // nullptr or identity params = show the camera frame unchanged.
+    void SetPipeline(std::shared_ptr<const processing::PipelineParams> params);
 
     static constexpr UINT kFrameMessage = WM_APP + 10;
 
@@ -48,9 +53,11 @@ private:
     std::atomic<bool> framePending_{false};
     Microsoft::WRL::ComPtr<IMFSample> sample_;
     camera::FrameLayout layout_;
-    bool mirror_ = false;
     bool dirty_ = false;  // held frame not yet converted at the current size
 
+    std::shared_ptr<const processing::PipelineParams> pipeline_;
+    processing::Nv12Processor processor_;
+    std::vector<std::uint8_t> processed_;  // full-size NV12 output of the pipeline, reused
     processing::Nv12ToBgraScaler scaler_;
     std::vector<std::uint32_t> bgra_;  // display-size conversion buffer, reused
     int bgraW_ = 0, bgraH_ = 0;

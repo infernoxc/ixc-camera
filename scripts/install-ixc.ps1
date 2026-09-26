@@ -9,6 +9,8 @@
                -RemoveUserData also deletes %LOCALAPPDATA%\IXC Camera (profiles, logs).
 
     Registry footprint: HKLM\Software\Classes\CLSID\{3011A045-...} and HKLM\Software\IXC Camera only.
+    Files: %ProgramFiles%\IXC Camera and %ProgramData%\IXC Camera (the active profile the camera
+    service applies; Users may write it, LOCAL SERVICE reads it).
     Nothing else is touched: no services, drivers, startup entries, browser settings or other cameras.
     A DLL still loaded by the Windows camera service is renamed and deleted at next reboot
     instead of stopping the service (which would interrupt other apps using cameras).
@@ -33,6 +35,7 @@ $InstallDir = Join-Path $env:ProgramFiles 'IXC Camera'
 $Clsid = '{3011A045-BC7A-469D-86D0-2800938E32BF}'
 $ClsidKey = "HKLM:\SOFTWARE\Classes\CLSID\$Clsid"
 $ManifestName = 'install-manifest.json'
+$SettingsDir = Join-Path $env:ProgramData 'IXC Camera'   # active-profile.json for the camera service
 $Log = Join-Path $env:TEMP 'ixc-install.log'
 $Files = @(
     @{ Name = 'IXCCameraSource.dll'; From = 'src/virtual_camera/IXCCameraSource.dll' },
@@ -106,7 +109,7 @@ function Assert-Prerequisites {
 
 # Every step runs even if an earlier one fails, so a failed rollback never strands the rest.
 # Throws at the end, listing the steps that failed.
-function Uninstall-Ixc([bool]$quietIfAbsent) {
+function Uninstall-Ixc([bool]$quietIfAbsent, [bool]$keepSettings = $false) {
     $step ={ param($name, [scriptblock]$body) try { & $body } catch { Write-Log "step $name failed: $($_.Exception.Message)"; $script:failedSteps += $name } }
     $script:failedSteps = @()
 
@@ -114,6 +117,12 @@ function Uninstall-Ixc([bool]$quietIfAbsent) {
     & $step 'RemoveSystemCamera' {
         if (Test-Path $vcam) { Invoke-Native 'RemoveSystemCamera' $vcam @('unregister') }
         elseif (-not $quietIfAbsent) { Write-Log 'ixc_vcam.exe not found; skipping system camera removal' }
+    }
+    & $step 'RemoveSettingsFolder' {
+        # Only a published copy of the user's profile lives here (the original stays in
+        # %LOCALAPPDATA%\IXC Camera), so it's always safe to remove.
+        if ($keepSettings) { Write-Log "kept $SettingsDir (upgrade)" }
+        elseif (Test-Path $SettingsDir) { Remove-Item $SettingsDir -Recurse -Force; Write-Log "removed $SettingsDir" }
     }
     & $step 'RemoveSettingsKey' {
         # IXC-owned key (wrapped camera record); ixc_vcam removes it too, this covers a missing tool.
@@ -168,7 +177,7 @@ foreach ($f in $Files) {
 
 try {
     # Upgrade in place: remove any previous installation first (keeps user data).
-    if (Test-Path $InstallDir) { Write-Log 'existing installation found; replacing it'; Uninstall-Ixc $true }
+    if (Test-Path $InstallDir) { Write-Log 'existing installation found; replacing it'; Uninstall-Ixc $true $true }
 
     New-Item -ItemType Directory -Force $InstallDir | Out-Null
     $entries = @()
@@ -181,6 +190,13 @@ try {
     }
     [ordered]@{ product = 'IXC Camera'; installedUtc = (Get-Date).ToUniversalTime().ToString('o'); files = $entries } |
         ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $InstallDir $ManifestName) -Encoding utf8
+
+    # Settings folder: the app (running as the user) publishes the active profile here, and the
+    # camera service (LOCAL SERVICE) reads it. Inheritance is disabled so the rules are exact:
+    # SYSTEM/Administrators full, Users modify, LOCAL SERVICE read.
+    New-Item -ItemType Directory -Force $SettingsDir | Out-Null
+    Invoke-Native 'SettingsFolderAcl' "$env:WINDIR\System32\icacls.exe" @($SettingsDir, '/inheritance:r',
+        '/grant:r', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)M', '*S-1-5-19:(OI)(CI)RX')
 
     Invoke-Native 'RegisterComServer' "$env:WINDIR\System32\regsvr32.exe" @('/s', (Join-Path $InstallDir 'IXCCameraSource.dll'))
     $registered = (Get-ItemProperty "$ClsidKey\InprocServer32" -ErrorAction SilentlyContinue).'(default)'

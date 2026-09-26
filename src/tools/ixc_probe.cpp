@@ -17,6 +17,8 @@
 #include "camera/format_select.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
+#include "processing/image_pipeline.h"
+#include "profiles/active_profile.h"
 
 #include <windows.h>
 #include <dshow.h>
@@ -31,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <vector>
@@ -44,7 +47,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -62,6 +65,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         if (a == "--list") o.mode = Options::Mode::List;
         else if (a == "--list-dshow") o.mode = Options::Mode::ListDirectShow;
         else if (a == "--dshow-capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::DirectShowCapture; o.seconds = std::atoi(v); }
+        else if (a == "--bench-pipeline") o.mode = Options::Mode::BenchPipeline;
+        else if (a == "--source-effect-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceEffectTest; o.sourceDll = v; }
         else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
         else if (a == "--seconds") { const char* v = next(); if (!v) return false; o.seconds = std::atoi(v); }
         else if (a == "--capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::Capture; o.seconds = std::atoi(v); }
@@ -322,6 +327,162 @@ int SourceTest(const Options& o) {
     }
     // Leave the DLL loaded: MF work queues may still reference it briefly (process exits next).
     return rc;
+}
+
+// Pure CPU benchmark of the image pipeline on synthetic NV12 frames (no camera needed).
+// Reports ms per frame for representative setting combinations at common sizes.
+int BenchPipeline() {
+    struct Case {
+        const char* name;
+        void (*apply)(Profile&);
+    };
+    const Case cases[] = {
+        {"neutral (pass-through)", [](Profile&) {}},
+        {"colour only (LUTs)", [](Profile& p) { p.image.brightness = 10; p.image.contrast = 10; p.image.saturation = 10; p.image.temperature = 10; }},
+        {"colour + mirror", [](Profile& p) { p.image.brightness = 10; p.mirror = true; }},
+        {"colour + sharpen", [](Profile& p) { p.image.brightness = 10; p.image.sharpness = 40; }},
+        {"colour + sharpen + zoom 1.5x", [](Profile& p) { p.image.brightness = 10; p.image.sharpness = 40; p.zoom = 1.5; }},
+    };
+    const int sizes[][2] = {{1280, 720}, {1920, 1080}};
+    std::printf("%-30s %12s %12s\n", "pipeline", "720p ms", "1080p ms");
+    for (const auto& c : cases) {
+        double ms[2] = {0, 0};
+        for (int si = 0; si < 2; ++si) {
+            const int w = sizes[si][0], h = sizes[si][1];
+            std::vector<std::uint8_t> src(static_cast<size_t>(w) * h * 3 / 2), dst(src.size());
+            for (size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::uint8_t>((i * 2654435761u) >> 24);  // texture-like noise
+            Profile p;
+            p.image.sharpness = 0;
+            c.apply(p);
+            const processing::PipelineParams params = processing::CompileParams(p, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), true);
+            processing::Nv12Processor proc;
+            const processing::Nv12Planes in{src.data(), src.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            const processing::Nv12Frame out{dst.data(), dst.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            if (params.identity) { ms[si] = 0; continue; }
+            proc.Process(in, out, params);  // warm-up (builds tables)
+            const int iters = 60;
+            LARGE_INTEGER f, a, b;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&a);
+            for (int i = 0; i < iters; ++i) proc.Process(in, out, params);
+            QueryPerformanceCounter(&b);
+            ms[si] = 1000.0 * static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(f.QuadPart) / iters;
+        }
+        std::printf("%-30s %12.2f %12.2f\n", c.name, ms[0], ms[1]);
+    }
+    std::printf("(single thread; at 30 FPS the frame budget is 33.3 ms)\n");
+    return 0;
+}
+
+// Verifies the IXC image pipeline inside the real source DLL, including live settings reload:
+// streams with neutral settings, publishes a brighter profile mid-stream, and checks the
+// delivered frames change. %ProgramData% is redirected to a temp folder so the user's real
+// settings are never touched.
+int SourceEffectTest(const Options& o) {
+    CaptureConfig cfg;
+    int exitCode = 0;
+    if (!Resolve(o, cfg, exitCode)) return exitCode;
+
+    wchar_t tempBuf[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempBuf);
+    const std::filesystem::path fakeProgramData = std::filesystem::path(tempBuf) / L"ixc-effect-test";
+    std::filesystem::create_directories(fakeProgramData / L"IXC Camera");
+    SetEnvironmentVariableW(L"ProgramData", fakeProgramData.c_str());
+
+    Profile neutral;
+    neutral.image.sharpness = 0;
+    Profile bright = neutral;
+    bright.image.brightness = 60;
+    bright.image.contrast = 10;
+    if (FAILED(PublishActiveProfile(neutral))) { std::printf("error: cannot write test settings\n"); return 1; }
+
+    wchar_t fullPath[MAX_PATH];
+    if (!GetFullPathNameW(Utf8ToWide(o.sourceDll).c_str(), MAX_PATH, fullPath, nullptr)) return 1;
+    HMODULE dll = LoadLibraryExW(fullPath, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    auto getClassObject = dll ? reinterpret_cast<HRESULT(STDAPICALLTYPE*)(REFCLSID, REFIID, void**)>(GetProcAddress(dll, "DllGetClassObject")) : nullptr;
+    if (!getClassObject) { std::printf("error: cannot load %s\n", o.sourceDll.c_str()); return 1; }
+    const GUID clsid = {0x3011a045, 0xbc7a, 0x469d, {0x86, 0xd0, 0x28, 0x00, 0x93, 0x8e, 0x32, 0xbf}};
+    const GUID attrLink = {0xcb5a6a96, 0x8cbe, 0x498b, {0x8b, 0x00, 0x95, 0x13, 0x88, 0x43, 0x43, 0xfb}};
+
+    ComPtr<IClassFactory> factory;
+    ComPtr<IMFActivate> activate;
+    ComPtr<IMFMediaSource> source;
+    ComPtr<IMFSourceReader> reader;
+    HRESULT hr = getClassObject(clsid, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&activate));
+    if (SUCCEEDED(hr)) hr = activate->SetString(attrLink, cfg.symbolicLink.c_str());
+    if (SUCCEEDED(hr)) hr = activate->ActivateObject(IID_PPV_ARGS(&source));
+    if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader);
+    // Pick the requested size among the source's (NV12) modes.
+    ComPtr<IMFMediaType> chosen;
+    for (DWORD i = 0; SUCCEEDED(hr) && i < 1024; ++i) {
+        ComPtr<IMFMediaType> t;
+        if (FAILED(reader->GetNativeMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &t))) break;
+        CaptureFormat f;
+        if (FormatFromMediaType(t.Get(), f) && f.width == cfg.format.width && f.height == cfg.format.height &&
+            std::abs(f.Fps() - cfg.format.Fps()) < 0.5) { chosen = t; break; }
+    }
+    if (SUCCEEDED(hr)) hr = chosen ? reader->SetCurrentMediaType(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, chosen.Get()) : MF_E_INVALIDMEDIATYPE;
+    if (FAILED(hr)) {
+        std::printf("error: %s\n", Error{hr, "OpenSource", "The IXC source could not be opened for the effect test."}.Describe().c_str());
+        return 1;
+    }
+
+    // Reads frames for `seconds`, returning mean luma and CPU used by this process.
+    auto measure = [&](double seconds, double& meanLuma, double& cpuPct, std::uint64_t& frames) {
+        frames = 0;
+        double sum = 0;
+        const ProcessSample p0 = SampleProcess();
+        LARGE_INTEGER f, a, b;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&a);
+        b = a;
+        while (static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(f.QuadPart) < seconds) {
+            DWORD flags = 0;
+            LONGLONG ts = 0;
+            ComPtr<IMFSample> s;
+            if (FAILED(reader->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, &flags, &ts, &s)) ||
+                (flags & MF_SOURCE_READERF_ERROR)) break;
+            QueryPerformanceCounter(&b);
+            if (!s) continue;
+            ComPtr<IMFMediaBuffer> buf;
+            BYTE* d = nullptr;
+            DWORD len = 0;
+            if (SUCCEEDED(s->ConvertToContiguousBuffer(&buf)) && SUCCEEDED(buf->Lock(&d, nullptr, &len))) {
+                const DWORD n = std::min<DWORD>(len, cfg.format.width * cfg.format.height);
+                std::uint64_t acc = 0, cnt = 0;
+                for (DWORD i = 0; i < n; i += 97) { acc += d[i]; ++cnt; }
+                if (cnt) sum += static_cast<double>(acc) / static_cast<double>(cnt);
+                buf->Unlock();
+                ++frames;
+            }
+        }
+        const ProcessSample p1 = SampleProcess();
+        const double wall = static_cast<double>(b.QuadPart - a.QuadPart) / static_cast<double>(f.QuadPart);
+        meanLuma = frames ? sum / static_cast<double>(frames) : -1;
+        cpuPct = wall > 0 ? 100.0 * static_cast<double>(p1.cpu100ns - p0.cpu100ns) / 1e7 / wall : 0;
+    };
+
+    double warmL = 0, warmC = 0, nL = 0, nC = 0, bL = 0, bC = 0;
+    std::uint64_t warmF = 0, nF = 0, bF = 0;
+    measure(1.5, warmL, warmC, warmF);  // settle auto exposure
+    measure(3.0, nL, nC, nF);
+    PublishActiveProfile(bright);        // live change while streaming
+    measure(0.7, warmL, warmC, warmF);   // allow the watcher to pick it up
+    measure(3.0, bL, bC, bF);
+    PublishActiveProfile(neutral);
+
+    reader.Reset();
+    source->Shutdown();
+    activate->ShutdownObject();
+    std::filesystem::remove_all(fakeProgramData);
+
+    std::printf("mode: %s through the IXC source\n", Describe(cfg.format).c_str());
+    std::printf("neutral settings:  %llu frames, mean luma %.1f, cpu %.1f%% of one core\n", static_cast<unsigned long long>(nF), nL, nC);
+    std::printf("brightness +60:    %llu frames, mean luma %.1f, cpu %.1f%% of one core\n", static_cast<unsigned long long>(bF), bL, bC);
+    const bool pass = nF > 0 && bF > 0 && bL > nL + 15;
+    std::printf("RESULT: %s%s\n", pass ? "PASS" : "FAIL", pass ? "" : " (processed frames did not get brighter)");
+    return pass ? 0 : 1;
 }
 
 // ---- DirectShow capture test (how OBS "Video Capture Device" and older apps read cameras) ------
@@ -733,7 +894,7 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     Options o;
     if (!ParseArgs(argc, argv, o)) {
-        std::printf("usage: ixc_probe --list | --list-dshow | --dshow-capture <sec> | --source-test <dll> [--seconds N] | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
+        std::printf("usage: ixc_probe --list | --list-dshow | --dshow-capture <sec> | --source-test <dll> [--seconds N] | --source-effect-test <dll> | --bench-pipeline | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
                     "                 [--output native|nv12|rgb32] [--subtype NV12|MJPG|YUY2] [--require-camera]\n");
         return 2;
     }
@@ -749,6 +910,8 @@ int main(int argc, char** argv) {
                 case Options::Mode::ListDirectShow: rc = ListDirectShow(); break;
                 case Options::Mode::DirectShowCapture: rc = DirectShowCapture(o); break;
                 case Options::Mode::SourceTest: rc = SourceTest(o); break;
+                case Options::Mode::SourceEffectTest: rc = SourceEffectTest(o); break;
+                case Options::Mode::BenchPipeline: rc = BenchPipeline(); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;

@@ -7,6 +7,7 @@
 //   * Frames are painted only when they arrive. There is no render loop.
 //   * The 1 s status timer runs only while previewing.
 
+#include "app/adjustments_panel.h"
 #include "app/preview_window.h"
 #include "camera/capture_session.h"
 #include "camera/device_enum.h"
@@ -15,6 +16,8 @@
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
 #include "ixc/version.h"
+#include "processing/image_pipeline.h"
+#include "profiles/active_profile.h"
 #include "profiles/profile_store.h"
 #include "virtual_camera/registration.h"
 
@@ -61,6 +64,8 @@ constexpr UINT kStateMessage = WM_APP + 11;
 constexpr UINT kVcamDoneMessage = WM_APP + 12;  // wParam = ixc_vcam.exe exit code
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
+constexpr UINT_PTR kPublishTimer = 3;       // saves/publishes settings shortly after the last slider move
+constexpr int kFirstPanelId = 200;
 
 std::filesystem::path LocalAppDataDir() {
     PWSTR raw = nullptr;
@@ -109,6 +114,9 @@ private:
     void UpdateVcamControls();
     void UseSelectedForIxcCamera();
     void OnVcamDone(DWORD exitCode);
+    void OnPictureChanged();
+    void UpdatePipeline();
+    void SaveAndPublish();
     static void CALLBACK OnVcamProcessExit(void* ctx, BOOLEAN timedOut);
 
     HINSTANCE instance_;
@@ -132,6 +140,8 @@ private:
     std::vector<CaptureFormat> formats_;  // normalized; format combo item i+1 ↔ formats_[i] (item 0 = Auto)
     ComPtr<CaptureSession> session_;
     app::PreviewWindow preview_;
+    app::AdjustmentsPanel panel_;
+    bool publishWarned_ = false;
     bool previewing_ = false;
     bool resumeOnRestore_ = false;
 };
@@ -160,8 +170,16 @@ bool MainWindow::Create(int showCmd) {
     devNotify_ = RegisterDeviceNotificationW(hwnd_, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
     LoadProfile();
+    panel_.Refresh();
     RefreshCameras();
     RefreshVcamStatus();
+    // Make sure IXC Camera applies this user's current settings (write only when they differ).
+    if (vcam_.comRegistered && profileLoaded_) {
+        const ProfileLoadResult published = LoadActiveProfile();
+        Profile current = profile_;
+        Validate(current);
+        if (!published.ok || !(published.profile == current)) SaveAndPublish();
+    }
     ShowWindow(hwnd_, showCmd);
     return true;
 }
@@ -184,6 +202,7 @@ void MainWindow::CreateControls() {
     vcamStatus_ = make(WC_STATICW, L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, kIdVcamStatus);
     vcamUse_ = make(WC_BUTTONW, L"Use this webcam for IXC Camera", BS_PUSHBUTTON | WS_TABSTOP, kIdVcamUse);
     preview_.Clear(L"Choose a camera and select Start preview.");
+    panel_.Create(hwnd_, instance_, kFirstPanelId, &profile_, [this] { OnPictureChanged(); });
 }
 
 void MainWindow::ApplyFont() {
@@ -194,6 +213,7 @@ void MainWindow::ApplyFont() {
     for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_, vcamStatus_, vcamUse_}) {
         SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
+    panel_.SetFont(font_);
 }
 
 void MainWindow::Layout() {
@@ -223,7 +243,11 @@ void MainWindow::Layout() {
     const int bottomH = rowH * 3 + 2 * gap + (privacyVisible ? rowH + gap : 0);
     const int previewTop = y + rowH + gap;
     const int previewH = std::max(0, h - previewTop - bottomH - pad);
-    MoveWindow(preview_.hwnd(), pad, previewTop, w - 2 * pad, previewH, TRUE);
+    // Picture adjustments on the right of the preview; the preview stays the visual centre.
+    const int panelW = Scale(300);
+    const int previewW = std::max(0, w - 2 * pad - panelW - gap);
+    MoveWindow(preview_.hwnd(), pad, previewTop, previewW, previewH, TRUE);
+    panel_.Layout(pad + previewW + gap, previewTop, panelW, Scale(26), gap);
 
     int by = previewTop + previewH + gap;
     MoveWindow(status_, pad, by, w - 2 * pad, rowH, TRUE);
@@ -466,7 +490,6 @@ void MainWindow::StartPreview() {
     cfg.output = OutputFormat::Nv12;  // pipeline format; the preview converts only displayed pixels
 
     SetWindowTextW(status_, (L"Opening " + W(cam.name) + L"…").c_str());
-    preview_.SetMirror(profile_.mirror);
     const Error err = session_->Start(cfg);
     if (FAILED(err.hr)) {
         const bool denied = ClassifyHResult(err.hr) == ErrorClass::AccessDenied;
@@ -498,7 +521,40 @@ void MainWindow::StartPreview() {
     profile_.fpsNumerator = active.fpsNumerator;
     profile_.fpsDenominator = active.fpsDenominator;
     SaveProfile();
+    UpdatePipeline();
     UpdateStatus();
+}
+
+// ---- picture settings -------------------------------------------------------------------------------
+
+void MainWindow::OnPictureChanged() {
+    UpdatePipeline();                            // preview reflects the change immediately
+    SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
+}
+
+void MainWindow::UpdatePipeline() {
+    if (!previewing_ || !session_) {
+        preview_.SetPipeline(nullptr);
+        return;
+    }
+    const FrameLayout l = session_->Layout();
+    const bool fullRange = l.nominalRange == MFNominalRange_0_255;
+    preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(profile_, l.width, l.height, fullRange)));
+}
+
+void MainWindow::SaveAndPublish() {
+    KillTimer(hwnd_, kPublishTimer);
+    SaveProfile();
+    // Publish for the IXC Camera source (inside the Windows camera service). Apps using IXC
+    // Camera pick the change up on their next frame.
+    if (!vcam_.comRegistered) return;
+    const HRESULT hr = PublishActiveProfile(profile_);
+    if (FAILED(hr) && !publishWarned_) {
+        publishWarned_ = true;
+        const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
+        log::Error("profiles", e.Describe());
+        SetWindowTextW(vcamStatus_, (W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
+    }
 }
 
 void MainWindow::StopPreview(const wchar_t* placeholder) {
@@ -619,11 +675,16 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            mmi->ptMinTrackSize = {Scale(640), Scale(420)};
+            mmi->ptMinTrackSize = {Scale(900), Scale(600)};  // room for preview + adjustment panel
             return 0;
         }
 
+        case WM_HSCROLL:
+            if (lp && panel_.OnScroll(reinterpret_cast<HWND>(lp))) return 0;
+            break;
+
         case WM_COMMAND:
+            if (lp && panel_.OnCommand(reinterpret_cast<HWND>(lp), HIWORD(wp))) return 0;
             switch (LOWORD(wp)) {
                 case kIdCamera:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
@@ -667,6 +728,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_TIMER:
             if (wp == kStatusTimer) UpdateStatus();
+            else if (wp == kPublishTimer) SaveAndPublish();
             else if (wp == kDeviceRefreshTimer) {
                 KillTimer(hwnd_, kDeviceRefreshTimer);
                 RefreshCameras();
@@ -686,6 +748,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             KillTimer(hwnd_, kStatusTimer);
+            if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // don't lose the last slider move
             if (session_) {
                 session_->Close();
                 session_.Reset();

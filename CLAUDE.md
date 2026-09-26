@@ -34,7 +34,9 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - `src/camera` enumeration, format selection, capture session, stats, reconnect · `src/processing` colour conversion
 - `src/app` Win32 UI + preview · `src/tools/ixc_probe` diagnostics · `src/tools/ixc_vcam` registration
 - `src/virtual_camera/source` IXCCameraSource.dll (Activate → MediaSource → MediaStream::ProcessSample hook) · `src/virtual_camera/registration.*`
-- Phases 1–4 are done. Next is Phase 5 (basic processing in ProcessSample: crop, mirror, colour, sharpness, zoom). The first decision is how settings reach the source inside Frame Server (docs/architecture.md, open question 1).
+- `src/processing/image_pipeline` CPU pipeline (reference for the GPU path) · `src/profiles/active_profile` settings file for the service · `src/app/adjustments_panel` sliders
+- Phases 1–5 are done. Next is Phase 6 (GPU pipeline): it must match `Nv12Processor` output and beat it measurably (`ixc_probe --bench-pipeline`).
+- Frame Server stops a client with `SetStreamState(STOPPED)`, not an MEStreamStopped event. Free per-session resources there.
 
 ## Facts learned on the dev machine
 - The Lenovo FHD Webcam sends 1080p30/720p30 as MJPG. Its "NV12 30 FPS" modes are decoded by Windows Frame Server.

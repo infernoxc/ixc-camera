@@ -7,6 +7,8 @@
 // The stream exposes only uncompressed NV12 media types, so every mode an app can pick is one
 // IXC can process. Frame rates and sizes are exactly the physical camera's.
 
+#include "virtual_camera/source/frame_processor.h"
+
 #include <mfapi.h>
 #include <mfidl.h>
 #include <wrl/implements.h>
@@ -50,7 +52,10 @@ private:
     class EventCallback;
     void OnDeviceStreamEvent(IMFAsyncResult* result);
     HRESULT ProcessSample(IMFSample* sample);
+    void BeginProcessingSession();
     HRESULT CheckShutdownLocked() const;
+
+    FrameProcessor processor_;  // frame path runs on the serial work queue only
 
     std::mutex mu_;
     bool shutdown_ = false;

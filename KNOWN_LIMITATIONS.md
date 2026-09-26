@@ -12,8 +12,15 @@
 ## Upgrades
 - If the Windows camera service still has the previous IXC DLL loaded during an upgrade or uninstall, the old file is renamed `*.old-*` and deleted at the next reboot. Until the service unloads it (it stops by itself when idle, or on reboot), apps may still get the old version.
 
+## Picture processing
+- Processing runs on the CPU (SSE2). GPU processing comes in Phase 6. Digital zoom is the most expensive setting (≈7 ms per 1080p frame on the reference Ryzen); on weak PCs prefer 720p when zooming.
+- **Denoise isn't implemented yet.** "Low-light boost" lifts dark tones but doesn't reduce noise.
+- Crop can be set in a profile file but has no editor in the app yet. Digital zoom (centre crop) is in the app.
+- The app's preview and IXC Camera can't run at the same time (one app per webcam, see below). Adjust settings with the preview, close it, then use IXC Camera. Changes made in the app while another app uses IXC Camera still apply live.
+- IXC Camera settings are machine-wide: any user on this PC who opens the app changes what IXC Camera shows.
+
 ## Not yet implemented (later phases)
-- Image processing and effects (IXC Camera currently passes the picture through unchanged).
+- Face tracking and effects (Phase 7–8).
 - Packaged installer `IXC-Camera-Setup-x64.exe` with an Apps & Features entry (Phase 12). The development installer is `scripts/install-ixc.ps1`.
 - Code signing.
 

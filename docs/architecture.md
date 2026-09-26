@@ -57,7 +57,22 @@ Decisions, verified on the dev machine:
 - **No file logging in the service**: TraceLogging provider `IXC.Camera.Source` ({6880FEE1-8B41-4322-ACF6-E6C1BF585B50}), captured with `scripts/trace-vcam.ps1`.
 - **Footprint**: `%ProgramFiles%\IXC Camera\`, `HKLM\Software\Classes\CLSID\{3011A045-BC7A-469D-86D0-2800938E32BF}`, `HKLM\Software\IXC Camera` (records the wrapped webcam, since Windows doesn't expose it). Nothing else.
 
+## Image pipeline and settings delivery (Phase 5, implemented)
+
+```
+IXCCamera.exe (user)                          Frame Server service (LOCAL SERVICE)
+  profile in %LOCALAPPDATA%\IXC Camera          IXCCameraSource.dll
+      │ slider change (debounced 250 ms)            │ stream started → BeginSession: load + watch
+      ▼                                             │ file change → reload, validate, compile
+  %ProgramData%\IXC Camera\active-profile.json ─────┘ (thread-pool wait; only while streaming)
+  (atomic write; Users: modify, LOCAL SERVICE: read)  every frame → Nv12Processor → pooled sample
+```
+
+- **One pipeline everywhere.** `processing::Nv12Processor` runs in the source and in the app preview, so the preview shows exactly what apps receive.
+- **Compiled settings.** Tone and colour become three 256-entry lookup tables. Sharpening is an SSE2 unsharp mask with a noise threshold and halo clamp. Crop, zoom and mirror are one bilinear rescale that preserves the output aspect ratio. Neutral settings pass frames through without copying.
+- **Hostile-input handling.** The settings file crosses a privilege boundary (a user writes it, a service reads it). It's read with a 64 KB limit, parsed by the strict JSON reader, and every value is clamped. A missing file means neutral settings; a present-but-invalid file keeps the last good settings. Nothing in it is executed.
+- **Idle means idle.** Windows stops a client via `SetStreamState(STOPPED)`. That ends the session: the settings watch stops and the frame pool (≤ 6 frames) is released.
+
 ## Open design questions
 
-1. **Where the media source reads its settings** (needed once effects exist, Phase 5+). The source runs in the Frame Server service account and can't read the user's `%LOCALAPPDATA%`. Candidates: settings passed as virtual-camera attributes at registration, or a read-only copy under `%ProgramData%\IXC Camera` written by the app. To be decided and verified in Phase 5.
-2. **Processing a webcam another app controls** (Windows shared mode, `IMFSensorDevice::SetSensorDeviceMode(Shared)`). This would let IXC Camera run while another app uses the physical webcam, at that app's format. Deferred.
+1. **Processing a webcam another app controls** (Windows shared mode, `IMFSensorDevice::SetSensorDeviceMode(Shared)`). This would let IXC Camera run while another app uses the physical webcam, at that app's format. Deferred.

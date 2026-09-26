@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 — Phase 5 basic processing (2026-09-26)
+
+### Added
+- **Image pipeline** (`processing/image_pipeline`): brightness, contrast, saturation, warmth, tint, exposure, highlights, shadows, low-light boost, gamma, sharpness (SSE2), crop, digital zoom and mirror on NV12. Settings compile to lookup tables and geometry; neutral settings pass frames through; no per-frame allocation.
+- **IXC Camera applies the user's settings** inside the Windows camera service, reloaded live while streaming (event-driven file watch), using a bounded pool of output frames.
+- **Settings delivery**: the app publishes the active profile to `%ProgramData%\IXC Camera\active-profile.json`. The installer creates the folder with exact permissions (Users modify, LOCAL SERVICE read) and keeps it across upgrades.
+- **App**: picture panel with 12 sliders, mirror and reset. The live preview runs the same pipeline (WYSIWYG). Settings are saved and published 250 ms after the last change.
+- `ixc_probe --bench-pipeline` and `--source-effect-test`; CTest `vcam_source_effects`; UI smoke test covers the sliders, publishing and reset.
+- 18 new unit tests (91 total), including SSE2-vs-scalar bit-exactness and hostile settings files.
+
+### Fixed during this phase
+- Sharpening cost 20 ms per 1080p frame; it's now 2 ms (SSE2, bit-identical).
+- The source kept its settings watch and frame pool alive after an app stopped (Windows stops streams via `SetStreamState`, not a stop event).
+- The frame pool pointer wasn't consistently lock-protected between the frame path and session end.
+- A settings file caught mid-write briefly reset the picture to neutral; now the last good settings are kept.
+- Installer upgrades deleted the published settings.
+
+### Not yet
+- Denoise (the profile field exists; no algorithm yet), a crop editor in the UI (crop works from the profile), GPU processing (Phase 6).
+
 ## 0.3.0 — Phase 4 IXC Camera system camera (2026-09-26)
 
 ### Added

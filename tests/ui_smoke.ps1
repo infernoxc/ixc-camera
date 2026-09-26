@@ -47,7 +47,7 @@ public static class Ui {
                 n++; sum += l; sumSq += l*l; if (l > 12) lit++;
             }
             double mean = sum / n;
-            return new double[] { (double)lit / n, Math.Sqrt(Math.Max(0, sumSq / n - mean * mean)) };
+            return new double[] { (double)lit / n, Math.Sqrt(Math.Max(0, sumSq / n - mean * mean)), mean };
         }
     }
 }
@@ -102,6 +102,26 @@ Check (-not [Ui]::IsWindowEnabled($camera)) 'camera selector locked while previe
 $st = [Ui]::PreviewStats($preview)
 "preview: {0:P0} non-black, luma std-dev {1:N1}" -f $st[0], $st[1]
 Check ($st[0] -gt 0.5 -and $st[1] -gt 3) 'preview shows a live image (not black/flat)'
+
+# Picture adjustments: move the Brightness slider like a user would (TBM_SETPOS + WM_HSCROLL).
+$IdBrightnessTrack = 202; $IdReset = 238   # kFirstPanelId 200: header, then label/track/value per slider, mirror, reset
+$track = [Ui]::GetDlgItem($hwnd, $IdBrightnessTrack); $reset = [Ui]::GetDlgItem($hwnd, $IdReset)
+$settingsFile = Join-Path $env:ProgramData 'IXC Camera\active-profile.json'
+$before = [Ui]::PreviewStats($preview)[2]
+[Ui]::SendMessageW($track, 0x0405, [IntPtr]1, [IntPtr]70) | Out-Null          # TBM_SETPOS(redraw, 70)
+[Ui]::SendMessageW($hwnd, 0x0114, [IntPtr]8, $track) | Out-Null               # WM_HSCROLL(TB_ENDTRACK)
+Start-Sleep -Milliseconds 1200
+$after = [Ui]::PreviewStats($preview)[2]
+"preview: mean luma {0:N1} -> {1:N1} after Brightness +70" -f $before, $after
+Check ($after -gt $before + 15) 'Brightness slider changes the live preview'
+if (Test-Path (Split-Path $settingsFile)) {
+    $published = Get-Content $settingsFile -Raw -ErrorAction SilentlyContinue
+    Check ($published -match '"brightness": 70') 'setting published for IXC Camera'
+    [Ui]::SendMessageW($reset, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    $published = Get-Content $settingsFile -Raw -ErrorAction SilentlyContinue
+    Check ($published -match '"brightness": 0') 'Reset picture restores and republishes neutral settings'
+}
 
 $proc = Get-Process -Id $p.Id; $proc.Refresh()
 $liveMb = $proc.PrivateMemorySize64 / 1MB

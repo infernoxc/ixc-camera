@@ -124,16 +124,30 @@ HRESULT MediaStream::AttachDeviceStream(IMFMediaStream* devStream) {
 }
 
 HRESULT MediaStream::Shutdown() {
-    std::lock_guard lock(mu_);
-    if (shutdown_) return S_OK;
-    shutdown_ = true;
-    if (events_) events_->Shutdown();
-    events_.Reset();
-    devStream_.Reset();
-    parent_.Reset();
-    devCallback_.Reset();  // breaks the callback ↔ stream reference cycle
-    IXC_TRACE("StreamShutdown", TraceLoggingUInt32(streamId_, "streamId"), TraceLoggingUInt64(framesDelivered_, "frames"));
+    {
+        std::lock_guard lock(mu_);
+        if (shutdown_) return S_OK;
+        shutdown_ = true;
+        if (events_) events_->Shutdown();
+        events_.Reset();
+        devStream_.Reset();
+        parent_.Reset();
+        devCallback_.Reset();  // breaks the callback ↔ stream reference cycle
+        IXC_TRACE("StreamShutdown", TraceLoggingUInt32(streamId_, "streamId"), TraceLoggingUInt64(framesDelivered_, "frames"));
+    }
+    processor_.EndSession();  // outside the lock: waits for a settings reload in progress
     return S_OK;
+}
+
+void MediaStream::BeginProcessingSession() {
+    ComPtr<IMFMediaTypeHandler> handler;
+    ComPtr<IMFMediaType> type;
+    {
+        std::lock_guard lock(mu_);
+        if (shutdown_ || !descriptor_) return;
+        if (FAILED(descriptor_->GetMediaTypeHandler(&handler)) || FAILED(handler->GetCurrentMediaType(&type))) return;
+    }
+    processor_.BeginSession(type.Get());
 }
 
 // ---- event generator ------------------------------------------------------------------------------
@@ -204,7 +218,14 @@ STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE state) {
         if (FAILED(devStream_.As(&dev))) return E_NOTIMPL;
     }
     IXC_TRACE("SetStreamState", TraceLoggingUInt32(streamId_, "streamId"), TraceLoggingInt32(state, "state"));
-    return dev->SetStreamState(state);
+    const HRESULT hr = dev->SetStreamState(state);
+    // Frame Server stops a client's stream this way (no MEStreamStopped arrives), so this is
+    // where an idle camera must let go of its settings watcher and frame pool.
+    if (SUCCEEDED(hr)) {
+        if (state == MF_STREAM_STATE_STOPPED) processor_.EndSession();
+        else if (state == MF_STREAM_STATE_RUNNING && !processor_.Active()) BeginProcessingSession();
+    }
+    return hr;
 }
 
 STDMETHODIMP MediaStream::GetStreamState(MF_STREAM_STATE* state) {
@@ -244,6 +265,10 @@ void MediaStream::OnDeviceStreamEvent(IMFAsyncResult* result) {
         PropVariantClear(&v);
         if (SUCCEEDED(hr)) hr = ProcessSample(sample.Get());
         forward = false;  // ProcessSample queued the (processed) sample itself
+    } else if (SUCCEEDED(hr) && met == MEStreamStarted) {
+        BeginProcessingSession();  // the app's chosen media type is final now
+    } else if (SUCCEEDED(hr) && met == MEStreamStopped) {
+        processor_.EndSession();   // idle: stop watching settings, free the frame pool
     }
 
     // An MEError from the physical stream carries its failure in the event status.
@@ -274,13 +299,14 @@ void MediaStream::OnDeviceStreamEvent(IMFAsyncResult* result) {
 }
 
 HRESULT MediaStream::ProcessSample(IMFSample* sample) {
-    // Phase 4: identity. This is the single insertion point for the IXC image pipeline
-    // (Phase 5/6). It must stay allocation-free and must never block.
+    // The single insertion point of the IXC image pipeline. Runs on the source's serial work
+    // queue; never blocks and never allocates per frame (the processor uses a bounded pool).
+    const ComPtr<IMFSample> out = processor_.Process(sample);
     std::lock_guard lock(mu_);
     if (shutdown_) return S_OK;
     ++framesDelivered_;
     if (framesDelivered_ == 1) IXC_TRACE("FirstFrame", TraceLoggingUInt32(streamId_, "streamId"));
-    return events_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample);
+    return events_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, out.Get());
 }
 
 }  // namespace ixc::vcam

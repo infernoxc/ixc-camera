@@ -72,6 +72,37 @@ Same machine and camera. IXC's source runs inside the Windows camera service (Fr
 | Frame Server growth over 30 cycles | +99 handles / +1.1 MB via IXC vs **+97 handles / +0.7 MB direct**. This is Windows bookkeeping, not IXC |
 | IXCCameraSource.dll size | 190 KB (static CRT, no dependencies beyond Windows) |
 
+## Phase 5: image pipeline (CPU, 2026-09-26)
+
+### Pipeline cost per frame (`ixc_probe --bench-pipeline`, single thread, synthetic noisy frames)
+
+| Settings | 720p | 1080p |
+|---|---|---|
+| Neutral (pass-through, no copy) | 0 ms | 0 ms |
+| Colour/tone only (lookup tables) | 0.43 ms | 0.98 ms |
+| Colour + mirror | 0.62 ms | 1.38 ms |
+| Colour + sharpen (the **default** profile sharpens subtly) | 0.87 ms | 1.95 ms |
+| Colour + sharpen + digital zoom 1.5× | 3.02 ms | 6.80 ms |
+
+At 30 FPS the frame budget is 33.3 ms. Before optimization, sharpening cost **20.4 ms** at 1080p (scalar); the SSE2 version is ~10× faster and bit-identical to the scalar reference (unit-tested). The zoom path's vertical-then-horizontal restructuring took the total from 9.4 to 6.8 ms. The noisy synthetic frames are a worst case for sharpening: real camera frames have large flat areas that the noise threshold skips.
+
+### In the real source
+
+| Measurement | Value |
+|---|---|
+| Brightness +60 through IXC Camera, seen by a separate app | mean luma 113.7 → 148.0 |
+| Live settings change mid-stream | applied within the next frames, no restart |
+| Frame pool | 0 exhaustions, 0 errors over all runs; at most 6 frames in flight |
+| Idle after the app stops | processing session, settings watch and frame pool released immediately (`SetStreamState(STOPPED)`) |
+| IXCCameraSource.dll | 468 KB; imports only MF, MFPlat, MFSensorGroup, ole32, advapi32, kernel32 |
+
+### App preview (default profile: subtle sharpening, 1080p)
+
+| Measurement | Value |
+|---|---|
+| Private memory previewing | 8.8 MB (full-size processed frame buffer: +1.9 MB) |
+| UI process CPU | 5.9% of one core (~20 FPS) |
+
 ## Pending (not measured)
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
 - 30-minute burn-in: scheduled for Phase 10.

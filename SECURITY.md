@@ -13,7 +13,8 @@ IXC Camera:
 - makes no network connections for camera processing, collects no telemetry, and needs no account;
 - never executes code from effect packages or profiles. They are validated data (see `src/common/json.h` for parser limits);
 - respects Windows camera privacy settings and never tries to bypass them;
-- keeps logs free of secrets and personal content, with size-capped rotation.
+- keeps logs free of secrets and personal content, with size-capped rotation;
+- treats `%ProgramData%\IXC Camera\active-profile.json` as untrusted. It's writable by local users and read by the camera service, so it's size-limited, strictly parsed, clamped, and never executed. The service only reads it.
 
 ## Release verification
 

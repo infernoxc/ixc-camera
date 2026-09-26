@@ -12,12 +12,14 @@ Machine: Windows 11 Pro build 26200, Ryzen 5 5600G, RX 6600. Camera: Lenovo FHD 
 | DirectShow capture graph | OBS "Video Capture Device", older Zoom/Skype-style apps | **PASS** | `ixc_probe --dshow-capture`: frames delivered. The DirectShow bridge offered 1280×960 YUY2 by default |
 | DirectShow device list | same | **PASS** | "IXC Camera (Windows Virtual Camera)" listed |
 | IXC source loaded in-process (no Windows service) | validation harness | **PASS** | `ixc_probe --source-test` |
+| Picture settings applied through IXC Camera (Media Foundation client) | all apps | **PASS** | brightness +60: mean luma 113.7 → 148.0 as seen by a separate app (v0.4.0) |
+| Live settings change while an app streams IXC Camera | all apps | **PASS** | in-process test; the service reloads on file change |
 
 ## Applications
 
 | App | Result | Notes |
 |---|---|---|
-| OBS Studio 32.2.2 (installed) | **NOT TESTED — REQUIRES USER** | The DirectShow path it uses passes. It needs a manual check in OBS: Sources → Video Capture Device → "IXC Camera (Windows Virtual Camera)" |
+| OBS Studio 32.2.2 | **PASS (user-verified, v0.4.0)** | Detects "IXC Camera (Windows Virtual Camera)" as a Video Capture Device; live picture settings apply correctly |
 | Discord 1.0.9259 (installed) | **NOT TESTED — REQUIRES USER** | Chromium/Media Foundation path passes. It needs a manual check in Settings → Voice & Video → Camera |
 | Windows Camera app | NOT TESTED — not installed | |
 | Chrome / Edge | NOT TESTED — not installed | Same Media Foundation path as Discord |

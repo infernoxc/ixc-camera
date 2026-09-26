@@ -1,6 +1,7 @@
 add_executable(ixc_camera_app WIN32
     main.cpp
     preview_window.cpp
+    adjustments_panel.cpp
     app.rc
     app.manifest)
 set_target_properties(ixc_camera_app PROPERTIES OUTPUT_NAME "IXCCamera")
