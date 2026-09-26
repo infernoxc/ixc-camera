@@ -18,6 +18,7 @@ struct Frame {
     processing::Nv12Frame View() { return {buf.data(), buf.data() + static_cast<size_t>(w) * h, w, w, w, h}; }
     std::uint8_t& Y(int x, int y) { return buf[static_cast<size_t>(y) * w + x]; }
     std::uint8_t& V(int x, int y) { return buf[static_cast<size_t>(w) * h + static_cast<size_t>(y / 2) * w + (x / 2) * 2 + 1]; }
+    std::uint8_t& U(int x, int y) { return buf[static_cast<size_t>(w) * h + static_cast<size_t>(y / 2) * w + (x / 2) * 2]; }
 };
 std::shared_ptr<const EffectConfig> One(const char* id, double strength = 100) {
     return CompileEffects({EffectEntry{id, strength}}, false);
@@ -61,7 +62,7 @@ IXC_TEST(Effects_ColorGrades) {
     IXC_CHECK(!One("color.warm")->needsFaces);
 }
 
-IXC_TEST(Effects_BlushToneGradesFrameAndTintsLipsOnlyWithAFace) {
+IXC_TEST(Effects_BlushToneGradesFrameWarmsFaceAndLeavesLipsAlone) {
     EffectRenderer r;
     auto cfg = One("blush.tone");
     IXC_CHECK(cfg->needsFaces && cfg->grade);
@@ -72,7 +73,9 @@ IXC_TEST(Effects_BlushToneGradesFrameAndTintsLipsOnlyWithAFace) {
     const int gradedV = plain.V(10, 10);
     IXC_CHECK(gradedV > 140);                 // red axis boosted (1.25x around 128)
     IXC_CHECK(plain.V(160, 76) == gradedV);   // no face: no local treatment
-    // With a face: the lips get a coral tint on top of the grade; the background doesn't.
+    const int gradedU = plain.U(10, 10);
+    // With a face: the skin gets its peach warmth (less blue) on top of the grade; the lips get
+    // no colour of their own (no lip effect); the background is untouched.
     const face::FaceSnapshot snap = FaceAt(0.4f, 0.2f, 0.25f);
     Frame f(320, 180, 120, 140);
     for (int i = 0; i < 20; ++i) {  // presence fade-in
@@ -80,16 +83,19 @@ IXC_TEST(Effects_BlushToneGradesFrameAndTintsLipsOnlyWithAFace) {
         r.Apply(g.View(), *cfg, {&snap, {}, false});
         f = g;
     }
-    const int lipX = static_cast<int>((0.4f + 0.125f) * 320), lipY = static_cast<int>((0.2f + 0.2125f) * 180) + 2;
-    IXC_CHECK(f.V(lipX, lipY) > gradedV + 8);
+    const int faceX = static_cast<int>((0.4f + 0.125f) * 320), faceY = static_cast<int>((0.2f + 0.15f) * 180);
+    IXC_CHECK(f.U(faceX, faceY) < gradedU - 3);  // warmth
+    const int lipX = faceX, lipY = static_cast<int>((0.2f + 0.2125f) * 180) + 2;
+    IXC_CHECK(f.V(lipX, lipY) <= gradedV + 2);   // no lip colour
     IXC_CHECK_EQ(f.V(10, 10), gradedV);
+    IXC_CHECK_EQ(f.U(10, 10), gradedU);
     // Face gone: the local treatment fades out, the grade stays.
     for (int i = 0; i < 40; ++i) {
         Frame g(320, 180, 120, 140);
         r.Apply(g.View(), *cfg, {&none, {}, false});
         f = g;
     }
-    IXC_CHECK(f.V(lipX, lipY) <= gradedV + 1);
+    IXC_CHECK(f.U(faceX, faceY) >= gradedU - 1);
 }
 
 IXC_TEST(Effects_BeautySmoothsSkinKeepsEdgesAndBackground) {
@@ -135,7 +141,7 @@ IXC_TEST(Effects_PortraitSoftensBackgroundNotSubject) {
 }
 
 IXC_TEST(Effects_FaceCoordinatesFollowZoomAndMirror) {
-    // Face at the source's left; mirrored output puts the lip tint on the right half.
+    // Face at the source's left; mirrored output puts the face warmth on the right half.
     EffectRenderer r;
     const face::FaceSnapshot snap = FaceAt(0.1f, 0.2f, 0.25f);
     auto cfg = One("blush.tone");
@@ -148,7 +154,7 @@ IXC_TEST(Effects_FaceCoordinatesFollowZoomAndMirror) {
     }
     int left = 0, right = 0;
     for (int y = 0; y < 180; y += 2)
-        for (int x = 0; x < 320; x += 2) (x < 160 ? left : right) += f.V(x, y) > 136;
+        for (int x = 0; x < 320; x += 2) (x < 160 ? left : right) += f.U(x, y) < 124;  // warmth lowers U
     IXC_CHECK(right > 0 && left == 0);
 }
 

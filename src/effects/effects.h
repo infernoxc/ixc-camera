@@ -75,7 +75,7 @@ private:
         float x = 0, y = 0, w = 0, h = 0;  // box
         face::PointF cheekL, cheekR;       // output pixels
         float cheekRx = 0, cheekRy = 0;
-        face::PointF eyeL, eyeR, nose, mouthL, mouthR;  // output pixels (estimated from the box without landmarks)
+        face::PointF eyeL, eyeR, nose;  // output pixels (estimated from the box without landmarks)
         float eyeDist = 0;
         bool valid = false;
     };

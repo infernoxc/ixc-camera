@@ -18,7 +18,7 @@
 | Skin | noticeably smoother, softer and slightly glowing; beard, brows and eyes stay sharp | Edge-preserving smoothing over the face (wider radius than Basic Beauty) |
 | Skin tone | even peach warmth over the face, no distinct cheek patches | Whole-face soft tint (more warmth, a little pink) |
 | Under-eyes, nose tip | faint warm pink | Soft, gentle tints anchored to the landmarks |
-| Lips | deep coral-pink fill (R/G ≈ 1.8) | Lip-shaped tint from the mouth corners. Dark pixels (beard, open mouth) are excluded |
+| Lips | coral-pink fill | **Removed on the user's request (2026-09-26)**: no lip colour and no lip tracking. Lips only take part in the global grade, like everything else |
 | Timestamp ("LOCAL TIME …") | camcorder overlay | **Left out on the user's request** |
 | Tracking | follows the face | The IXC face tracker (smoothing and prediction). The face treatment fades in and out with the face; the grade always applies |
 
@@ -32,3 +32,6 @@ Remaining differences: the reference applies its own exposure (brightness varies
 
 ## Cost
 `ixc_probe --bench-effects`: 1.5 ms per 720p frame, 3.4 ms per 1080p frame (Ryzen 5 5600G), with 459 KB of reused scratch memory. The grade shares the colour-look lookup pass, and the face work is limited to the face region. Without a detected face, only the grade runs.
+
+## Change: lip colour removed (2026-09-26)
+The user kept the overall Blush Tone look but asked for the lip colour to go. The lip tint, its mouth-corner anchoring and the (already disabled) cheek pass were deleted from the renderer. The grade, skin smoothing, face warmth, under-eye and nose tints are unchanged. Unit test `Effects_BlushToneGradesFrameWarmsFaceAndLeavesLipsAlone` checks the face warmth still applies and nothing is added at the lips.

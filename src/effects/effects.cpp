@@ -29,7 +29,7 @@ constexpr float kBlushUScale = 0.779f;  // blue-yellow axis damped
 constexpr float kBlushVScale = 1.254f;  // red-green axis boosted: the rosy look
 constexpr float kBlushVOffset = -2.0f;
 struct TintSpec {
-    float drop, rx, ry, dY, dU, dV;  // centre offset/radii in eye distances (lips: mouth widths)
+    float drop, rx, ry, dY, dU, dV;  // centre offset/radii in eye distances
     int lumaFloor = 60;
 };
 struct SkinSpec {
@@ -39,8 +39,6 @@ constexpr SkinSpec kBlushSkin{1.0f, 20, 24};  // softer than Basic Beauty (refer
 constexpr TintSpec kBlushFace{0, 0, 0, 2, -10, 1};  // whole-face peach warmth: radii from the face box
 constexpr TintSpec kBlushEyes{0.22f, 0.40f, 0.22f, 0, -4, 2};
 constexpr TintSpec kBlushNose{0.02f, 0.22f, 0.18f, 0, -3, 2};
-constexpr TintSpec kBlushCheeks{0, 0.34f, 0.24f, 0, 0, 0};  // the reference shows no distinct cheek patches
-constexpr TintSpec kBlushLips{0.08f, 0.62f, 0.30f, 4, -12, 18, 55};  // coral: blue held down
 
 float BlushCurve(float v) {
     if (v <= kBlushCurveIn[0]) return v;
@@ -182,15 +180,11 @@ void EffectRenderer::UpdateFace(const processing::Nv12Frame& f, const FrameConte
         face_.eyeL = px(l.leftEye);
         face_.eyeR = px(l.rightEye);
         face_.nose = px(l.nose);
-        face_.mouthL = px(l.mouthLeft);
-        face_.mouthR = px(l.mouthRight);
     } else {  // typical frontal proportions within the box
         const face::RectF& s = best->box;
         face_.eyeL = px({s.x + 0.32f * s.w, s.y + 0.40f * s.h});
         face_.eyeR = px({s.x + 0.68f * s.w, s.y + 0.40f * s.h});
         face_.nose = px({s.x + 0.50f * s.w, s.y + 0.60f * s.h});
-        face_.mouthL = px({s.x + 0.36f * s.w, s.y + 0.78f * s.h});
-        face_.mouthR = px({s.x + 0.64f * s.w, s.y + 0.78f * s.h});
     }
     face_.eyeDist = eyeDist;
     face_.cheekRx = 0.34f * eyeDist;
@@ -199,7 +193,7 @@ void EffectRenderer::UpdateFace(const processing::Nv12Frame& f, const FrameConte
 }
 
 // Soft elliptical tint (luma delta dY, chroma deltas dU/dV) with a (1-d)^2 falloff. lumaFloor > 0
-// fades the tint out on dark pixels (beard, open mouth, nostrils) so only skin/lip tones change.
+// fades the tint out on dark pixels (beard, nostrils, brows) so only skin tones change.
 void EffectRenderer::Tint(const processing::Nv12Frame& f, face::PointF c, float rx, float ry, float dY, float dU, float dV, float a,
                           int lumaFloor) {
     if (rx < 1 || ry < 1 || a < 0.005f) return;
@@ -234,8 +228,7 @@ void EffectRenderer::Tint(const processing::Nv12Frame& f, face::PointF c, float 
 
 // "Blush Tone": an independent reimplementation of the look of a reference lens the user supplied,
 // matched against lens-on/lens-off frames (docs/blush-tone.md). The global grade comes from
-// EffectConfig; this adds the face treatment: soft glowing skin, rosy under-eyes and nose tip, and
-// a coral-pink lip tint (dark beard/mouth pixels are left alone).
+// EffectConfig; this adds the face treatment: soft glowing skin and rosy under-eyes and nose tip.
 void EffectRenderer::Blush(const processing::Nv12Frame& f, float a) {
     a *= presence_;
     if (!face_.valid || a < 0.01f || face_.eyeDist < 4) return;
@@ -247,12 +240,6 @@ void EffectRenderer::Blush(const processing::Nv12Frame& f, float a) {
     }
     Tint(f, {face_.nose.x, face_.nose.y + kBlushNose.drop * ed}, kBlushNose.rx * ed, kBlushNose.ry * ed, kBlushNose.dY, kBlushNose.dU,
          kBlushNose.dV, a, 60);
-    for (const face::PointF& c : {face_.cheekL, face_.cheekR}) {
-        Tint(f, c, kBlushCheeks.rx * ed, kBlushCheeks.ry * ed, kBlushCheeks.dY, kBlushCheeks.dU, kBlushCheeks.dV, a, 60);
-    }
-    const float mw = std::hypot(face_.mouthR.x - face_.mouthL.x, face_.mouthR.y - face_.mouthL.y);
-    const face::PointF mc{(face_.mouthL.x + face_.mouthR.x) / 2, (face_.mouthL.y + face_.mouthR.y) / 2 + kBlushLips.drop * mw};
-    Tint(f, mc, kBlushLips.rx * mw, kBlushLips.ry * mw, kBlushLips.dY, kBlushLips.dU, kBlushLips.dV, a, kBlushLips.lumaFloor);
 }
 
 void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a, float radiusDiv, float edge) {
