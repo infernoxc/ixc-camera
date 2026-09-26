@@ -33,6 +33,7 @@ Profile SampleProfile() {
     p.effects = {{"ixc.blush-tone", 40}, {"ixc.color.warm", 100}};
     p.faceTracking = {true, 2, 6};
     p.tier = PerformanceTier::UltraLow;
+    p.gpu = GpuMode::Off;
     p.hotkeys = {{"effects.toggle", "Ctrl+Alt+F8"}};
     return p;
 }
@@ -75,6 +76,19 @@ IXC_TEST(Profile_ClampsOutOfRangeValuesAndReportsThem) {
     IXC_CHECK(HasWarningContaining(r, "image.brightness"));
     IXC_CHECK(HasWarningContaining(r, "crop"));
     IXC_CHECK(HasWarningContaining(r, "zoom"));
+}
+
+IXC_TEST(Profile_GpuModeDefaultsToAutoAndRejectsUnknown) {
+    ProfileLoadResult r = ProfileFromJson(R"({"schemaVersion": 1})");  // profile saved before the field existed
+    IXC_REQUIRE(r.ok);
+    IXC_CHECK(r.profile.gpu == GpuMode::Auto);
+    r = ProfileFromJson(R"({"schemaVersion": 1, "gpu": "turbo"})");
+    IXC_REQUIRE(r.ok);
+    IXC_CHECK(r.profile.gpu == GpuMode::Auto);
+    IXC_CHECK(HasWarningContaining(r, "gpu"));
+    r = ProfileFromJson(R"({"schemaVersion": 1, "gpu": "off"})");
+    IXC_REQUIRE(r.ok);
+    IXC_CHECK(r.profile.gpu == GpuMode::Off);
 }
 
 IXC_TEST(Profile_RejectsNewerSchema) {

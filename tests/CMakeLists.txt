@@ -6,8 +6,10 @@ add_executable(ixc_unit_tests
     test_camera.cpp
     test_processing.cpp
     test_pipeline.cpp
-    test_active_profile.cpp)
-target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing)
+    test_active_profile.cpp
+    test_gpu_pipeline.cpp
+    test_backend_selector.cpp)
+target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing ixc_processing_gpu)
 
 add_test(NAME unit COMMAND ixc_unit_tests)
 set_tests_properties(unit PROPERTIES TIMEOUT 120 LABELS "unit")

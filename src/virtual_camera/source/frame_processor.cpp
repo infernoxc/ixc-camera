@@ -5,6 +5,8 @@
 
 #include <mferror.h>
 
+#include <algorithm>
+
 using Microsoft::WRL::ComPtr;
 
 namespace ixc::vcam {
@@ -111,11 +113,22 @@ void FrameProcessor::EndSession() {
         wasActive = type_ != nullptr;
         allocator_.Reset();  // an idle camera holds no frame buffers
         type_.Reset();
+        ++generation_;       // the next session decides CPU/GPU afresh
+    }
+    const processing::AdaptiveNv12Processor::Stats ps = processor_.GetStats();
+    processor_.ReleaseGpu();  // and no GPU device either
+    if (wasActive) {
+        IXC_TRACE("ProcessorBackend", TraceLoggingBoolean(ps.backend == processing::Backend::Gpu, "gpu"),
+                  TraceLoggingInt32(static_cast<int>(ps.state), "state"), TraceLoggingUInt64(ps.cpuFrames, "cpuFrames"),
+                  TraceLoggingUInt64(ps.gpuFrames, "gpuFrames"), TraceLoggingFloat64(ps.cpuAvgMs, "cpuAvgMs"),
+                  TraceLoggingFloat64(ps.gpuAvgMs, "gpuAvgMs"), TraceLoggingBoolean(ps.gpuFailed, "gpuFailed"),
+                  TraceLoggingWideString(ps.adapter.c_str(), "adapter"));
     }
     if (wasActive) {
         IXC_TRACE("ProcessorSessionEnd", TraceLoggingUInt64(c.processed, "processed"), TraceLoggingUInt64(c.passedThrough, "passedThrough"),
                   TraceLoggingUInt64(c.poolExhausted, "poolExhausted"), TraceLoggingUInt64(c.errors, "errors"),
-                  TraceLoggingUInt64(c.settingsReloads, "reloads"));
+                  TraceLoggingUInt64(c.settingsReloads, "reloads"), TraceLoggingBoolean(c.inputIsGpuSurface, "gpuInput"),
+                  TraceLoggingUInt64(c.processed ? c.processUsTotal / c.processed : 0, "avgUs"), TraceLoggingUInt64(c.processUsMax, "maxUs"));
     }
 }
 
@@ -152,6 +165,7 @@ void FrameProcessor::ReloadSettings() {
 }
 
 void FrameProcessor::Recompile() {
+    ++generation_;  // new settings: the CPU/GPU decision is made again
     if (!nv12_ || width_ == 0 || height_ == 0) {
         auto identity = std::make_shared<processing::PipelineParams>();
         params_ = std::move(identity);
@@ -180,14 +194,33 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     ComPtr<IMFMediaType> type;
     UINT32 width = 0, height = 0;
     bool nv12 = false;
+    std::uint64_t generation = 0;
     {
         std::lock_guard lock(mu_);
         params = params_;
+        generation = generation_;
         type = type_;
         width = width_;
         height = height_;
         nv12 = nv12_;
     }
+    // Record once per session whether frames live in GPU memory (decides the GPU strategy).
+    bool knowInput;
+    {
+        std::lock_guard lock(mu_);
+        knowInput = counters_.inputKnown;
+    }
+    if (!knowInput && input) {
+        ComPtr<IMFMediaBuffer> b;
+        ComPtr<IMFDXGIBuffer> dxgi;
+        const bool gpu = SUCCEEDED(input->GetBufferByIndex(0, &b)) && SUCCEEDED(b.As(&dxgi));
+        std::lock_guard lock(mu_);
+        counters_.inputKnown = true;
+        counters_.inputIsGpuSurface = gpu;
+    }
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+
     auto passThrough = [&] {
         std::lock_guard lock(mu_);
         ++counters_.passedThrough;
@@ -220,7 +253,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         if (ok) {
             const processing::Nv12Planes in{src.y(), src.uv(), src.pitch(), src.pitch(), static_cast<int>(width), static_cast<int>(height)};
             const processing::Nv12Frame o{dst.y(), dst.uv(), dst.pitch(), dst.pitch(), static_cast<int>(width), static_cast<int>(height)};
-            ok = processor_.Process(in, o, *params);
+            ok = processor_.Process(in, o, *params, generation);
         }
     }
     if (!ok) {
@@ -235,9 +268,15 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     LONGLONG t = 0;
     if (SUCCEEDED(input->GetSampleTime(&t))) out->SetSampleTime(t);
     if (SUCCEEDED(input->GetSampleDuration(&t))) out->SetSampleDuration(t);
+    LARGE_INTEGER t1, f;
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&f);
+    const auto us = static_cast<unsigned long long>((t1.QuadPart - t0.QuadPart) * 1'000'000 / f.QuadPart);
     {
         std::lock_guard lock(mu_);
         ++counters_.processed;
+        counters_.processUsTotal += us;
+        counters_.processUsMax = std::max(counters_.processUsMax, us);
     }
     return out;
 }

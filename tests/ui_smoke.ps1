@@ -104,7 +104,7 @@ $st = [Ui]::PreviewStats($preview)
 Check ($st[0] -gt 0.5 -and $st[1] -gt 3) 'preview shows a live image (not black/flat)'
 
 # Picture adjustments: move the Brightness slider like a user would (TBM_SETPOS + WM_HSCROLL).
-$IdBrightnessTrack = 202; $IdReset = 238   # kFirstPanelId 200: header, then label/track/value per slider, mirror, reset
+$IdBrightnessTrack = 202; $IdReset = 238; $IdGpu = 239   # kFirstPanelId 200: header, label/track/value per slider, mirror, reset, gpu
 $track = [Ui]::GetDlgItem($hwnd, $IdBrightnessTrack); $reset = [Ui]::GetDlgItem($hwnd, $IdReset)
 $settingsFile = Join-Path $env:ProgramData 'IXC Camera\active-profile.json'
 $before = [Ui]::PreviewStats($preview)[2]
@@ -121,6 +121,14 @@ if (Test-Path (Split-Path $settingsFile)) {
     Start-Sleep -Milliseconds 800
     $published = Get-Content $settingsFile -Raw -ErrorAction SilentlyContinue
     Check ($published -match '"brightness": 0') 'Reset picture restores and republishes neutral settings'
+    # GPU switch: off publishes "gpu": "off"; turning it back on restores "auto".
+    $gpuBox = [Ui]::GetDlgItem($hwnd, $IdGpu)
+    [Ui]::SendMessageW($gpuBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    Check ((Get-Content $settingsFile -Raw) -match '"gpu": "off"') 'GPU switch off is published (CPU only)'
+    [Ui]::SendMessageW($gpuBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    Check ((Get-Content $settingsFile -Raw) -match '"gpu": "auto"') 'GPU switch back on is published'
 }
 
 $proc = Get-Process -Id $p.Id; $proc.Refresh()

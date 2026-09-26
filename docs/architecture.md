@@ -73,6 +73,13 @@ IXCCamera.exe (user)                          Frame Server service (LOCAL SERVIC
 - **Hostile-input handling.** The settings file crosses a privilege boundary (a user writes it, a service reads it). It's read with a 64 KB limit, parsed by the strict JSON reader, and every value is clamped. A missing file means neutral settings; a present-but-invalid file keeps the last good settings. Nothing in it is executed.
 - **Idle means idle.** Windows stops a client via `SetStreamState(STOPPED)`. That ends the session: the settings watch stops and the frame pool (≤ 6 frames) is released.
 
+## CPU / GPU processing (Phase 6, implemented)
+
+- `processing::Nv12Processor` (CPU, SSE2) is the reference and the default. `processing::GpuNv12Processor` (Direct3D 11 compute, `cs_5_0`, shaders compiled at build time with `fxc`) reproduces it byte for byte.
+- `processing::AdaptiveNv12Processor` wraps both. `BackendSelector` (pure logic, unit-tested) moves only crop/zoom work at ≥ 720p to the GPU, and only when measured faster on this PC (see docs/performance.md). GPU start-up happens on a thread-pool work item, the first GPU frame is checked against the CPU byte for byte, and any GPU error returns to the CPU for the session.
+- The profile field `gpu` (`auto` | `off`) and the app checkbox let users force CPU-only.
+- Software adapters (Microsoft Basic Render Driver) are refused. Direct3D DLLs are delay-loaded.
+
 ## Open design questions
 
 1. **Processing a webcam another app controls** (Windows shared mode, `IMFSensorDevice::SetSensorDeviceMode(Shared)`). This would let IXC Camera run while another app uses the physical webcam, at that app's format. Deferred.

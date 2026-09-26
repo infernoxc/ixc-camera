@@ -675,7 +675,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            mmi->ptMinTrackSize = {Scale(900), Scale(600)};  // room for preview + adjustment panel
+            mmi->ptMinTrackSize = {Scale(900), Scale(660)};  // room for preview + adjustment panel
             return 0;
         }
 

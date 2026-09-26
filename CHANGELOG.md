@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 — Phase 6 GPU pipeline, benchmark-driven (2026-09-26)
+
+### Added
+- **Direct3D 11 compute implementation** of the whole pipeline (`processing/gpu`), byte-identical to the CPU path. Shaders are compiled at build time; no runtime compiler or extra DLLs.
+- **Benchmarks**: `ixc_probe --bench-gpu` (CPU vs GPU per setting and size: wall time, CPU time consumed, upload/GPU/readback breakdown, output identity) and `--bench-gpu-memory`.
+- **Adaptive CPU/GPU selection** (`BackendSelector` + `AdaptiveNv12Processor`), used by the IXC Camera source and the app preview. Only crop/zoom at ≥ 720p may move to the GPU, only when measured faster on the user's PC, never under 4 GB RAM. There's a byte-exact self-check, a sticky CPU fallback on any error, and immediate release when unused.
+- Profile setting `gpu` (`auto` default, `off`) and an app checkbox. Direct3D is delay-loaded.
+- Tests: GPU-vs-CPU exactness on WARP and hardware, 7 selector cases, gpu profile field (95 unit tests).
+
+### Measured
+- Zoom 1.5 + sharpen at 1080p in the camera service: 28.3% → 13.3% of one core with the GPU, at +57 MB while active. Colour/sharpen stay on the CPU (see docs/performance.md).
+
+### Fixed during this phase
+- GPU uploads through `UpdateSubresource` made driver memory grow to +200 MB, not returned on release. Replaced with fixed upload textures (flat at +41 MB, released when unused).
+
+### Unchanged
+- The CPU path is the default for all colour/tone/sharpen/mirror work and the fallback for everything.
+
 ## 0.4.0 — Phase 5 basic processing (2026-09-26)
 
 ### Added

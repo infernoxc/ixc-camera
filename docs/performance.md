@@ -103,6 +103,49 @@ At 30 FPS the frame budget is 33.3 ms. Before optimization, sharpening cost **20
 | Private memory previewing | 8.8 MB (full-size processed frame buffer: +1.9 MB) |
 | UI process CPU | 5.9% of one core (~20 FPS) |
 
+## Phase 6: CPU vs GPU (Direct3D 11) — measured, then decided (2026-09-26)
+
+Same machine (RX 6600; the Ryzen's integrated GPU is disabled, so it's the only adapter). The GPU path is byte-identical to the CPU path: 8 setting combinations × several sizes on the RX 6600 and on WARP, plus a live self-check on real camera frames.
+
+**Where frames live.** In the Frame Server pipeline, IXC receives frames in **system memory** (`gpuInput=0`). So any GPU processing pays an upload and a readback per frame.
+
+### Synthetic benchmark (`ixc_probe --bench-gpu`, per frame)
+
+| Settings | Size | CPU path | GPU wall | GPU path CPU time | GPU execution |
+|---|---|---|---|---|---|
+| Colour only | 1080p | 1.02 ms | 1.59 ms | ~0.6 ms | 0.05 ms |
+| Default (subtle sharpen) | 1080p | 1.01 ms | 1.63 ms | ~0.3 ms | 0.09 ms |
+| Colour + sharpen 40 | 1080p | 1.91 ms | 1.62 ms | ~0.4 ms | 0.09 ms |
+| Zoom 1.5 + sharpen 40 | 720p | 2.97 ms | 0.70 ms | ~0.2 ms | 0.05 ms |
+| **Zoom 1.5 + sharpen 40** | **1080p** | **6.80 ms** | **1.65 ms** | **~0.3 ms** | 0.11 ms |
+
+The GPU's own work is tiny (≤0.11 ms). Its wall time is dominated by the readback (~1.5 ms at 1080p).
+
+### Memory (`ixc_probe --bench-gpu-memory`, 1080p)
+
+| Step | Private bytes |
+|---|---|
+| Direct3D 11 device + shaders | +25 MB |
+| First 1080p frame (textures) | +17 MB |
+| 600 frames later | no growth |
+
+The first implementation used `UpdateSubresource`, and the driver's hidden upload buffers grew to **+200 MB** and weren't returned on release. It now uses fixed upload textures (bounded).
+
+### In the real camera service (1080p, ~25 FPS)
+
+| Settings | Backend chosen | Frame Server CPU | Frame Server memory |
+|---|---|---|---|
+| Colour + sharpen 40 | CPU (not eligible) | 12.6% of one core | 55 MB |
+| Zoom 1.5 + sharpen 40, `gpu: auto` | **GPU** (measured 7.0 → 2.2 ms/frame) | **13.3%** | 114 MB |
+| Zoom 1.5 + sharpen 40, `gpu: off` | CPU | 28.3% | 57 MB |
+| After the sessions | GPU released | 0% | 8.3 MB |
+
+### Decision
+- **Colour, tone, sharpen and mirror stay on the CPU.** The GPU would save at most ~1.5 ms per frame while adding ~41–57 MB and ~0.6 ms of latency.
+- **Crop/zoom at ≥ 720p may use the GPU, but only after measuring it on the user's PC.** The CPU is measured first; the GPU is tried only if that's ≥ 3 ms/frame, and kept only if it's < 70% of the CPU time. There's a one-time byte-exact self-check, and it's released as soon as it's not in use.
+- **Never on PCs with < 4 GB RAM or < 1 GB free**, where memory matters more. Direct3D is delay-loaded: it isn't even loaded unless a GPU attempt happens.
+- The CPU path is always present and is the fallback for any GPU failure.
+
 ## Pending (not measured)
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
 - 30-minute burn-in: scheduled for Phase 10.

@@ -11,6 +11,7 @@
 
 #include "camera/capture_session.h"
 #include "processing/color.h"
+#include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
 
 #include <memory>
@@ -56,7 +57,8 @@ private:
     bool dirty_ = false;  // held frame not yet converted at the current size
 
     std::shared_ptr<const processing::PipelineParams> pipeline_;
-    processing::Nv12Processor processor_;
+    processing::AdaptiveNv12Processor processor_;  // CPU-first; GPU only where measured to help
+    std::uint64_t pipelineGeneration_ = 0;
     std::vector<std::uint8_t> processed_;  // full-size NV12 output of the pipeline, reused
     processing::Nv12ToBgraScaler scaler_;
     std::vector<std::uint32_t> bgra_;  // display-size conversion buffer, reused

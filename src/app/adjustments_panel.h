@@ -44,7 +44,7 @@ private:
     Profile* profile_ = nullptr;
     std::function<void()> onChange_;
     std::vector<Slider> sliders_;
-    HWND header_ = nullptr, mirror_ = nullptr, reset_ = nullptr;
+    HWND header_ = nullptr, mirror_ = nullptr, reset_ = nullptr, gpu_ = nullptr;
     int firstId_ = 0;
 };
 

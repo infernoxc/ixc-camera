@@ -22,6 +22,10 @@ inline constexpr int kMaxTrackedFaces = 4;
 
 enum class PerformanceTier { Auto, UltraLow, Low, Balanced, High };
 
+// GPU use for processing. Auto = only where it's measured to help on this PC (see
+// processing/backend_selector.h); Off = always the CPU path.
+enum class GpuMode { Auto, Off };
+
 std::string_view ToString(PerformanceTier t);
 bool ParsePerformanceTier(std::string_view s, PerformanceTier& out);
 
@@ -83,6 +87,7 @@ struct Profile {
     std::vector<EffectEntry> effects;
     FaceTrackingSettings faceTracking;
     PerformanceTier tier = PerformanceTier::Auto;
+    GpuMode gpu = GpuMode::Auto;
     std::vector<HotkeyBinding> hotkeys;
 
     bool operator==(const Profile&) const = default;

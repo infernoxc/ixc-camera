@@ -13,7 +13,8 @@
 - If the Windows camera service still has the previous IXC DLL loaded during an upgrade or uninstall, the old file is renamed `*.old-*` and deleted at the next reboot. Until the service unloads it (it stops by itself when idle, or on reboot), apps may still get the old version.
 
 ## Picture processing
-- Processing runs on the CPU (SSE2). GPU processing comes in Phase 6. Digital zoom is the most expensive setting (≈7 ms per 1080p frame on the reference Ryzen); on weak PCs prefer 720p when zooming.
+- Processing runs on the CPU (SSE2). Only crop/zoom may move to the GPU, and only when measured faster on your PC. That costs ~40–60 MB of RAM while zoom is active and is never done on PCs with under 4 GB RAM. Turn it off with the app's "Use the graphics card for zoom" checkbox (or `"gpu": "off"`). Without a usable GPU, digital zoom costs ≈7 ms per 1080p frame on the reference Ryzen (more on weak CPUs), so prefer 720p when zooming.
+- GPU acceleration has only been measured on an AMD RX 6600. Integrated Intel/AMD graphics (the low-end target) haven't been measured yet. The on-machine selection is designed to decide correctly there, but that's unverified.
 - **Denoise isn't implemented yet.** "Low-light boost" lifts dark tones but doesn't reduce noise.
 - Crop can be set in a profile file but has no editor in the app yet. Digital zoom (centre crop) is in the app.
 - The app's preview and IXC Camera can't run at the same time (one app per webcam, see below). Adjust settings with the preview, close it, then use IXC Camera. Changes made in the app while another app uses IXC Camera still apply live.

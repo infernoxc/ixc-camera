@@ -99,6 +99,7 @@ PipelineParams CompileParams(const Profile& profile, std::uint32_t width, std::u
     p.mirror = profile.mirror;
     FitGeometry(profile, width, height, p);
     p.identity = p.lutIdentity && p.sharpenAmount == 0 && !p.mirror && p.geometryIdentity;
+    p.gpuAllowed = profile.gpu == GpuMode::Auto;
     return p;
 }
 
@@ -179,7 +180,7 @@ void SharpenRowSse2(const std::uint8_t* a, const std::uint8_t* c, const std::uin
 }  // namespace detail
 
 size_t Nv12Processor::ScratchBytes() const {
-    return (yX_.capacity() + yY_.capacity() + uvX_.capacity() + uvY_.capacity()) * sizeof(std::int32_t) + rows_.capacity() +
+    return (geo_.yX.capacity() + geo_.yY.capacity() + geo_.uvX.capacity() + geo_.uvY.capacity()) * sizeof(std::int32_t) + rows_.capacity() +
            blend_.capacity() * sizeof(std::uint16_t);
 }
 
@@ -226,10 +227,7 @@ void Nv12Processor::ColorPass(const Nv12Planes& src, const Nv12Frame& dst, const
     }
 }
 
-void Nv12Processor::PrepareGeometry(int w, int h, const PipelineParams& p) {
-    const double key[5] = {p.srcX, p.srcY, p.srcW, p.srcH, p.mirror ? 1.0 : 0.0};
-    if (geoW_ == w && geoH_ == h && std::equal(std::begin(key), std::end(key), std::begin(geoKey_))) return;
-
+void BuildGeometryTables(int w, int h, const PipelineParams& p, GeometryTables& t) {
     // Output pixel centre → source coordinate, 16.16 fixed point, clamped to the plane.
     auto build = [](std::vector<std::int32_t>& table, int outN, int planeN, double start, double span, bool flip) {
         table.resize(static_cast<size_t>(outN));
@@ -240,10 +238,16 @@ void Nv12Processor::PrepareGeometry(int w, int h, const PipelineParams& p) {
             table[static_cast<size_t>(i)] = static_cast<std::int32_t>(std::lround(sPos * 65536.0));
         }
     };
-    build(yX_, w, w, p.srcX, p.srcW, p.mirror);
-    build(yY_, h, h, p.srcY, p.srcH, false);
-    build(uvX_, w / 2, w / 2, p.srcX, p.srcW, p.mirror);
-    build(uvY_, h / 2, h / 2, p.srcY, p.srcH, false);
+    build(t.yX, w, w, p.srcX, p.srcW, p.mirror);
+    build(t.yY, h, h, p.srcY, p.srcH, false);
+    build(t.uvX, w / 2, w / 2, p.srcX, p.srcW, p.mirror);
+    build(t.uvY, h / 2, h / 2, p.srcY, p.srcH, false);
+}
+
+void Nv12Processor::PrepareGeometry(int w, int h, const PipelineParams& p) {
+    const double key[5] = {p.srcX, p.srcY, p.srcW, p.srcH, p.mirror ? 1.0 : 0.0};
+    if (geoW_ == w && geoH_ == h && std::equal(std::begin(key), std::end(key), std::begin(geoKey_))) return;
+    BuildGeometryTables(w, h, p, geo_);
     geoW_ = w;
     geoH_ = h;
     std::copy(std::begin(key), std::end(key), std::begin(geoKey_));
@@ -260,12 +264,12 @@ void Nv12Processor::ScalePass(const Nv12Planes& src, const Nv12Frame& dst, const
     // compiler vectorizes), then horizontal interpolation from it: 2 loads per output pixel
     // instead of 4. Only the source columns the rectangle touches are blended.
     // The x table is monotonic (reversed when mirrored), so its ends bound the columns used.
-    const int colFirst = std::min(yX_.front(), yX_.back()) >> 16;
-    const int colLast = std::min(w - 1, (std::max(yX_.front(), yX_.back()) >> 16) + 1);
+    const int colFirst = std::min(geo_.yX.front(), geo_.yX.back()) >> 16;
+    const int colLast = std::min(w - 1, (std::max(geo_.yX.front(), geo_.yX.back()) >> 16) + 1);
     blend_.resize(static_cast<size_t>(w));
     std::uint16_t* vb = blend_.data();
     for (int y = 0; y < h; ++y) {
-        const std::int32_t fy = yY_[static_cast<size_t>(y)];
+        const std::int32_t fy = geo_.yY[static_cast<size_t>(y)];
         const int y0 = fy >> 16, y1 = std::min(y0 + 1, h - 1), wy = (fy >> 8) & 0xFF;
         const std::uint8_t* r0 = src.y + static_cast<std::ptrdiff_t>(y0) * src.yStride;
         const std::uint8_t* r1 = src.y + static_cast<std::ptrdiff_t>(y1) * src.yStride;
@@ -275,7 +279,7 @@ void Nv12Processor::ScalePass(const Nv12Planes& src, const Nv12Frame& dst, const
         }
         std::uint8_t* d = dst.y + static_cast<std::ptrdiff_t>(y) * dst.yStride;
         for (int x = 0; x < w; ++x) {
-            const std::int32_t fx = yX_[static_cast<size_t>(x)];
+            const std::int32_t fx = geo_.yX[static_cast<size_t>(x)];
             const int x0 = fx >> 16, x1 = std::min(x0 + 1, w - 1), wx = (fx >> 8) & 0xFF;
             const std::uint32_t v = static_cast<std::uint32_t>(vb[x0]) * static_cast<std::uint32_t>(256 - wx) +
                                     static_cast<std::uint32_t>(vb[x1]) * static_cast<std::uint32_t>(wx);
@@ -284,13 +288,13 @@ void Nv12Processor::ScalePass(const Nv12Planes& src, const Nv12Frame& dst, const
     }
     const int cw = w / 2, ch = h / 2;
     for (int y = 0; y < ch; ++y) {
-        const std::int32_t fy = uvY_[static_cast<size_t>(y)];
+        const std::int32_t fy = geo_.uvY[static_cast<size_t>(y)];
         const int y0 = fy >> 16, y1 = std::min(y0 + 1, ch - 1), wy = (fy >> 8) & 0xFF;
         const std::uint8_t* r0 = src.uv + static_cast<std::ptrdiff_t>(y0) * src.uvStride;
         const std::uint8_t* r1 = src.uv + static_cast<std::ptrdiff_t>(y1) * src.uvStride;
         std::uint8_t* d = dst.uv + static_cast<std::ptrdiff_t>(y) * dst.uvStride;
         for (int x = 0; x < cw; ++x) {
-            const std::int32_t fx = uvX_[static_cast<size_t>(x)];
+            const std::int32_t fx = geo_.uvX[static_cast<size_t>(x)];
             const int x0 = fx >> 16, x1 = std::min(x0 + 1, cw - 1), wx = (fx >> 8) & 0xFF;
             for (int c = 0; c < 2; ++c) {
                 const int top = r0[2 * x0 + c] * (256 - wx) + r0[2 * x1 + c] * wx;

@@ -54,6 +54,7 @@ void AdjustmentsPanel::Create(HWND parent, HINSTANCE instance, int firstId, Prof
     }
     mirror_ = make(WC_BUTTONW, L"Mirror (flip left-right)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
     reset_ = make(WC_BUTTONW, L"Reset picture", BS_PUSHBUTTON | WS_TABSTOP, id++);
+    gpu_ = make(WC_BUTTONW, L"Use the graphics card for zoom when it's faster", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, id++);
     Refresh();
 }
 
@@ -62,6 +63,7 @@ void AdjustmentsPanel::SetFont(HFONT font) {
     set(header_);
     set(mirror_);
     set(reset_);
+    set(gpu_);
     for (auto& s : sliders_) {
         set(s.labelWnd);
         set(s.valueWnd);
@@ -83,7 +85,9 @@ int AdjustmentsPanel::Layout(int x, int y, int width, int rowHeight, int gap) {
     MoveWindow(mirror_, x, cy, width, rowHeight, TRUE);
     cy += rowHeight + gap / 2;
     MoveWindow(reset_, x, cy, width / 2, rowHeight, TRUE);
-    cy += rowHeight;
+    cy += rowHeight + gap;
+    MoveWindow(gpu_, x, cy, width, rowHeight * 2, TRUE);  // two lines: it's a sentence
+    cy += rowHeight * 2;
     return cy - y;
 }
 
@@ -101,6 +105,7 @@ void AdjustmentsPanel::Refresh() {
         UpdateValueText(s);
     }
     SendMessageW(mirror_, BM_SETCHECK, profile_->mirror ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(gpu_, BM_SETCHECK, profile_->gpu == GpuMode::Auto ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 bool AdjustmentsPanel::OnScroll(HWND control) {
@@ -121,6 +126,11 @@ bool AdjustmentsPanel::OnScroll(HWND control) {
 bool AdjustmentsPanel::OnCommand(HWND control, int code) {
     if (control == mirror_ && code == BN_CLICKED) {
         profile_->mirror = SendMessageW(mirror_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (onChange_) onChange_();
+        return true;
+    }
+    if (control == gpu_ && code == BN_CLICKED) {
+        profile_->gpu = SendMessageW(gpu_, BM_GETCHECK, 0, 0) == BST_CHECKED ? GpuMode::Auto : GpuMode::Off;
         if (onChange_) onChange_();
         return true;
     }

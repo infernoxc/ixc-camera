@@ -36,6 +36,7 @@ struct PipelineParams {
     // Source rectangle in normalized coordinates (after crop, zoom and aspect fitting).
     double srcX = 0, srcY = 0, srcW = 1, srcH = 1;
     bool geometryIdentity = true;
+    bool gpuAllowed = true;       // profile permits GPU use where it's measured to help
 };
 
 // Compiles profile settings for frames of the given size and YUV range.
@@ -49,6 +50,13 @@ struct Nv12Frame {
     int width = 0;   // even
     int height = 0;  // even
 };
+
+// Bilinear sampling tables (16.16 fixed point, output pixel → source coordinate) for the
+// scale pass. Shared by the CPU and GPU paths so both sample exactly the same positions.
+struct GeometryTables {
+    std::vector<std::int32_t> yX, yY, uvX, uvY;
+};
+void BuildGeometryTables(int width, int height, const PipelineParams& p, GeometryTables& t);
 
 namespace detail {
 // One luma row of the unsharp mask. a/c/b are the ORIGINAL rows above/at/below; d receives
@@ -75,8 +83,8 @@ private:
     void ScalePass(const Nv12Planes& src, const Nv12Frame& dst, const PipelineParams& p);
     void SharpenPass(const Nv12Frame& dst, const PipelineParams& p);
 
-    // Geometry tables (16.16 fixed point), rebuilt only when size or rectangle changes.
-    std::vector<std::int32_t> yX_, yY_, uvX_, uvY_;
+    // Geometry tables, rebuilt only when size or rectangle changes.
+    GeometryTables geo_;
     int geoW_ = 0, geoH_ = 0;
     double geoKey_[5] = {-1, -1, -1, -1, -1};
     std::vector<std::uint8_t> rows_;     // 3 luma rows for the in-place sharpen

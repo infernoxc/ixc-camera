@@ -12,6 +12,7 @@
 // Settings changes apply to the next frame. Parsing happens on the watcher thread, and the
 // frame path only swaps in the compiled result.
 
+#include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
 #include "profiles/profile.h"
 
@@ -44,6 +45,10 @@ public:
         unsigned long long poolExhausted = 0;
         unsigned long long errors = 0;
         unsigned long long settingsReloads = 0;
+        unsigned long long processUsTotal = 0;  // time spent processing (µs), for real-pipeline cost
+        unsigned long long processUsMax = 0;
+        bool inputIsGpuSurface = false;         // frames arrive as DXGI (GPU) buffers
+        bool inputKnown = false;
     };
     Counters Stats() const;
 
@@ -63,7 +68,8 @@ private:
     bool nv12_ = false;
     Counters counters_;
 
-    processing::Nv12Processor processor_;  // frame path only (serial work queue)
+    processing::AdaptiveNv12Processor processor_;  // CPU-first; GPU only where measured to help
+    std::uint64_t generation_ = 0;                 // bumped on every settings/session change (under mu_)
     Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> allocator_;
     Microsoft::WRL::ComPtr<IMFMediaType> type_;
 

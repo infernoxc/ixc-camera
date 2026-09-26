@@ -59,6 +59,8 @@ void PreviewWindow::Clear(const wchar_t* placeholder) {
     dirty_ = false;
     std::vector<std::uint32_t>().swap(bgra_);  // give the memory back while idle
     std::vector<std::uint8_t>().swap(processed_);
+    processor_.ReleaseGpu();
+    ++pipelineGeneration_;
     bgraW_ = bgraH_ = 0;
     wcsncpy_s(placeholder_, placeholder ? placeholder : L"", _TRUNCATE);
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -66,6 +68,7 @@ void PreviewWindow::Clear(const wchar_t* placeholder) {
 
 void PreviewWindow::SetPipeline(std::shared_ptr<const processing::PipelineParams> params) {
     pipeline_ = std::move(params);
+    ++pipelineGeneration_;  // new settings: the CPU/GPU decision is made again
     if (!pipeline_ || pipeline_->identity) std::vector<std::uint8_t>().swap(processed_);  // free when unused
     dirty_ = sample_ != nullptr;
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -114,7 +117,7 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
                 if (processed_.size() != frameBytes) processed_.assign(frameBytes, 0);
                 const processing::Nv12Frame out{processed_.data(), processed_.data() + static_cast<size_t>(p.width) * p.height,
                                                 p.width, p.width, p.width, p.height};
-                if (processor_.Process(p, out, *pipeline_)) p = {out.y, out.uv, out.yStride, out.uvStride, p.width, p.height};
+                if (processor_.Process(p, out, *pipeline_, pipelineGeneration_)) p = {out.y, out.uv, out.yStride, out.uvStride, p.width, p.height};
             }
 
             const size_t need = static_cast<size_t>(dstW) * static_cast<size_t>(dstH);

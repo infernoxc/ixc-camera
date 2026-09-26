@@ -35,7 +35,10 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - `src/app` Win32 UI + preview · `src/tools/ixc_probe` diagnostics · `src/tools/ixc_vcam` registration
 - `src/virtual_camera/source` IXCCameraSource.dll (Activate → MediaSource → MediaStream::ProcessSample hook) · `src/virtual_camera/registration.*`
 - `src/processing/image_pipeline` CPU pipeline (reference for the GPU path) · `src/profiles/active_profile` settings file for the service · `src/app/adjustments_panel` sliders
-- Phases 1–5 are done. Next is Phase 6 (GPU pipeline): it must match `Nv12Processor` output and beat it measurably (`ixc_probe --bench-pipeline`).
+- `src/processing/gpu` D3D11 path (byte-identical to CPU; `test_gpu_pipeline.cpp`) · `backend_selector` (when to use the GPU) · `adaptive_processor`
+- Any change to `Nv12Processor` math must be mirrored in `gpu/pipeline.hlsl`. The exactness tests fail otherwise.
+- Benchmarks: `ixc_probe --bench-pipeline`, `--bench-gpu`, `--bench-gpu-memory`. Record results in docs/performance.md.
+- Phases 1–6 are done. Next is Phase 7 (face tracking, lightweight, reduced cadence).
 - Frame Server stops a client with `SetStreamState(STOPPED)`, not an MEStreamStopped event. Free per-session resources there.
 
 ## Facts learned on the dev machine

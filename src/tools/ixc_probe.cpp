@@ -17,6 +17,7 @@
 #include "camera/format_select.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
+#include "processing/gpu/gpu_pipeline.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
 
@@ -47,7 +48,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -66,6 +67,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--list-dshow") o.mode = Options::Mode::ListDirectShow;
         else if (a == "--dshow-capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::DirectShowCapture; o.seconds = std::atoi(v); }
         else if (a == "--bench-pipeline") o.mode = Options::Mode::BenchPipeline;
+        else if (a == "--bench-gpu") o.mode = Options::Mode::BenchGpu;
+        else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
         else if (a == "--source-effect-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceEffectTest; o.sourceDll = v; }
         else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
         else if (a == "--seconds") { const char* v = next(); if (!v) return false; o.seconds = std::atoi(v); }
@@ -371,6 +374,122 @@ int BenchPipeline() {
         std::printf("%-30s %12.2f %12.2f\n", c.name, ms[0], ms[1]);
     }
     std::printf("(single thread; at 30 FPS the frame budget is 33.3 ms)\n");
+    return 0;
+}
+
+// CPU vs GPU (Direct3D 11) pipeline benchmark on synthetic frames, including the costs that
+// matter on weak PCs: CPU time the GPU path still consumes (upload, driver, readback) and the
+// memory a GPU device adds. Also verifies both paths produce identical bytes.
+// Memory of the GPU path step by step (device, resources, steady state), 1080p default profile.
+int BenchGpuMemory() {
+    auto mb = [](const ProcessSample& s) { return static_cast<double>(s.privateBytes) / 1048576.0; };
+    const int w = 1920, h = 1080;
+    std::vector<std::uint8_t> src(static_cast<size_t>(w) * h * 3 / 2, 100), dst(src.size());
+    const ProcessSample s0 = SampleProcess();
+    processing::GpuNv12Processor gpu;
+    if (FAILED(gpu.Initialize({}))) { std::printf("no GPU\n"); return 0; }
+    const ProcessSample s1 = SampleProcess();
+    Profile p;
+    const processing::PipelineParams params = processing::CompileParams(p, w, h, true);
+    const processing::Nv12Planes in{src.data(), src.data() + static_cast<size_t>(w) * h, w, w, w, h};
+    const processing::Nv12Frame out{dst.data(), dst.data() + static_cast<size_t>(w) * h, w, w, w, h};
+    gpu.Process(in, out, params);
+    const ProcessSample s2 = SampleProcess();
+    for (int i = 0; i < 300; ++i) gpu.Process(in, out, params);
+    const ProcessSample s3 = SampleProcess();
+    for (int i = 0; i < 300; ++i) gpu.Process(in, out, params);
+    const ProcessSample s4 = SampleProcess();
+    gpu.Release();
+    const ProcessSample s5 = SampleProcess();
+    std::printf("private MB: start %.1f | device %.1f (+%.1f) | first 1080p frame %.1f (+%.1f) | +300 frames %.1f | +600 frames %.1f | released %.1f\n",
+                mb(s0), mb(s1), mb(s1) - mb(s0), mb(s2), mb(s2) - mb(s1), mb(s3), mb(s4), mb(s5));
+    return 0;
+}
+
+int BenchGpu() {
+    struct Case {
+        const char* name;
+        void (*apply)(Profile&);
+    };
+    const Case cases[] = {
+        {"colour only", [](Profile& p) { p.image.brightness = 10; p.image.contrast = 10; p.image.saturation = 10; }},
+        {"default (subtle sharpen)", [](Profile& p) { p.image.sharpness = 15; }},
+        {"colour + sharpen 40", [](Profile& p) { p.image.brightness = 10; p.image.sharpness = 40; }},
+        {"zoom 1.5 + sharpen 40", [](Profile& p) { p.image.brightness = 10; p.image.sharpness = 40; p.zoom = 1.5; }},
+    };
+    auto cpuSeconds = [] {
+        FILETIME c, e, k, u;
+        GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+        return static_cast<double>(Ft(k) + Ft(u)) / 1e7;
+    };
+    auto now = [] { LARGE_INTEGER t, f; QueryPerformanceCounter(&t); QueryPerformanceFrequency(&f); return static_cast<double>(t.QuadPart) / static_cast<double>(f.QuadPart); };
+
+    const ProcessSample m0 = SampleProcess();
+    processing::GpuNv12Processor gpu;
+    const HRESULT ghr = gpu.Initialize({});
+    const ProcessSample m1 = SampleProcess();
+    if (FAILED(ghr)) {
+        std::printf("no usable Direct3D 11 GPU (%s): the CPU path is the only option on this PC\n", HResultHex(ghr).c_str());
+        return 0;
+    }
+    std::printf("GPU: %ls\n", gpu.AdapterName().c_str());
+    std::printf("memory: GPU device + shaders add %.1f MB private bytes (%.1f MB working set)\n",
+                (static_cast<double>(m1.privateBytes) - static_cast<double>(m0.privateBytes)) / 1048576.0,
+                (static_cast<double>(m1.workingSet) - static_cast<double>(m0.workingSet)) / 1048576.0);
+
+    std::printf("\n%-26s %6s | %9s | %9s %9s %8s %8s %8s | %s\n", "settings", "size", "CPU ms", "GPU wall", "GPU cpu", "upload", "gpu", "readbk", "identical");
+    const int sizes[][2] = {{1280, 720}, {1920, 1080}};
+    for (const auto& c : cases) {
+        for (const auto& sz : sizes) {
+            const int w = sz[0], h = sz[1];
+            std::vector<std::uint8_t> src(static_cast<size_t>(w) * h * 3 / 2), a(src.size()), b(src.size());
+            std::uint32_t seed = 99;
+            for (size_t i = 0; i < src.size(); ++i) {
+                seed = seed * 1664525u + 1013904223u;
+                // smooth gradient + edges + mild noise: closer to a real frame than pure noise
+                const size_t x = i % static_cast<size_t>(w), y = i / static_cast<size_t>(w);
+                src[i] = static_cast<std::uint8_t>((x * 180 / static_cast<size_t>(w) + ((x / 40 + y / 30) % 4 == 0 ? 50 : 0) + (seed >> 30)) & 0xFF);
+            }
+            Profile p;
+            p.image.sharpness = 0;
+            c.apply(p);
+            const processing::PipelineParams params = processing::CompileParams(p, static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h), true);
+            const processing::Nv12Planes in{src.data(), src.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            const processing::Nv12Frame outA{a.data(), a.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            const processing::Nv12Frame outB{b.data(), b.data() + static_cast<size_t>(w) * h, w, w, w, h};
+
+            processing::Nv12Processor cpu;
+            cpu.Process(in, outA, params);
+            gpu.Process(in, outB, params);  // warm-up: resources, tables, shader caches
+            const bool identical = a == b;
+
+            const int iters = 100;
+            double t = now();
+            for (int i = 0; i < iters; ++i) cpu.Process(in, outA, params);
+            const double cpuMs = (now() - t) * 1000.0 / iters;
+
+            // Process CPU time has 15.6 ms granularity: 600 frames keeps the error below ~0.03 ms.
+            const int gpuIters = 600;
+            processing::GpuNv12Processor::Timing tm, sum;
+            const double c0 = cpuSeconds();
+            t = now();
+            for (int i = 0; i < gpuIters; ++i) {
+                gpu.Process(in, outB, params, &tm);
+                sum.uploadMs += tm.uploadMs;
+                sum.gpuMs += tm.gpuMs;
+                sum.readbackMs += tm.readbackMs;
+            }
+            const double wallMs = (now() - t) * 1000.0 / gpuIters;
+            const double gpuCpuMs = (cpuSeconds() - c0) * 1000.0 / gpuIters;
+            std::printf("%-26s %4dp | %9.2f | %9.2f %9.2f %8.2f %8.2f %8.2f | %s\n", c.name, h, cpuMs, wallMs, gpuCpuMs, sum.uploadMs / gpuIters,
+                        sum.gpuMs / gpuIters, sum.readbackMs / gpuIters, identical ? "yes" : "NO");
+        }
+    }
+    const ProcessSample m2 = SampleProcess();
+    std::printf("\nmemory after 1080p GPU resources: +%.1f MB private bytes over no GPU\n",
+                (static_cast<double>(m2.privateBytes) - static_cast<double>(m0.privateBytes)) / 1048576.0);
+    std::printf("CPU ms = CPU path (single thread). GPU wall = upload + dispatch + readback, synchronous.\n"
+                "GPU cpu = CPU time the GPU path consumed per frame (all threads of this process).\n");
     return 0;
 }
 
@@ -894,7 +1013,7 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     Options o;
     if (!ParseArgs(argc, argv, o)) {
-        std::printf("usage: ixc_probe --list | --list-dshow | --dshow-capture <sec> | --source-test <dll> [--seconds N] | --source-effect-test <dll> | --bench-pipeline | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
+        std::printf("usage: ixc_probe --list | --list-dshow | --dshow-capture <sec> | --source-test <dll> [--seconds N] | --source-effect-test <dll> | --bench-pipeline | --bench-gpu | --capture <sec> | --cycles <n>  [--camera X] [--width W --height H --fps F]\n"
                     "                 [--output native|nv12|rgb32] [--subtype NV12|MJPG|YUY2] [--require-camera]\n");
         return 2;
     }
@@ -912,6 +1031,8 @@ int main(int argc, char** argv) {
                 case Options::Mode::SourceTest: rc = SourceTest(o); break;
                 case Options::Mode::SourceEffectTest: rc = SourceEffectTest(o); break;
                 case Options::Mode::BenchPipeline: rc = BenchPipeline(); break;
+                case Options::Mode::BenchGpu: rc = BenchGpu(); break;
+                case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;
