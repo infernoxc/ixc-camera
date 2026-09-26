@@ -19,7 +19,8 @@ Native installer and uninstaller (`src/installer`), built by the `release` prese
 4. Creates `%ProgramData%\IXC Camera` with exact permissions: Users modify, LOCAL SERVICE read (the camera service), SYSTEM/Administrators full.
 5. Registers the media source (COM) and verifies the registration.
 6. Registers the "IXC Camera" system camera and verifies that Windows lists it.
-7. Adds a Start menu shortcut and the Apps & features entry.
+7. Adds "IXC Camera" shortcuts to the Start Menu and the desktop (all users, with the app icon), and the Apps & features entry. Upgrades overwrite the same shortcuts, so there are never duplicates.
+8. Offers to open IXC Camera. The control panel opens straight to the live preview; the camera side needs no service of its own (Windows starts it when an app opens IXC Camera).
 
 It installs nothing else: no drivers, services, startup entries, browser extensions or bundled software.
 
@@ -39,7 +40,7 @@ A failed step is never reported as success. The dialog names the stage and offer
 | 6 | Windows didn't accept or list the IXC Camera system camera |
 | 7 | Uninstall incomplete (details in the log) |
 | 8 | Unknown command-line option |
-| 9 | Start menu shortcut couldn't be created |
+| 9 | A Start Menu or desktop shortcut couldn't be created |
 
 ## Log
 
@@ -47,7 +48,7 @@ A failed step is never reported as success. The dialog names the stage and offer
 
 ## Uninstall
 
-Removes the system camera, the COM registration, `HKLM\SOFTWARE\IXC Camera`, the program folder, the Start menu shortcut, the Apps & features entry and `%ProgramData%\IXC Camera`. It deletes `%LOCALAPPDATA%\IXC Camera` only when you choose it. Other cameras and apps are never touched. Files still loaded by the camera service are deleted at the next restart (exit code 3010).
+Removes the system camera, the COM registration, `HKLM\SOFTWARE\IXC Camera`, the program folder, the Start Menu and desktop shortcuts, the Apps & features entry and `%ProgramData%\IXC Camera`. It deletes `%LOCALAPPDATA%\IXC Camera` only when you choose it. Other cameras and apps are never touched. Files still loaded by the camera service are deleted at the next restart (exit code 3010).
 
 ## Tested (2026-09-26, Windows 11 build 26200)
 - Silent install over a development install: exit 3010 (the old DLL was held by the camera service). Camera registered and verified, Apps & features entry (0.9.0, 2.6 MB), shortcut, ACL as listed. IXC Camera streamed afterwards, and all 12 ctest suites and the UI smoke test passed against the installed app.
@@ -55,3 +56,14 @@ Removes the system camera, the COM registration, `HKLM\SOFTWARE\IXC Camera`, the
 - Reinstall: exit 3010, camera present. Unknown option: error dialog, exit code 8.
 - Interactive dialogs (confirmation, Retry/Cancel, launch-on-finish): NOT TESTED automatically (UAC and dialogs need a person).
 - Code signing: not signed yet. Windows SmartScreen will warn about an unknown publisher.
+
+## Tested (0.10.0, 2026-09-26, `tests/installer_test.ps1`)
+All 16 checks pass:
+- silent install/upgrade (exit 3010: the old camera DLL is held by the camera service until restart);
+- Start Menu and desktop shortcuts pointing to `IXCCamera.exe` with its icon;
+- Apps & features entry 0.10.0; camera registered;
+- user profiles untouched by the upgrade;
+- a second install leaves exactly one shortcut each;
+- the desktop shortcut launches the control panel;
+- uninstall removes both shortcuts, the entry and the COM registration but keeps profiles;
+- reinstall works.

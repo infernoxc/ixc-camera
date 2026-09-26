@@ -19,7 +19,8 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 
 ## Testing
 - `ctest --preset release` runs the unit tests plus the `hardware` label, which needs a camera (exit 77 = skipped).
-- `tests/ui_smoke.ps1 -Exe build/release/src/app/IXCCamera.exe` drives the UI. It checks preview pixels numerically and never saves camera images (they may show the user).
+- `tests/ui_smoke.ps1 -Exe build/release/src/app/IXCCamera.exe` drives the UI (every switch/slider, layout, restart persistence; backs up and restores the user's settings). It checks preview pixels numerically and never saves camera images (they may show the user). `tests/installer_test.ps1` (elevated) covers install/upgrade/shortcuts/uninstall.
+- The Windows headers define `small` as a macro: never use it as an identifier.
 - `ixc_probe --capture N` / `--cycles N` for measurements. Record results in docs/performance.md with the machine name.
 
 ## IXC Camera system camera (Phase 4)
@@ -32,7 +33,7 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 ## Layout
 - `src/common` strings, JSON, file I/O · `src/diagnostics` log, errors · `src/profiles` profile model/store
 - `src/camera` enumeration, format selection, capture session, stats, reconnect · `src/processing` colour conversion
-- `src/app` Win32 UI + preview · `src/tools/ixc_probe` diagnostics · `src/tools/ixc_vcam` registration
+- `src/app` Win32 UI: `main.cpp` (window, logic), `settings_panel.*` (scrolling settings cards; control ids 200+), `widgets.*` (dark theme, owner-drawn switch/slider/button that speak BM_*/TBM_* messages), `preview_window.*`, `ixc.ico` (from `scripts/make-icon.ps1`) · `src/tools/ixc_probe` diagnostics · `src/tools/ixc_vcam` registration
 - `src/virtual_camera/source` IXCCameraSource.dll (Activate → MediaSource → MediaStream::ProcessSample hook) · `src/virtual_camera/registration.*`
 - `src/processing/image_pipeline` CPU pipeline (reference for the GPU path) · `src/profiles/active_profile` settings file for the service · `src/app/adjustments_panel` sliders
 - `src/processing/gpu` D3D11 path (byte-identical to CPU; `test_gpu_pipeline.cpp`) · `backend_selector` (when to use the GPU) · `adaptive_processor`
