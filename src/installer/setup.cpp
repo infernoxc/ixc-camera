@@ -87,6 +87,7 @@ std::wstring KnownFolder(REFKNOWNFOLDERID id) {
 std::wstring InstallDir() { return KnownFolder(FOLDERID_ProgramFiles) + L"\\IXC Camera"; }
 std::wstring SettingsDir() { return KnownFolder(FOLDERID_ProgramData) + L"\\IXC Camera"; }
 std::wstring ShortcutPath() { return KnownFolder(FOLDERID_CommonPrograms) + L"\\IXC Camera.lnk"; }
+std::wstring DesktopShortcutPath() { return KnownFolder(FOLDERID_PublicDesktop) + L"\\IXC Camera.lnk"; }
 std::wstring LogPath() {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
@@ -241,21 +242,31 @@ bool CreateSettingsFolder(StepError& err) {
     return true;
 }
 
-bool CreateShortcut(StepError& err) {
+// Writes (or overwrites: an upgrade never duplicates it) one shortcut to the IXC Camera app.
+HRESULT WriteShortcut(const std::wstring& path) {
     ComPtr<IShellLinkW> link;
     ComPtr<IPersistFile> file;
     const std::wstring exe = InstallDir() + L"\\IXCCamera.exe";
     HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link));
     if (SUCCEEDED(hr)) hr = link->SetPath(exe.c_str());
     if (SUCCEEDED(hr)) hr = link->SetWorkingDirectory(InstallDir().c_str());
-    if (SUCCEEDED(hr)) hr = link->SetDescription(L"Configure IXC Camera: picture, effects and profiles");
+    if (SUCCEEDED(hr)) hr = link->SetIconLocation(exe.c_str(), 0);
+    if (SUCCEEDED(hr)) hr = link->SetDescription(L"Open IXC Camera: preview, picture, effects and profiles");
     if (SUCCEEDED(hr)) hr = link.As(&file);
-    if (SUCCEEDED(hr)) hr = file->Save(ShortcutPath().c_str(), TRUE);
-    if (FAILED(hr)) {
-        err = {L"StartMenuShortcut", L"Could not create the Start menu shortcut: " + SysMessage(static_cast<DWORD>(hr)), kShortcutFailed};
-        return false;
+    if (SUCCEEDED(hr)) hr = file->Save(path.c_str(), TRUE);
+    return hr;
+}
+
+bool CreateShortcut(StepError& err) {
+    for (const std::wstring& path : {ShortcutPath(), DesktopShortcutPath()}) {
+        const HRESULT hr = WriteShortcut(path);
+        if (FAILED(hr)) {
+            err = {L"Shortcuts", L"Could not create the shortcut " + path + L": " + SysMessage(static_cast<DWORD>(hr)), kShortcutFailed};
+            return false;
+        }
+        Log(L"shortcut: %s", path.c_str());
     }
-    Log(L"shortcut: %s", ShortcutPath().c_str());
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);  // refresh cached icons
     return true;
 }
 
@@ -313,6 +324,7 @@ bool UninstallCore(bool keepSettings, bool removeUserData) {
     }
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSettingsKey);  // IXC-owned (wrapped camera record)
     DeleteFileW(ShortcutPath().c_str());
+    DeleteFileW(DesktopShortcutPath().c_str());
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, kUninstallKey);
 
     const std::wstring self = SelfPath();
@@ -438,7 +450,7 @@ int Install() {
              }
              return true;
          }},
-        {L"Adding the Start menu shortcut", CreateShortcut},
+        {L"Adding the Start menu and desktop shortcuts", CreateShortcut},
         {L"Registering with Apps & features", WriteUninstallEntry},
     };
 

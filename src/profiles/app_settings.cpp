@@ -13,11 +13,12 @@ AppSettings AppSettingsFromJson(std::string_view text) {
         s.activeProfile = v->AsString();
     }
     if (const json::Value* v = r.value->Find("hotkeysEnabled"); v && v->IsBool()) s.hotkeysEnabled = v->AsBool();
+    if (const json::Value* v = r.value->Find("showFaceMarkers"); v && v->IsBool()) s.showFaceMarkers = v->AsBool();
     return s;
 }
 
 std::string AppSettingsToJson(const AppSettings& s) {
-    return json::Serialize(json::Object{{"activeProfile", s.activeProfile}, {"hotkeysEnabled", s.hotkeysEnabled}});
+    return json::Serialize(json::Object{{"activeProfile", s.activeProfile}, {"hotkeysEnabled", s.hotkeysEnabled}, {"showFaceMarkers", s.showFaceMarkers}});
 }
 
 }  // namespace ixc

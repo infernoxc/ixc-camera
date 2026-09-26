@@ -7,7 +7,8 @@
 //   * Frames are painted only when they arrive. There is no render loop.
 //   * The 1 s status timer runs only while previewing.
 
-#include "app/adjustments_panel.h"
+#include "app/settings_panel.h"
+#include "app/widgets.h"
 #include "app/preview_window.h"
 #include "camera/capture_session.h"
 #include "camera/device_enum.h"
@@ -27,6 +28,7 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <dbt.h>
 #include <ks.h>
 #include <ksmedia.h>
@@ -53,32 +55,29 @@ constexpr wchar_t kWindowClass[] = L"IXCCameraMainWindow";
 constexpr wchar_t kSingleInstanceMutex[] = L"Local\\IXCCamera.UI.SingleInstance";
 
 enum ControlId : int {
-    kIdCameraLabel = 100,
-    kIdCamera,
-    kIdFormatLabel,
-    kIdFormat,
-    kIdStartStop,
-    kIdPreview,
-    kIdStatus,
-    kIdHint,
-    kIdPrivacy,
-    kIdVcamStatus,
-    kIdVcamUse,
-    kIdProfileLabel,
-    kIdProfile,
-    kIdProfileSave,
-    kIdProfileDelete,
-    kIdProfileImport,
-    kIdProfileExport,
-    kIdHotkeys,
+    kIdCamera = 101,
+    kIdFormat = 103,
+    kIdStartStop = 104,
+    kIdPreview = 105,
+    kIdStatus = 106,
+    kIdHint = 107,
+    kIdPrivacy = 108,
+    // Settings column controls: app::PanelId (settings_panel.h), 200 and up.
 };
+using app::kIdProfileCombo;
+using app::kIdProfileSave;
+using app::kIdProfileDelete;
+using app::kIdProfileImport;
+using app::kIdProfileExport;
+using app::kIdHotkeys;
+using app::kIdVcamUse;
 
 constexpr UINT kStateMessage = WM_APP + 11;
 constexpr UINT kVcamDoneMessage = WM_APP + 12;  // wParam = ixc_vcam.exe exit code
+constexpr UINT kAutoStartMessage = WM_APP + 13;  // start the preview once the window is shown
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
 constexpr UINT_PTR kPublishTimer = 3;       // saves/publishes settings shortly after the last slider move
-constexpr int kFirstPanelId = 200;
 
 std::filesystem::path LocalAppDataDir() {
     PWSTR raw = nullptr;
@@ -112,6 +111,14 @@ private:
     void CreateControls();
     void ApplyFont();
     void Layout();
+    void Paint(HDC dc, const RECT& rc);
+    void SetHint(const std::wstring& text);
+    void SetVcamText(const std::wstring& text) {
+        SetWindowTextW(vcamStatus_, text.c_str());
+        panel_.Relayout();
+    }
+    void RefreshFeatureStates();
+    LRESULT ControlColor(HWND control, HDC dc);
     int Scale(int v) const { return MulDiv(v, dpi_, 96); }
 
     void LoadProfile();
@@ -147,18 +154,22 @@ private:
 
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
-    HWND cameraLabel_ = nullptr, camera_ = nullptr, formatLabel_ = nullptr, format_ = nullptr, startStop_ = nullptr;
+    HWND camera_ = nullptr, format_ = nullptr, startStop_ = nullptr;
     HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr;
-    HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
-    HWND profileLabel_ = nullptr, profileCombo_ = nullptr, profileSave_ = nullptr, profileDelete_ = nullptr;
-    HWND profileImport_ = nullptr, profileExport_ = nullptr, hotkeys_ = nullptr;
+    // Owned by the settings panel (see settings_panel.h); handled here.
+    HWND vcamStatus_ = nullptr, vcamUse_ = nullptr, profileCombo_ = nullptr, profileDelete_ = nullptr, hotkeys_ = nullptr;
+    app::theme::Fonts fonts_;
+    HICON iconSmall_ = nullptr, iconLarge_ = nullptr, iconHeader_ = nullptr;
+    RECT header_{}, previewFrame_{}, statusDot_{};
+    enum class VcamState { Missing, Inactive, Active } vcamState_ = VcamState::Missing;
+    std::wstring vcamPill_;
     AppSettings app_;
     std::string stem_ = "default";  // active profile file
     bool hotkeysRegistered_ = false;
     vcam::Status vcam_;
     HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
     HANDLE vcamWait_ = nullptr;
-    HFONT font_ = nullptr;
+
     UINT dpi_ = 96;
     HDEVNOTIFY devNotify_ = nullptr;
 
@@ -172,25 +183,38 @@ private:
     std::vector<CaptureFormat> formats_;  // normalized; format combo item i+1 ↔ formats_[i] (item 0 = Auto)
     ComPtr<CaptureSession> session_;
     app::PreviewWindow preview_;
-    app::AdjustmentsPanel panel_;
+    app::SettingsPanel panel_;
     bool publishWarned_ = false;
     bool previewing_ = false;
     bool resumeOnRestore_ = false;
 };
 
 bool MainWindow::Create(int showCmd) {
+    const int large = GetSystemMetrics(SM_CXICON), smallSize = GetSystemMetrics(SM_CXSMICON);
+    iconLarge_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, large, large, LR_DEFAULTCOLOR));
+    iconSmall_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, smallSize, smallSize, LR_DEFAULTCOLOR));
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = &MainWindow::WndProc;
     wc.hInstance = instance_;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = nullptr;  // painted in WM_PAINT (no flicker)
+    wc.hIcon = iconLarge_;
+    wc.hIconSm = iconSmall_;
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
     app::PreviewWindow::RegisterClass(instance_);
+    app::RegisterWidgetClass(instance_);
 
-    hwnd_ = CreateWindowExW(0, kWindowClass, L"IXC Camera", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT,
-                            CW_USEDEFAULT, 960, 680, nullptr, nullptr, instance_, this);
+    // A comfortable default size, never larger than the work area.
+    RECT work{0, 0, 1280, 800};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const UINT sysDpi = GetDpiForSystem();
+    const int ww = std::min(MulDiv(1280, static_cast<int>(sysDpi), 96), static_cast<int>(work.right - work.left) * 94 / 100);
+    const int wh = std::min(MulDiv(820, static_cast<int>(sysDpi), 96), static_cast<int>(work.bottom - work.top) * 94 / 100);
+    hwnd_ = CreateWindowExW(0, kWindowClass, L"IXC Camera", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, ww, wh,
+                            nullptr, nullptr, instance_, this);
     if (!hwnd_) return false;
+    app::theme::ApplyDarkWindow(hwnd_);
 
     if (FAILED(CaptureSession::Create(this, session_))) return false;
 
@@ -202,6 +226,7 @@ bool MainWindow::Create(int showCmd) {
     devNotify_ = RegisterDeviceNotificationW(hwnd_, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
 
     LoadProfile();
+    panel_.SetFaceOverlay(app_.showFaceMarkers);
     panel_.Refresh();
     RefreshProfileList();
     SendMessageW(hotkeys_, BM_SETCHECK, app_.hotkeysEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -215,110 +240,209 @@ bool MainWindow::Create(int showCmd) {
         Validate(current);
         if (!published.ok || !(published.profile == current)) SaveAndPublish();
     }
+    RefreshFeatureStates();
     ShowWindow(hwnd_, showCmd);
+    // The control panel opens straight to the live preview.
+    if (!cameras_.empty()) PostMessageW(hwnd_, kAutoStartMessage, 0, 0);
+    SetFocus(startStop_);  // not the profile box (its text would show selected)
     return true;
 }
 
 void MainWindow::CreateControls() {
-    auto make = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int id) {
-        return CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, hwnd_,
+    using namespace app;
+    fonts_.Create(dpi_);
+    iconHeader_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, Scale(28), Scale(28), LR_DEFAULTCOLOR));
+    auto combo = [&](int id) {
+        HWND h = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 0, 0, 0, hwnd_,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        theme::ApplyDarkControl(h, true);
+        return h;
+    };
+    auto label = [&](int id, DWORD style) {
+        return CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | style | SS_NOPREFIX, 0, 0, 0, 0, hwnd_,
                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
     };
-    cameraLabel_ = make(WC_STATICW, L"Camera", SS_LEFT | SS_CENTERIMAGE, kIdCameraLabel);
-    camera_ = make(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kIdCamera);
-    formatLabel_ = make(WC_STATICW, L"Format", SS_LEFT | SS_CENTERIMAGE, kIdFormatLabel);
-    format_ = make(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, kIdFormat);
-    startStop_ = make(WC_BUTTONW, L"Start preview", BS_PUSHBUTTON | WS_TABSTOP, kIdStartStop);
+    camera_ = combo(kIdCamera);
+    format_ = combo(kIdFormat);
+    startStop_ = CreateButton(hwnd_, kIdStartStop, L"Start preview", ButtonStyle::Primary, &fonts_, theme::kBg);
     preview_.Create(hwnd_, instance_, kIdPreview);
-    status_ = make(WC_STATICW, L"", SS_LEFT | SS_ENDELLIPSIS, kIdStatus);
-    hint_ = make(WC_STATICW, L"", SS_LEFT, kIdHint);
-    privacy_ = make(WC_BUTTONW, L"Open camera privacy settings", BS_PUSHBUTTON | WS_TABSTOP, kIdPrivacy);
+    status_ = label(kIdStatus, WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS);
+    hint_ = label(kIdHint, SS_LEFT);  // shown only while it has something to say
+    privacy_ = CreateButton(hwnd_, kIdPrivacy, L"Open camera privacy settings", ButtonStyle::Secondary, &fonts_, theme::kBg);
     ShowWindow(privacy_, SW_HIDE);
-    vcamStatus_ = make(WC_STATICW, L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, kIdVcamStatus);
-    vcamUse_ = make(WC_BUTTONW, L"Use this webcam for IXC Camera", BS_PUSHBUTTON | WS_TABSTOP, kIdVcamUse);
-    profileLabel_ = make(WC_STATICW, L"Profile", SS_LEFT | SS_CENTERIMAGE, kIdProfileLabel);
-    profileCombo_ = make(WC_COMBOBOXW, L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, kIdProfile);  // type a name to save a new one
-    profileSave_ = make(WC_BUTTONW, L"Save", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileSave);
-    profileDelete_ = make(WC_BUTTONW, L"Delete", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileDelete);
-    profileImport_ = make(WC_BUTTONW, L"Import…", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileImport);
-    profileExport_ = make(WC_BUTTONW, L"Export…", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileExport);
-    hotkeys_ = make(WC_BUTTONW, L"Hotkeys (Ctrl+Alt+F8–F11)", BS_AUTOCHECKBOX | WS_TABSTOP, kIdHotkeys);
     preview_.Clear(L"Choose a camera and select Start preview.");
-    panel_.Create(hwnd_, instance_, kFirstPanelId, &profile_, [this] { OnPictureChanged(); });
+    panel_.Create(hwnd_, instance_, &profile_, &fonts_, [this] { OnPictureChanged(); });
+    profileCombo_ = panel_.profileCombo();
+    profileDelete_ = panel_.profileDelete();
+    hotkeys_ = panel_.hotkeys();
+    vcamStatus_ = panel_.vcamStatus();
+    vcamUse_ = panel_.vcamUse();
 }
 
 void MainWindow::ApplyFont() {
-    if (font_) DeleteObject(font_);
-    NONCLIENTMETRICSW ncm{sizeof(ncm)};
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi_);
-    font_ = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_, vcamStatus_, vcamUse_, profileLabel_,
-                   profileCombo_, profileSave_, profileDelete_, profileImport_, profileExport_, hotkeys_}) {
-        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
-    }
-    panel_.SetFont(font_);
+    fonts_.Create(dpi_);
+    for (HWND h : {camera_, format_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
+    for (HWND h : {status_, hint_, vcamStatus_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.caption), TRUE);
+    SendMessageW(profileCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
+    if (iconHeader_) DestroyIcon(iconHeader_);
+    iconHeader_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, Scale(28), Scale(28), LR_DEFAULTCOLOR));
 }
 
+// Header (brand + IXC Camera status) across the top; the preview and its toolbar/status on the
+// left; the scrolling settings column on the right. Everything is recomputed from the client
+// size, so no size clips or overlaps: the preview shrinks first, the settings column scrolls.
 void MainWindow::Layout() {
     RECT rc;
     GetClientRect(hwnd_, &rc);
-    const int pad = Scale(12), rowH = Scale(28), gap = Scale(8);
     const int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+    const int pad = Scale(16), gap = Scale(10), rowH = Scale(34), headerH = Scale(56);
+    header_ = {0, 0, w, headerH};
 
-    int x = pad;
-    const int y = pad;
-    const int labelW = Scale(56), buttonW = Scale(130);
-    const int comboSpace = w - 2 * pad - 2 * labelW - buttonW - 4 * gap;
-    const int cameraW = std::max(Scale(120), comboSpace * 45 / 100);
-    const int formatW = std::max(Scale(120), comboSpace - cameraW);
+    const int panelW = std::clamp(w * 32 / 100, Scale(330), Scale(420));
+    panel_.SetBounds({w - panelW, headerH, w, h});
 
-    MoveWindow(cameraLabel_, x, y, labelW, rowH, TRUE);
-    x += labelW + gap;
-    MoveWindow(camera_, x, y, cameraW, Scale(300), TRUE);  // dropdown height
-    x += cameraW + gap;
-    MoveWindow(formatLabel_, x, y, labelW, rowH, TRUE);
-    x += labelW + gap;
-    MoveWindow(format_, x, y, formatW, Scale(400), TRUE);
-    x += formatW + gap;
-    MoveWindow(startStop_, x, y, buttonW, rowH, TRUE);
+    const int left = pad, right = w - panelW - Scale(4);
+    int y = headerH + Scale(8);
+    // Toolbar: camera, format, start/stop.
+    const int buttonW = Scale(150);
+    const int comboSpace = std::max(Scale(200), right - left - buttonW - 2 * gap);
+    const int cameraW = comboSpace * 55 / 100;
+    HDWP dwp = BeginDeferWindowPos(10);
+    auto place = [&](HWND hw, int x, int yy, int ww, int hh) {
+        if (dwp) dwp = DeferWindowPos(dwp, hw, nullptr, x, yy, std::max(0, ww), std::max(0, hh), SWP_NOZORDER | SWP_NOACTIVATE);
+    };
+    RECT cr{};
+    GetWindowRect(camera_, &cr);  // a combo box sizes its own edit height; centre it on the row
+    const int comboTop = y + std::max(0, (rowH - static_cast<int>(cr.bottom - cr.top)) / 2);
+    place(camera_, left, comboTop, cameraW, Scale(400));
+    place(format_, left + cameraW + gap, comboTop, comboSpace - cameraW - gap, Scale(400));
+    place(startStop_, right - buttonW, y, buttonW, rowH);
+    y += rowH + gap;
 
+    // Footer: status line, then (only when needed) the hint and the privacy button.
+    int footer = Scale(28);
+    wchar_t hintText[512] = L"";
+    GetWindowTextW(hint_, hintText, 512);
+    int hintH = 0;
+    if (hintText[0]) {
+        HDC dc = GetDC(hwnd_);
+        HGDIOBJ old = SelectObject(dc, fonts_.caption);
+        RECT calc{0, 0, right - left - Scale(24), 0};
+        DrawTextW(dc, hintText, -1, &calc, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        SelectObject(dc, old);
+        ReleaseDC(hwnd_, dc);
+        hintH = calc.bottom + Scale(14);
+        footer += hintH + Scale(6);
+    }
     const bool privacyVisible = IsWindowVisible(privacy_) != FALSE;
-    const int bottomH = rowH * 3 + 2 * gap + (privacyVisible ? rowH + gap : 0);
-    // Profile row.
-    {
-        int px = pad;
-        const int py = y + rowH + gap, bw = Scale(80);
-        MoveWindow(profileLabel_, px, py, labelW, rowH, TRUE);
-        px += labelW + gap;
-        MoveWindow(profileCombo_, px, py, Scale(200), Scale(300), TRUE);
-        px += Scale(200) + gap;
-        for (HWND b : {profileSave_, profileDelete_, profileImport_, profileExport_}) {
-            MoveWindow(b, px, py, bw, rowH, TRUE);
-            px += bw + gap;
-        }
-        MoveWindow(hotkeys_, px, py, std::max(0, w - pad - px), rowH, TRUE);
-    }
-    const int previewTop = y + 2 * (rowH + gap);
-    const int previewH = std::max(0, h - previewTop - bottomH - pad);
-    // Picture adjustments on the right of the preview; the preview stays the visual centre.
-    const int panelW = Scale(300);
-    const int previewW = std::max(0, w - 2 * pad - panelW - gap);
-    MoveWindow(preview_.hwnd(), pad, previewTop, previewW, previewH, TRUE);
-    panel_.Layout(pad + previewW + gap, previewTop, panelW, Scale(26), gap);
+    if (privacyVisible) footer += Scale(40);
 
-    int by = previewTop + previewH + gap;
-    MoveWindow(status_, pad, by, w - 2 * pad, rowH, TRUE);
-    by += rowH;
-    MoveWindow(hint_, pad, by, w - 2 * pad, rowH, TRUE);
-    by += rowH + gap;
-    if (privacyVisible) {
-        MoveWindow(privacy_, pad, by, Scale(240), rowH, TRUE);
-        by += rowH + gap;
+    const int previewBottom = std::max(y + Scale(120), h - pad - footer);
+    previewFrame_ = {left, y, right, previewBottom};
+    place(preview_.hwnd(), left + 1, y + 1, right - left - 2, previewBottom - y - 2);
+    int fy = previewBottom + Scale(6);
+    statusDot_ = {left + Scale(4), fy + Scale(10), left + Scale(12), fy + Scale(18)};
+    place(status_, left + Scale(20), fy, right - left - Scale(20), Scale(28));
+    fy += Scale(28);
+    if (hintH) {
+        place(hint_, left + Scale(12), fy + Scale(7), right - left - Scale(24), hintH - Scale(14));
+        fy += hintH + Scale(6);
     }
-    // IXC Camera row: status text, then the "use this webcam" button on the right.
-    const int useW = Scale(230);
-    MoveWindow(vcamStatus_, pad, by, std::max(0, w - 2 * pad - useW - gap), rowH, TRUE);
-    MoveWindow(vcamUse_, w - pad - useW, by, useW, rowH, TRUE);
+    ShowWindow(hint_, hintH ? SW_SHOWNA : SW_HIDE);
+    if (privacyVisible) place(privacy_, left, fy, Scale(260), Scale(32));
+    if (dwp) EndDeferWindowPos(dwp);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::Paint(HDC dc, const RECT& rc) {
+    using namespace app::theme;
+    FillRect(dc, &rc, Brush(kBg));
+    // Header.
+    RECT hdr = header_;
+    RECT line{hdr.left, hdr.bottom - 1, hdr.right, hdr.bottom};
+    FillRect(dc, &line, Brush(kBorder));
+    const int x = Scale(18);
+    if (iconHeader_) DrawIconEx(dc, x, (hdr.top + hdr.bottom - Scale(28)) / 2, iconHeader_, Scale(28), Scale(28), 0, nullptr, DI_NORMAL);
+    RECT title{x + Scale(38), hdr.top, x + Scale(300), hdr.bottom};
+    DrawTextIn(dc, L"IXC Camera", title, fonts_.title, kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // IXC Camera (system camera) status pill, right-aligned.
+    HGDIOBJ old = SelectObject(dc, fonts_.caption);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, vcamPill_.c_str(), static_cast<int>(vcamPill_.size()), &sz);
+    SelectObject(dc, old);
+    const int pillW = sz.cx + Scale(34), pillH = Scale(28);
+    RECT pill{hdr.right - Scale(18) - pillW, (hdr.top + hdr.bottom - pillH) / 2, hdr.right - Scale(18), (hdr.top + hdr.bottom + pillH) / 2};
+    FillRound(dc, pill, pillH / 2, kSurface, kBorder);
+    const COLORREF dot = vcamState_ == VcamState::Active ? kGood : vcamState_ == VcamState::Inactive ? kWarn : kBad;
+    const int cy = (pill.top + pill.bottom) / 2;
+    FillRound(dc, RECT{pill.left + Scale(12), cy - Scale(4), pill.left + Scale(20), cy + Scale(4)}, Scale(4), dot, CLR_INVALID);
+    RECT pt{pill.left + Scale(26), pill.top, pill.right - Scale(8), pill.bottom};
+    DrawTextIn(dc, vcamPill_, pt, fonts_.caption, kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // Preview frame and status dot.
+    FillRound(dc, previewFrame_, Scale(6), RGB(0, 0, 0), kBorder);
+    const CaptureState st = session_ ? session_->State() : CaptureState::Stopped;
+    const COLORREF sd = !previewing_ ? kTextFaint : st == CaptureState::Streaming ? kGood : kWarn;
+    FillRound(dc, statusDot_, Scale(4), sd, CLR_INVALID);
+    // Hint banner background.
+    if (IsWindowVisible(hint_)) {
+        RECT hr;
+        GetWindowRect(hint_, &hr);
+        MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&hr), 2);
+        InflateRect(&hr, Scale(12), Scale(7));
+        FillRound(dc, hr, Scale(8), Mix(kBg, kWarn, 28), Mix(kBg, kWarn, 90));
+    }
+}
+
+void MainWindow::SetHint(const std::wstring& text) {
+    wchar_t current[512] = L"";
+    GetWindowTextW(hint_, current, 512);
+    if (text == current) return;
+    SetWindowTextW(hint_, text.c_str());
+    Layout();
+}
+
+// Live state texts of the feature switches: what's actually running, not just what's ticked.
+void MainWindow::RefreshFeatureStates() {
+    const bool faceEffects = profile_.effectsEnabled && std::any_of(profile_.effects.begin(), profile_.effects.end(), [](const EffectEntry& e) {
+                                 const auto* info = effects::Find(e.id);
+                                 return info && info->needsFace;
+                             });
+    std::wstring face;
+    if (!profile_.faceTracking.enabled && !faceEffects) {
+        face = L"Off: not running";
+    } else if (!previewing_) {
+        face = faceEffects && !profile_.faceTracking.enabled ? L"Needed by a face effect · runs with the camera" : L"On · runs with the camera";
+    } else {
+        const face::EngineStatus fs = preview_.FaceStatus();
+        wchar_t b[160];
+        if (fs.state == face::EngineState::Tracking) {
+            swprintf_s(b, L"Tracking %d face%s · %.1f/s · %hs", fs.faces, fs.faces == 1 ? L"" : L"s", fs.detectHz, face::ToString(fs.path));
+        } else {
+            swprintf_s(b, L"%hs", fs.state == face::EngineState::Searching ? "Searching for a face" : face::ToString(fs.state));
+        }
+        face = b;
+        if (faceEffects && !profile_.faceTracking.enabled) face += L" · for a face effect";
+    }
+    panel_.SetFaceTrackingState(face);
+    panel_.SetGpuState(profile_.gpu == GpuMode::Off ? L"Off: CPU only"
+                                                    : (previewing_ ? L"Zoom only, when faster · now " + preview_.ProcessingBackend()
+                                                                   : std::wstring(L"Zoom only, when measured faster")));
+}
+
+LRESULT MainWindow::ControlColor(HWND control, HDC dc) {
+    using namespace app::theme;
+    SetBkMode(dc, TRANSPARENT);
+    COLORREF bg = kBg, text = kTextDim;
+    if (GetParent(control) != hwnd_) bg = kSurface;  // inside a settings card
+    if (control == hint_) {
+        bg = Mix(kBg, kWarn, 28);
+        text = kWarn;
+    }
+    SetTextColor(dc, text);
+    SetBkColor(dc, bg);
+    return reinterpret_cast<LRESULT>(Brush(bg));
 }
 
 // ---- IXC Camera system camera ----------------------------------------------------------------------
@@ -334,7 +458,20 @@ void MainWindow::RefreshVcamStatus() {
         text = L"IXC Camera is available to other apps";
         text += vcam_.wrappedCameraName.empty() ? L"." : L" and uses " + W(vcam_.wrappedCameraName) + L".";
     }
-    SetWindowTextW(vcamStatus_, text.c_str());
+    SetVcamText(text.c_str());
+    if (!vcam_.comRegistered || !vcam_.dllFileExists) {
+        vcamState_ = VcamState::Missing;
+        vcamPill_ = L"IXC Camera not installed";
+    } else if (!vcam_.cameraPresent) {
+        vcamState_ = VcamState::Inactive;
+        vcamPill_ = L"IXC Camera inactive";
+    } else {
+        vcamState_ = VcamState::Active;
+        vcamPill_ = L"IXC Camera on";
+        if (!vcam_.wrappedCameraName.empty()) vcamPill_ += L" · " + W(vcam_.wrappedCameraName);
+    }
+    panel_.Relayout();  // the status text may wrap differently
+    InvalidateRect(hwnd_, &header_, FALSE);
     UpdateVcamControls();
 }
 
@@ -356,7 +493,7 @@ void MainWindow::UseSelectedForIxcCamera() {
     const CameraInfo& cam = cameras_[static_cast<size_t>(sel)];
     const std::filesystem::path tool = std::filesystem::path(vcam_.registeredDllPath).parent_path() / L"ixc_vcam.exe";
     if (!std::filesystem::exists(tool)) {
-        SetWindowTextW(vcamStatus_, L"The IXC Camera installation is incomplete (ixc_vcam.exe is missing). Reinstall IXC Camera.");
+        SetVcamText(L"The IXC Camera installation is incomplete (ixc_vcam.exe is missing). Reinstall IXC Camera.");
         return;
     }
     // The preview holds the webcam; release it so the change and apps can use it.
@@ -372,13 +509,13 @@ void MainWindow::UseSelectedForIxcCamera() {
     sei.nShow = SW_HIDE;
     if (!ShellExecuteExW(&sei) || !sei.hProcess) {
         const DWORD err = GetLastError();
-        SetWindowTextW(vcamStatus_, err == ERROR_CANCELLED ? L"No change made: administrator approval was declined."
+        SetVcamText(err == ERROR_CANCELLED ? L"No change made: administrator approval was declined."
                                                            : W(Error{HRESULT_FROM_WIN32(err), "LaunchIxcVcam",
                                                                      "IXC Camera could not start the camera update."}.Describe()).c_str());
         return;
     }
     vcamProcess_ = sei.hProcess;
-    SetWindowTextW(vcamStatus_, (L"Switching IXC Camera to " + W(cam.name) + L"…").c_str());
+    SetVcamText((L"Switching IXC Camera to " + W(cam.name) + L"…").c_str());
     UpdateVcamControls();
     // Event-driven: a thread-pool wait fires once when the tool exits (no polling).
     if (!RegisterWaitForSingleObject(&vcamWait_, vcamProcess_, &MainWindow::OnVcamProcessExit, this, INFINITE, WT_EXECUTEONLYONCE)) {
@@ -410,7 +547,7 @@ void MainWindow::OnVcamDone(DWORD exitCode) {
     if (exitCode != 0) {
         const std::wstring msg = L"IXC Camera could not switch webcams (ixc_vcam exit code " + std::to_wstring(exitCode) +
                                  L"). Details: %TEMP%\\ixc-install.log or run \"ixc_vcam status\".";
-        SetWindowTextW(vcamStatus_, msg.c_str());
+        SetVcamText(msg.c_str());
         log::Error("vcam", "ixc_vcam register failed with exit code " + std::to_string(exitCode));
     } else {
         log::Info("vcam", "IXC Camera now uses " + vcam_.wrappedCameraName);
@@ -435,7 +572,7 @@ void MainWindow::LoadProfile() {
         // Never overwrite a profile we couldn't read. Keep it on disk and run with defaults
         // without saving over it.
         log::Error("profiles", "default profile unreadable, not overwriting: " + r.error);
-        SetWindowTextW(hint_, (L"Your saved profile could not be read and was left unchanged: " + W(r.error)).c_str());
+        SetHint((L"Your saved profile could not be read and was left unchanged: " + W(r.error)).c_str());
         profileLoaded_ = false;
         return;
     }
@@ -480,7 +617,7 @@ void MainWindow::SwitchProfile(const std::string& stem) {
     if (stem == stem_) return;
     ProfileLoadResult r = store_.Load(stem);
     if (!r.ok) {
-        SetWindowTextW(hint_, (L"Profile \"" + W(stem) + L"\" could not be read and was left unchanged: " + W(r.error)).c_str());
+        SetHint((L"Profile \"" + W(stem) + L"\" could not be read and was left unchanged: " + W(r.error)).c_str());
         RefreshProfileList();
         return;
     }
@@ -499,7 +636,7 @@ void MainWindow::SwitchProfile(const std::string& stem) {
     UpdatePipeline();
     SaveAndPublish();
     RefreshProfileList();
-    SetWindowTextW(hint_, (L"Profile: " + W(stem_)).c_str());
+    SetHint((L"Profile: " + W(stem_)).c_str());
 }
 
 void MainWindow::CycleProfile(int step) {
@@ -517,7 +654,7 @@ void MainWindow::SaveProfileAs() {
     GetWindowTextW(profileCombo_, buf, 128);
     const std::string name = WideToUtf8(buf);
     if (!IsValidProfileName(name)) {
-        SetWindowTextW(hint_, L"Type a profile name (up to 64 characters) in the Profile box, then select Save.");
+        SetHint(L"Type a profile name (up to 64 characters) in the Profile box, then select Save.");
         return;
     }
     const std::string stem = ProfileStore::MakeStem(name);
@@ -529,7 +666,7 @@ void MainWindow::SaveProfileAs() {
     SaveProfile();
     SaveAppSettings();
     RefreshProfileList();
-    SetWindowTextW(hint_, (L"Saved profile \"" + W(stem_) + L"\".").c_str());
+    SetHint((L"Saved profile \"" + W(stem_) + L"\".").c_str());
 }
 
 void MainWindow::DeleteProfile() {
@@ -541,7 +678,7 @@ void MainWindow::DeleteProfile() {
     std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stem < b.stem; });
     const auto next = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.stem != doomed; });
     SwitchProfile(next->stem);
-    if (FAILED(store_.Remove(doomed))) SetWindowTextW(hint_, L"The profile file could not be deleted.");
+    if (FAILED(store_.Remove(doomed))) SetHint(L"The profile file could not be deleted.");
     RefreshProfileList();
 }
 
@@ -565,12 +702,12 @@ void MainWindow::ImportProfile() {
     std::string stem = UniqueStem(r.profile.name);  // never overwrites an existing profile
     hr = store_.Save(r.profile, stem);
     if (FAILED(hr)) {
-        SetWindowTextW(hint_, L"The imported profile could not be saved.");
+        SetHint(L"The imported profile could not be saved.");
         return;
     }
     SwitchProfile(stem);
     if (!r.warnings.empty()) {
-        SetWindowTextW(hint_, (L"Imported \"" + W(stem) + L"\" with " + std::to_wstring(r.warnings.size()) +
+        SetHint((L"Imported \"" + W(stem) + L"\" with " + std::to_wstring(r.warnings.size()) +
                                L" value(s) adjusted to valid ranges.").c_str());
     }
 }
@@ -588,7 +725,7 @@ void MainWindow::ExportProfile() {
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (!GetSaveFileNameW(&ofn)) return;
     const HRESULT hr = WriteFileAtomic(path, ProfileToJson(profile_));
-    SetWindowTextW(hint_, SUCCEEDED(hr) ? L"Profile exported." : L"The profile could not be exported.");
+    SetHint(SUCCEEDED(hr) ? L"Profile exported." : L"The profile could not be exported.");
 }
 
 // Global hotkeys (RegisterHotKey: no keyboard hook, no polling). Ctrl+Alt combinations so plain
@@ -606,7 +743,7 @@ void MainWindow::RegisterHotkeys() {
         if (!RegisterHotKey(hwnd_, k.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, k.vk)) taken += (taken.empty() ? L"" : L", ") + std::wstring(k.name);
     }
     hotkeysRegistered_ = true;
-    if (!taken.empty()) SetWindowTextW(hint_, (L"Another app already uses " + taken + L"; those IXC hotkeys are unavailable.").c_str());
+    if (!taken.empty()) SetHint((L"Another app already uses " + taken + L"; those IXC hotkeys are unavailable.").c_str());
 }
 
 void MainWindow::UnregisterHotkeys() {
@@ -619,7 +756,8 @@ void MainWindow::OnHotkey(int id) {
     switch (id) {
         case kHkEffects:
             profile_.effectsEnabled = !profile_.effectsEnabled;
-            SetWindowTextW(hint_, profile_.effectsEnabled ? L"Effects on (Ctrl+Alt+F8)" : L"Effects off (Ctrl+Alt+F8)");
+            SetHint(profile_.effectsEnabled ? L"Effects on (Ctrl+Alt+F8)" : L"Effects off (Ctrl+Alt+F8)");
+            panel_.Refresh();  // the switch follows the hotkey
             break;
         case kHkNextProfile: CycleProfile(1); return;
         case kHkPrevProfile: CycleProfile(-1); return;
@@ -743,10 +881,10 @@ void MainWindow::StartPreview() {
                               : L"The camera could not be started. See the message below.");
         SetWindowTextW(status_, W(err.Describe()).c_str());
         if (denied) {
-            SetWindowTextW(hint_, L"Turn on \"Camera access\" and \"Let desktop apps access your camera\" in Windows "
+            SetHint(L"Turn on \"Camera access\" and \"Let desktop apps access your camera\" in Windows "
                                   L"Settings, then select Start preview again.");
         } else if (ClassifyHResult(err.hr) == ErrorClass::Transient) {
-            SetWindowTextW(hint_, L"Another app may be using the camera exclusively. Close it and try again.");
+            SetHint(L"Another app may be using the camera exclusively. Close it and try again.");
         }
         ShowPrivacyHelp(denied);
         return;
@@ -754,11 +892,10 @@ void MainWindow::StartPreview() {
 
     previewing_ = true;
     ShowPrivacyHelp(false);
-    SetWindowTextW(hint_, L"");
+    SetHint(L"");
     SetWindowTextW(startStop_, L"Stop preview");
-    EnableWindow(camera_, FALSE);
-    EnableWindow(format_, FALSE);
     SetTimer(hwnd_, kStatusTimer, 1000, nullptr);
+    InvalidateRect(hwnd_, &statusDot_, FALSE);
 
     const CaptureFormat active = session_->ActiveFormat();
     profile_.sourceCameraId = WideToUtf8(cam.symbolicLink);
@@ -776,6 +913,11 @@ void MainWindow::StartPreview() {
 void MainWindow::OnPictureChanged() {
     if (session_) session_->SetSmoothMotion(profile_.smoothMotion);
     UpdatePipeline();                            // preview reflects the change immediately
+    if (panel_.FaceOverlay() != app_.showFaceMarkers) {  // app-level preference (not part of a profile)
+        app_.showFaceMarkers = panel_.FaceOverlay();
+        SaveAppSettings();
+    }
+    RefreshFeatureStates();
     SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
 }
 
@@ -815,7 +957,7 @@ void MainWindow::SaveAndPublish() {
         publishWarned_ = true;
         const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
         log::Error("profiles", e.Describe());
-        SetWindowTextW(vcamStatus_, (W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
+        SetVcamText((W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
     }
 }
 
@@ -825,44 +967,45 @@ void MainWindow::StopPreview(const wchar_t* placeholder) {
     previewing_ = false;
     preview_.Clear(placeholder);
     SetWindowTextW(startStop_, L"Start preview");
-    EnableWindow(camera_, TRUE);
-    EnableWindow(format_, TRUE);
-    SetWindowTextW(hint_, L"");
+    SetWindowTextW(status_, L"Preview stopped  ·  the camera is released");
+    UpdateStatus();
+    SetHint(L"");
 }
 
 void MainWindow::UpdateStatus() {
+    RefreshFeatureStates();
+    InvalidateRect(hwnd_, &statusDot_, FALSE);
     if (!previewing_) return;
     const auto st = session_->Stats();
     const auto fmt = session_->ActiveFormat();
-    wchar_t buf[320];
     const int cam = static_cast<int>(SendMessageW(camera_, CB_GETCURSEL, 0, 0));
     const std::wstring name = cam >= 0 ? W(cameras_[static_cast<size_t>(cam)].name) : L"";
+    // One line: what's live, how well, and what's processing it.
+    std::wstring s = L"Live  ·  " + name + L"  ·  " + W(Describe(fmt));
+    wchar_t b[160];
+    swprintf_s(b, L"  ·  receiving %.1f FPS", st.fps);
+    s += b;
     if (st.meanLatencyMs >= 0) {
-        swprintf_s(buf, L"%s • %s • receiving %.1f FPS • dropped %llu • latency %.0f ms", name.c_str(), W(Describe(fmt)).c_str(),
-                   st.fps, static_cast<unsigned long long>(session_->DroppedFrames()), st.meanLatencyMs);
-    } else {
-        swprintf_s(buf, L"%s • %s • receiving %.1f FPS • dropped %llu", name.c_str(), W(Describe(fmt)).c_str(), st.fps,
-                   static_cast<unsigned long long>(session_->DroppedFrames()));
+        swprintf_s(b, L"  ·  latency %.0f ms", st.meanLatencyMs);
+        s += b;
     }
-    if (profile_.faceTracking.enabled || !profile_.effects.empty()) {
-        const face::EngineStatus fs = preview_.FaceStatus();
-        wchar_t f[160];
-        if (fs.state == face::EngineState::Tracking || fs.state == face::EngineState::Searching) {
-            swprintf_s(f, L" • face: %hs %d, %.1f/s at %dx%d (%hs, %.0f ms)", face::ToString(fs.state), fs.faces, fs.detectHz,
-                       fs.inputWidth, fs.inputHeight, face::ToString(fs.path), fs.avgDetectMs);
-        } else {
-            swprintf_s(f, L" • face tracking %hs", face::ToString(fs.state));
-        }
-        wcsncat_s(buf, f, _TRUNCATE);
+    swprintf_s(b, L"  ·  dropped %llu  ·  %s processing", static_cast<unsigned long long>(session_->DroppedFrames()),
+               preview_.ProcessingBackend().c_str());
+    s += b;
+    const face::EngineStatus fs = preview_.FaceStatus();
+    if (fs.state == face::EngineState::Tracking || fs.state == face::EngineState::Searching) {
+        swprintf_s(b, L"  ·  face: %hs %d", face::ToString(fs.state), fs.faces);
+        s += b;
     }
-    SetWindowTextW(status_, buf);
+    SetWindowTextW(status_, s.c_str());
 
     if (st.underSpeed) {
-        swprintf_s(buf, L"The camera is delivering %.0f of %.0f FPS. This usually means low light: the camera lengthens its "
-                        L"exposure. More light restores the full frame rate.", st.fps, st.nominalFps);
-        SetWindowTextW(hint_, buf);
+        wchar_t hb[400];
+        swprintf_s(hb, L"The camera is delivering %.0f of %.0f FPS: usually low light (the camera lengthens its exposure). "
+                      L"More light, or Smooth motion, restores the full frame rate.", st.fps, st.nominalFps);
+        SetHint(hb);
     } else if (session_->State() == CaptureState::Streaming) {
-        SetWindowTextW(hint_, L"");
+        SetHint(L"");
     }
 }
 
@@ -871,14 +1014,14 @@ void MainWindow::OnCaptureState(CaptureState s) {
     switch (s) {
         case CaptureState::Reconnecting:
             preview_.Clear(L"Camera disconnected. Reconnecting…");
-            SetWindowTextW(hint_, L"IXC Camera will reconnect automatically when the camera is available again.");
+            SetHint(L"IXC Camera will reconnect automatically when the camera is available again.");
             break;
         case CaptureState::WaitingForDevice:
             preview_.Clear(L"Waiting for the camera to be connected again.");
-            SetWindowTextW(hint_, L"Plug the camera back in. IXC Camera resumes automatically and uses no CPU while waiting.");
+            SetHint(L"Plug the camera back in. IXC Camera resumes automatically and uses no CPU while waiting.");
             break;
         case CaptureState::Streaming:
-            SetWindowTextW(hint_, L"");
+            SetHint(L"");
             break;
         case CaptureState::Failed: {
             const Error e = session_->LastError();
@@ -920,7 +1063,32 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_GETFONT:
-            return reinterpret_cast<LRESULT>(font_);
+            return reinterpret_cast<LRESULT>(fonts_.body);
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd_, &ps);
+            RECT rc;
+            GetClientRect(hwnd_, &rc);
+            HDC mem = CreateCompatibleDC(dc);
+            HBITMAP bmp = CreateCompatibleBitmap(dc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            Paint(mem, rc);
+            BitBlt(dc, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right - ps.rcPaint.left, ps.rcPaint.bottom - ps.rcPaint.top, mem,
+                   ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hwnd_, &ps);
+            return 0;
+        }
+
+        case kAutoStartMessage:
+            if (!previewing_ && !IsIconic(hwnd_)) StartPreview();
+            return 0;
 
         case WM_SIZE:
             if (wp == SIZE_MINIMIZED) {
@@ -943,12 +1111,13 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             const RECT* r = reinterpret_cast<const RECT*>(lp);
             ApplyFont();
             SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            Layout();
             return 0;
         }
 
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            mmi->ptMinTrackSize = {Scale(900), Scale(660)};  // room for preview + adjustment panel
+            mmi->ptMinTrackSize = {Scale(860), Scale(560)};  // preview + settings column; the column scrolls
             return 0;
         }
 
@@ -961,8 +1130,18 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             switch (LOWORD(wp)) {
                 case kIdCamera:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
+                        // Switching while previewing restarts the preview on the new camera.
+                        const bool wasPreviewing = previewing_;
+                        if (wasPreviewing) StopPreview(L"Switching camera…");
                         OnCameraSelected();
                         UpdateVcamControls();
+                        if (wasPreviewing) StartPreview();
+                    }
+                    return 0;
+                case kIdFormat:
+                    if (HIWORD(wp) == CBN_SELCHANGE && previewing_) {
+                        StopPreview(L"Switching format…");
+                        StartPreview();
                     }
                     return 0;
                 case kIdStartStop:
@@ -972,7 +1151,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case kIdVcamUse:
                     UseSelectedForIxcCamera();
                     return 0;
-                case kIdProfile:
+                case kIdProfileCombo:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
                         const int sel = static_cast<int>(SendMessageW(profileCombo_, CB_GETCURSEL, 0, 0));
                         wchar_t item[128] = L"";
@@ -1041,8 +1220,15 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             return TRUE;
 
         case WM_CTLCOLORSTATIC:
-            SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+            return ControlColor(reinterpret_cast<HWND>(lp), reinterpret_cast<HDC>(wp));
+
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
+            HDC dc = reinterpret_cast<HDC>(wp);
+            SetTextColor(dc, app::theme::kText);
+            SetBkColor(dc, app::theme::kSurfaceHi);
+            return reinterpret_cast<LRESULT>(app::theme::Brush(app::theme::kSurfaceHi));
+        }
 
         case WM_DESTROY:
             KillTimer(hwnd_, kStatusTimer);
@@ -1055,7 +1241,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             if (devNotify_) UnregisterDeviceNotification(devNotify_);
             if (vcamWait_) UnregisterWaitEx(vcamWait_, INVALID_HANDLE_VALUE);  // waits for an in-flight callback
             if (vcamProcess_) CloseHandle(vcamProcess_);
-            if (font_) DeleteObject(font_);
+            for (HICON i : {iconHeader_, iconSmall_, iconLarge_}) if (i) DestroyIcon(i);
             PostQuitMessage(0);
             return 0;
 

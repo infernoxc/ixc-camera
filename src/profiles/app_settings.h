@@ -12,6 +12,7 @@ namespace ixc {
 struct AppSettings {
     std::string activeProfile = "default";  // profile store stem
     bool hotkeysEnabled = true;             // global Ctrl+Alt hotkeys (see docs/hotkeys in README)
+    bool showFaceMarkers = true;            // preview overlay of tracked faces (preview only)
     bool operator==(const AppSettings&) const = default;
 };
 

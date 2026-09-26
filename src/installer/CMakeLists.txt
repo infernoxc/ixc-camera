@@ -25,8 +25,9 @@ file(WRITE ${IXC_PAYLOAD_RC}
 103 RCDATA \"payload/IXCCamera.exe\"
 104 RCDATA \"payload/LICENSE.txt\"
 105 RCDATA \"payload/THIRD_PARTY_LICENSES.md\"
+1 ICON \"${CMAKE_SOURCE_DIR}/src/app/ixc.ico\"
 ")
-set_source_files_properties(${IXC_PAYLOAD_RC} PROPERTIES OBJECT_DEPENDS "${IXC_PAYLOAD_FILES}")
+set_source_files_properties(${IXC_PAYLOAD_RC} PROPERTIES OBJECT_DEPENDS "${IXC_PAYLOAD_FILES};${CMAKE_SOURCE_DIR}/src/app/ixc.ico")
 
 add_executable(ixc_setup WIN32 setup.cpp setup.manifest ${IXC_PAYLOAD_RC} ${IXC_PAYLOAD_FILES})
 set_target_properties(ixc_setup PROPERTIES OUTPUT_NAME "IXC-Camera-Setup-x64")

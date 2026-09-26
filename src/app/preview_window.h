@@ -52,6 +52,8 @@ public:
     // Draw the tracked faces over the preview (preview only; never sent to apps).
     void SetFaceOverlay(bool on);
     face::EngineStatus FaceStatus() const { return face_.Status(); }
+    // "GPU" while the picture pipeline runs on the graphics card, otherwise "CPU".
+    std::wstring ProcessingBackend() const { return processor_.GetStats().backend == processing::Backend::Gpu ? L"GPU" : L"CPU"; }
     // IXC effects applied after the pipeline (nullptr = none).
     void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) { effects_ = std::move(cfg); dirty_ = sample_ != nullptr; }
 
