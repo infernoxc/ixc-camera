@@ -1,5 +1,13 @@
 # Changelog
 
+## Phase 13 — Security and release audit (2026-09-26)
+
+### Added
+- `scripts/audit-release.ps1`: exploit mitigations (ASLR, DEP, CFG, CET), system-only imports, static CRT, no network APIs, payload integrity and a secret scan. All pass. Report: docs/security-audit.md.
+
+### Fixed
+- Static analysis (MSVC /analyze): explicit null guards added where the analyzer couldn’t see API guarantees (device enumeration, camera-service activation fallback, installer). No real defects found.
+
 ## 0.9.0 — Phase 12 installer (2026-09-26)
 
 ### Added

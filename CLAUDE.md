@@ -48,6 +48,6 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - The Lenovo rejects UVC control changes after the capture reader is flushed (`0xC00D36B6`), and rejects value 0 with the AUTO flag. Restore exposure before flushing, using the original value.
 - `tests/bench_baseline.ps1` starts the app, which republishes the user's saved profile. Use `-Profile` (applied after the app step) to benchmark other settings.
 - Writing files with PowerShell `UTF8Encoding($true)` adds a BOM: repo files have none.
-- `perl -pi` with non-ASCII in the replacement double-encodes the file's existing UTF-8 ("Wide character" warning). Use `perl -CSD`, or ASCII escapes plus the Edit tool.
+- `perl -pi` with non-ASCII in the pattern or replacement misbehaves (double-encoding, or no match even with -CSD). Use the Edit tool for non-ASCII text. It double-encodes the file's existing UTF-8 ("Wide character" warning). Use `perl -CSD`, or ASCII escapes plus the Edit tool.
 - The built-in browser pane blocks camera access; use `tests/browser_camera.ps1` (headless Chromium, throwaway profile).
 - The Snap Camera legacy virtual camera is installed (root-enumerated, RGB24 720p). IXC lists it as virtual.
