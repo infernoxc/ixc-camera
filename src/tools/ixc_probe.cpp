@@ -740,7 +740,11 @@ int DirectShowCapture(const Options& o) {
     ComPtr<IEnumMoniker> monikers;
     HRESULT hr = CoCreateInstance(CLSID_SystemDeviceEnum, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&devEnum));
     if (SUCCEEDED(hr)) hr = devEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &monikers, 0);
-    if (hr != S_OK) { std::printf("error: no DirectShow video devices\n"); return 1; }
+    if (hr != S_OK) {
+        // No video devices at all (e.g. a CI runner): a skip, like the Media Foundation tests.
+        std::printf("no DirectShow video devices\n");
+        return o.requireCamera ? 1 : kExitSkip;
+    }
 
     ComPtr<IBaseFilter> source;
     std::string name;
