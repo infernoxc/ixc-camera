@@ -15,6 +15,7 @@
 #include "common/strings.h"
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
+#include "face/face_settings.h"
 #include "ixc/version.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
@@ -134,6 +135,7 @@ private:
     std::filesystem::path dataDir_;
     ProfileStore store_;
     Profile profile_;
+    double smoothEv_ = 0;  // Smooth motion gain in the current preview pipeline
     bool profileLoaded_ = false;
 
     std::vector<CameraInfo> cameras_;
@@ -488,6 +490,7 @@ void MainWindow::StartPreview() {
     cfg.cameraName = cam.name;
     cfg.format = formats_[*idx];
     cfg.output = OutputFormat::Nv12;  // pipeline format; the preview converts only displayed pixels
+    cfg.smoothMotion = profile_.smoothMotion;
 
     SetWindowTextW(status_, (L"Opening " + W(cam.name) + L"…").c_str());
     const Error err = session_->Start(cfg);
@@ -528,6 +531,7 @@ void MainWindow::StartPreview() {
 // ---- picture settings -------------------------------------------------------------------------------
 
 void MainWindow::OnPictureChanged() {
+    if (session_) session_->SetSmoothMotion(profile_.smoothMotion);
     UpdatePipeline();                            // preview reflects the change immediately
     SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
 }
@@ -539,7 +543,19 @@ void MainWindow::UpdatePipeline() {
     }
     const FrameLayout l = session_->Layout();
     const bool fullRange = l.nominalRange == MFNominalRange_0_255;
-    preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(profile_, l.width, l.height, fullRange)));
+    // Same as the IXC Camera source: Smooth motion's brightness gain adds to the user's exposure.
+    smoothEv_ = session_->SmoothCompensationEv();
+    Profile effective = profile_;
+    effective.image.exposureEv += smoothEv_;
+    preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
+    // Face tracking follows the profile (off = no thread, no memory).
+    if (profile_.faceTracking.enabled) {
+        const face::EngineConfig fc = face::EngineConfigFor(profile_);
+        preview_.SetFaceTracking(&fc);
+    } else {
+        preview_.SetFaceTracking(nullptr);
+    }
+    preview_.SetFaceOverlay(panel_.FaceOverlay());
 }
 
 void MainWindow::SaveAndPublish() {
@@ -581,6 +597,17 @@ void MainWindow::UpdateStatus() {
     } else {
         swprintf_s(buf, L"%s • %s • receiving %.1f FPS • dropped %llu", name.c_str(), W(Describe(fmt)).c_str(), st.fps,
                    static_cast<unsigned long long>(session_->DroppedFrames()));
+    }
+    if (profile_.faceTracking.enabled) {
+        const face::EngineStatus fs = preview_.FaceStatus();
+        wchar_t f[160];
+        if (fs.state == face::EngineState::Tracking || fs.state == face::EngineState::Searching) {
+            swprintf_s(f, L" • face: %hs %d, %.1f/s at %dx%d (%hs, %.0f ms)", face::ToString(fs.state), fs.faces, fs.detectHz,
+                       fs.inputWidth, fs.inputHeight, face::ToString(fs.path), fs.avgDetectMs);
+        } else {
+            swprintf_s(f, L" • face tracking %hs", face::ToString(fs.state));
+        }
+        wcsncat_s(buf, f, _TRUNCATE);
     }
     SetWindowTextW(status_, buf);
 
@@ -711,6 +738,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             preview_.FrameMessageHandled();
             if (previewing_ && !IsIconic(hwnd_)) {
                 if (auto frame = session_->TakeFrame()) {
+                    if (session_->SmoothCompensationEv() != smoothEv_) UpdatePipeline();  // Smooth motion gain changed
                     const FrameLayout l = session_->Layout();
                     preview_.ShowFrame(std::move(*frame), l);
                 }

@@ -55,6 +55,9 @@ void AdjustmentsPanel::Create(HWND parent, HINSTANCE instance, int firstId, Prof
     mirror_ = make(WC_BUTTONW, L"Mirror (flip left-right)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
     reset_ = make(WC_BUTTONW, L"Reset picture", BS_PUSHBUTTON | WS_TABSTOP, id++);
     gpu_ = make(WC_BUTTONW, L"Use the graphics card for zoom when it's faster", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, id++);
+    smooth_ = make(WC_BUTTONW, L"Smooth motion: keep full frame rate in low light", BS_AUTOCHECKBOX | BS_MULTILINE | WS_TABSTOP, id++);
+    face_ = make(WC_BUTTONW, L"Face tracking (used by face effects)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
+    faceOverlay_ = make(WC_BUTTONW, L"Show face markers in preview (not sent to apps)", BS_AUTOCHECKBOX | WS_TABSTOP, id++);
     Refresh();
 }
 
@@ -64,6 +67,9 @@ void AdjustmentsPanel::SetFont(HFONT font) {
     set(mirror_);
     set(reset_);
     set(gpu_);
+    set(smooth_);
+    set(face_);
+    set(faceOverlay_);
     for (auto& s : sliders_) {
         set(s.labelWnd);
         set(s.valueWnd);
@@ -88,6 +94,12 @@ int AdjustmentsPanel::Layout(int x, int y, int width, int rowHeight, int gap) {
     cy += rowHeight + gap;
     MoveWindow(gpu_, x, cy, width, rowHeight * 2, TRUE);  // two lines: it's a sentence
     cy += rowHeight * 2;
+    MoveWindow(smooth_, x, cy, width, rowHeight * 2, TRUE);
+    cy += rowHeight * 2;
+    MoveWindow(face_, x, cy, width, rowHeight, TRUE);
+    cy += rowHeight;
+    MoveWindow(faceOverlay_, x + 16, cy, width - 16, rowHeight, TRUE);
+    cy += rowHeight;
     return cy - y;
 }
 
@@ -106,6 +118,10 @@ void AdjustmentsPanel::Refresh() {
     }
     SendMessageW(mirror_, BM_SETCHECK, profile_->mirror ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(gpu_, BM_SETCHECK, profile_->gpu == GpuMode::Auto ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(smooth_, BM_SETCHECK, profile_->smoothMotion ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(faceOverlay_, BM_SETCHECK, faceOverlayOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    EnableWindow(faceOverlay_, profile_->faceTracking.enabled);
 }
 
 bool AdjustmentsPanel::OnScroll(HWND control) {
@@ -131,6 +147,22 @@ bool AdjustmentsPanel::OnCommand(HWND control, int code) {
     }
     if (control == gpu_ && code == BN_CLICKED) {
         profile_->gpu = SendMessageW(gpu_, BM_GETCHECK, 0, 0) == BST_CHECKED ? GpuMode::Auto : GpuMode::Off;
+        if (onChange_) onChange_();
+        return true;
+    }
+    if (control == face_ && code == BN_CLICKED) {
+        profile_->faceTracking.enabled = SendMessageW(face_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        EnableWindow(faceOverlay_, profile_->faceTracking.enabled);
+        if (onChange_) onChange_();
+        return true;
+    }
+    if (control == faceOverlay_ && code == BN_CLICKED) {
+        faceOverlayOn_ = SendMessageW(faceOverlay_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (onChange_) onChange_();
+        return true;
+    }
+    if (control == smooth_ && code == BN_CLICKED) {
+        profile_->smoothMotion = SendMessageW(smooth_, BM_GETCHECK, 0, 0) == BST_CHECKED;
         if (onChange_) onChange_();
         return true;
     }

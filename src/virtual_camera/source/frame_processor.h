@@ -12,6 +12,8 @@
 // Settings changes apply to the next frame. Parsing happens on the watcher thread, and the
 // frame path only swaps in the compiled result.
 
+#include "camera/smooth_motion.h"
+#include "face/face_engine.h"
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
 #include "profiles/profile.h"
@@ -32,7 +34,8 @@ public:
     FrameProcessor(const FrameProcessor&) = delete;
     FrameProcessor& operator=(const FrameProcessor&) = delete;
 
-    void BeginSession(IMFMediaType* type);
+    // ks: the camera's control interface (for smooth motion); may be null.
+    void BeginSession(IMFMediaType* type, IKsControl* ks);
     void EndSession();
     bool Active() const;  // a session is running (settings watched, pool available)
 
@@ -75,6 +78,24 @@ private:
 
     HANDLE change_ = INVALID_HANDLE_VALUE;
     HANDLE wait_ = nullptr;
+
+    // Smooth motion (fixed exposure in low light). Lock order: smoothMu_ before mu_.
+    std::mutex smoothMu_;
+    camera::SmoothMotion smooth_;
+    Microsoft::WRL::ComPtr<IKsControl> ks_;
+    double nominalFps_ = 0;       // under mu_
+    double compensationEv_ = 0;   // under mu_: added to the profile's exposure
+    bool smoothEnabled_ = false;  // under mu_
+    bool smoothSettingChanged_ = false;  // under mu_
+
+    // Face tracking (off unless the profile enables it: then no thread, no memory).
+    // faceMu_ is taken alone (never while holding mu_/smoothMu_).
+    void UpdateFaceTracking();  // start/stop/reconfigure from profile_
+    void StopFaceTracking();    // traces the session statistics
+    std::mutex faceMu_;
+    face::FaceEngine face_;
+    face::EngineConfig faceConfig_;  // under faceMu_
+    double frameIntervalMs_ = 33.3;  // under mu_
 };
 
 }  // namespace ixc::vcam

@@ -173,6 +173,7 @@ Error CaptureSession::Start(const CaptureConfig& config) {
         {
             std::lock_guard lock(mu_);
             config_ = config;
+            smoothWanted_.store(config.smoothMotion);
             stopRequested_ = false;
             policy_.Reset();
             lastError_ = {};
@@ -338,6 +339,10 @@ Error CaptureSession::OpenLocked() {
         SetState(CaptureState::Streaming, {});
     }
 
+    {
+        std::lock_guard lock(smoothMu_);
+        smoothBlocked_ = false;  // a fresh stream: Smooth motion starts on its first frame
+    }
     hr = reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
     if (FAILED(hr)) {
         TeardownLocked();
@@ -354,6 +359,15 @@ void CaptureSession::TeardownLocked() {
         std::lock_guard lock(mu_);
         reader = std::move(reader_);
         source = std::move(source_);
+    }
+    {
+        // Before the flush: the camera's controls reject changes once its reader is flushed
+        // (MF 0xC00D36B6 on the Lenovo FHD Webcam). Callbacks can't restart it (smoothBlocked_).
+        std::lock_guard lock(smoothMu_);
+        smoothBlocked_ = true;
+        if (smoothRunning_ && FAILED(smooth_.End())) log::Warn("capture", "could not give the camera its automatic exposure back");
+        smoothRunning_ = false;
+        smoothEv_.store(0);
     }
     if (reader) {
         // Flush cancels the pending ReadSample; wait for OnFlush so no callback for this reader
@@ -409,6 +423,7 @@ STDMETHODIMP CaptureSession::OnReadSample(HRESULT hrStatus, DWORD, DWORD flags, 
             std::lock_guard lock(statsMu_);
             stats_.OnFrame(arrivalUs, timestamp / 10, latencyUs);
         }
+        FeedSmoothMotion(sample);  // before handing the sample to the UI thread
         frames_.Put(ComPtr<IMFSample>(sample));
         {
             std::lock_guard lock(mu_);
@@ -424,6 +439,66 @@ STDMETHODIMP CaptureSession::OnReadSample(HRESULT hrStatus, DWORD, DWORD flags, 
     const HRESULT hr = reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
     if (FAILED(hr) && hr != MF_E_NOTACCEPTING) OnStreamFailure(hr, "ReadSample");
     return S_OK;
+}
+
+void CaptureSession::FeedSmoothMotion(IMFSample* sample) {
+    std::lock_guard lock(smoothMu_);
+    if (smoothBlocked_) return;
+    const bool want = smoothWanted_.load();
+    if (want != smoothRunning_) {
+        if (want) {
+            ComPtr<IMFMediaSource> source;
+            FrameLayout layout;
+            double fps = 0;
+            {
+                std::lock_guard l(mu_);
+                source = source_;
+                layout = layout_;
+                if (activeFormat_.fpsDenominator) fps = static_cast<double>(activeFormat_.fpsNumerator) / activeFormat_.fpsDenominator;
+            }
+            ComPtr<IKsControl> ks;
+            if (source) source.As(&ks);  // the camera's UVC controls; absent on some cameras
+            smooth_.Begin(ks.Get(), IsEqualGUID(layout.subtype, MFVideoFormat_NV12), fps);
+        } else {
+            smooth_.End();
+        }
+        smoothRunning_ = want;
+    }
+    if (!smoothRunning_ || !smooth_.Active()) {
+        smoothEv_.store(0);
+        return;
+    }
+
+    if (!smooth_.NeedsLuma()) {
+        smooth_.OnFrame(nullptr, 0, 0, 0);  // frame timing only (watchdog)
+    } else {
+        FrameLayout layout;
+        {
+            std::lock_guard l(mu_);
+            layout = layout_;
+        }
+        ComPtr<IMFMediaBuffer> buffer;
+        if (SUCCEEDED(sample->GetBufferByIndex(0, &buffer))) {
+            ComPtr<IMF2DBuffer> buf2d;
+            BYTE* scan0 = nullptr;
+            LONG pitch = 0;
+            if (SUCCEEDED(buffer.As(&buf2d)) && SUCCEEDED(buf2d->Lock2D(&scan0, &pitch))) {
+                if (pitch > 0) smooth_.OnFrame(scan0, pitch, static_cast<int>(layout.width), static_cast<int>(layout.height));
+                buf2d->Unlock2D();
+            } else {
+                BYTE* data = nullptr;
+                DWORD length = 0;
+                if (SUCCEEDED(buffer->Lock(&data, nullptr, &length))) {
+                    const LONG stride = layout.stride > 0 ? layout.stride : static_cast<LONG>(layout.width);
+                    if (static_cast<size_t>(stride) * layout.height <= length) {
+                        smooth_.OnFrame(data, stride, static_cast<int>(layout.width), static_cast<int>(layout.height));
+                    }
+                    buffer->Unlock();
+                }
+            }
+        }
+    }
+    smoothEv_.store(smooth_.CompensationEv());
 }
 
 STDMETHODIMP CaptureSession::OnFlush(DWORD) {

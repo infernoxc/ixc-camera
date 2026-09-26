@@ -1,5 +1,7 @@
 #include "app/preview_window.h"
 
+#include "face/face_settings.h"
+
 #include <mfapi.h>
 
 #include <algorithm>
@@ -23,6 +25,74 @@ processing::YuvFormat YuvFormatFor(const camera::FrameLayout& l) {
 }
 
 }  // namespace
+
+PreviewWindow::~PreviewWindow() {
+    face_.Stop();
+    if (facePen_) DeleteObject(facePen_);
+    if (landmarkPen_) DeleteObject(landmarkPen_);
+}
+
+void PreviewWindow::SetFaceTracking(const face::EngineConfig* config) {
+    if (!config) {
+        if (face_.Running()) face_.Stop();
+        return;
+    }
+    if (face_.Running() && face::SameEngineConfig(*config, faceConfig_)) return;
+    faceConfig_ = *config;
+    face_.Start(faceConfig_);  // restarts if running
+}
+
+void PreviewWindow::SetFaceOverlay(bool on) {
+    faceOverlay_ = on;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PreviewWindow::PaintFaces(HDC dc, int dx, int dy, int dw, int dh) {
+    face::FaceSnapshot snap;
+    face_.Snapshot(face::FaceEngine::NowMs(), snap);
+    if (snap.count == 0) return;
+    // Faces are tracked in source coordinates; the preview shows the processed output.
+    face::OutputMapping m;
+    if (pipeline_ && !pipeline_->identity) {
+        m = {static_cast<float>(pipeline_->srcX), static_cast<float>(pipeline_->srcY), static_cast<float>(pipeline_->srcW),
+             static_cast<float>(pipeline_->srcH), pipeline_->mirror};
+    }
+    if (!facePen_) facePen_ = CreatePen(PS_SOLID, 2, RGB(80, 220, 120));
+    if (!landmarkPen_) landmarkPen_ = CreatePen(PS_SOLID, 1, RGB(255, 210, 60));
+    auto px = [&](face::PointF p) { return POINT{dx + static_cast<int>(p.x * dw), dy + static_cast<int>(p.y * dh)}; };
+
+    const HGDIOBJ oldPen = SelectObject(dc, facePen_);
+    const HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(80, 220, 120));
+    const HGDIOBJ oldFont = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(GetParent(hwnd_), WM_GETFONT, 0, 0)));
+    for (int i = 0; i < snap.count; ++i) {
+        const face::TrackedFace& f = snap.faces[static_cast<size_t>(i)];
+        const face::RectF b = face::MapToOutput(f.box, m);
+        const POINT a = px({b.x, b.y}), c = px({b.x + b.w, b.y + b.h});
+        SelectObject(dc, facePen_);
+        Rectangle(dc, a.x, a.y, c.x, c.y);
+        wchar_t label[64];
+        swprintf_s(label, L"#%d  %.0f%%  roll %.0f°  yaw %.0f°", f.id, f.confidence * 100, f.rollDeg * (m.mirror ? -1 : 1),
+                   f.yawDeg * (m.mirror ? -1 : 1));
+        TextOutW(dc, a.x, std::max<int>(dy, a.y - 18), label, static_cast<int>(wcslen(label)));
+        if (!f.landmarksValid) continue;
+        SelectObject(dc, landmarkPen_);
+        for (const face::PointF& p : {f.lm.leftEye, f.lm.rightEye, f.lm.nose, f.lm.mouthLeft, f.lm.mouthRight}) {
+            const POINT q = px(face::MapToOutput(p, m));
+            Ellipse(dc, q.x - 3, q.y - 3, q.x + 4, q.y + 4);
+        }
+        for (const face::RectF& br : {f.leftBrow, f.rightBrow}) {
+            const face::RectF o = face::MapToOutput(br, m);
+            const POINT l = px({o.x, o.y + o.h}), r = px({o.x + o.w, o.y + o.h});
+            MoveToEx(dc, l.x, l.y, nullptr);
+            LineTo(dc, r.x, r.y);
+        }
+    }
+    SelectObject(dc, oldFont);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+}
 
 bool PreviewWindow::RegisterClass(HINSTANCE instance) {
     WNDCLASSEXW wc{sizeof(wc)};
@@ -60,6 +130,7 @@ void PreviewWindow::Clear(const wchar_t* placeholder) {
     std::vector<std::uint32_t>().swap(bgra_);  // give the memory back while idle
     std::vector<std::uint8_t>().swap(processed_);
     processor_.ReleaseGpu();
+    face_.Stop();  // no preview: no tracking
     ++pipelineGeneration_;
     bgraW_ = bgraH_ = 0;
     wcsncpy_s(placeholder_, placeholder ? placeholder : L"", _TRUNCATE);
@@ -111,6 +182,10 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
             p.width = static_cast<int>(layout_.width & ~1u);
             p.height = static_cast<int>(layout_.height & ~1u);
 
+            // Face tracking samples the camera frame (source coordinates), before processing.
+            const double now = face::FaceEngine::NowMs();
+            if (face_.WantsFrame(now)) face_.OnFrame(p, YuvFormatFor(layout_), now, 33.3);
+
             // Apply IXC's pipeline at full resolution first (exactly what apps receive).
             if (pipeline_ && !pipeline_->identity) {
                 const size_t frameBytes = static_cast<size_t>(p.width) * static_cast<size_t>(p.height) * 3 / 2;
@@ -160,6 +235,7 @@ void PreviewWindow::Paint(HDC dc, const RECT& rc) {
             for (const auto& b : bars) {
                 if (b.right > b.left && b.bottom > b.top) FillRect(dc, &b, black);
             }
+            if (faceOverlay_ && face_.Running()) PaintFaces(dc, dx, dy, dw, dh);
             drawn = true;
         }
     }

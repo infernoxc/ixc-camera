@@ -37,10 +37,14 @@ $ClsidKey = "HKLM:\SOFTWARE\Classes\CLSID\$Clsid"
 $ManifestName = 'install-manifest.json'
 $SettingsDir = Join-Path $env:ProgramData 'IXC Camera'   # active-profile.json for the camera service
 $Log = Join-Path $env:TEMP 'ixc-install.log'
+$SourceDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Definition)  # repository root
 $Files = @(
     @{ Name = 'IXCCameraSource.dll'; From = 'src/virtual_camera/IXCCameraSource.dll' },
     @{ Name = 'ixc_vcam.exe';        From = 'src/tools/ixc_vcam.exe' },
-    @{ Name = 'IXCCamera.exe';       From = 'src/app/IXCCamera.exe' }
+    @{ Name = 'IXCCamera.exe';       From = 'src/app/IXCCamera.exe' },
+    # Licences travel with the binaries (libfacedetection's BSD licence requires its notice).
+    @{ Name = 'LICENSE.txt';                 From = 'LICENSE';                 Source = $true },
+    @{ Name = 'THIRD_PARTY_LICENSES.md';     From = 'THIRD_PARTY_LICENSES.md'; Source = $true }
 )
 
 function Write-Log([string]$msg) {
@@ -171,7 +175,7 @@ if ($Uninstall) {
 
 # Install ------------------------------------------------------------------------------------------
 foreach ($f in $Files) {
-    $src = Join-Path $BuildDir $f.From
+    $src = if ($f.Source) { Join-Path $SourceDir $f.From } else { Join-Path $BuildDir $f.From }
     if (-not (Test-Path $src)) { Write-Log "Missing build output: $src (build the release preset first)."; exit 1 }
 }
 
@@ -183,7 +187,8 @@ try {
     $entries = @()
     foreach ($f in $Files) {
         $dest = Join-Path $InstallDir $f.Name
-        Copy-Item -LiteralPath (Join-Path $BuildDir $f.From) -Destination $dest -Force
+        $from = if ($f.Source) { Join-Path $SourceDir $f.From } else { Join-Path $BuildDir $f.From }
+        Copy-Item -LiteralPath $from -Destination $dest -Force
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash
         $entries += [ordered]@{ name = $f.Name; sha256 = $hash }
         Write-Log "installed $dest  sha256=$hash"

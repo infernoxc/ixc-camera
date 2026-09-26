@@ -20,8 +20,24 @@
 - The app's preview and IXC Camera can't run at the same time (one app per webcam, see below). Adjust settings with the preview, close it, then use IXC Camera. Changes made in the app while another app uses IXC Camera still apply live.
 - IXC Camera settings are machine-wide: any user on this PC who opens the app changes what IXC Camera shows.
 
+## Frame rate in low light (Smooth motion)
+- Many webcams lower their frame rate in dim light (automatic exposure lengthens each frame). The Lenovo FHD Webcam delivers an uneven 14–20 FPS on its "30 FPS" modes in normal room light. **Smooth motion** (on by default) fixes the exposure so the full rate returns, then brightens the picture in software. The trade-offs:
+  - The first ~4 s of the first session run at the camera's own rate while IXC measures. Later sessions start smooth in ~1 s.
+  - Compensation is capped at +1.5 EV. In very dark rooms the picture is darker than with automatic exposure, and a little noisier. Add light, or turn Smooth motion off to prefer brightness over frame rate.
+  - While a session runs, the camera's exposure is fixed. Automatic exposure is restored when the session ends. If IXC is killed abruptly (crash, forced service stop), the camera may stay on a fixed exposure until it's unplugged or another app resets it.
+  - Needs the camera's UVC exposure control. Cameras without one are left unchanged.
+- OBS: add **one** source per camera. Two sources on the same camera (or IXC Camera at two resolutions, or the webcam and IXC Camera together) can't both stream: the second shows a frozen picture (`0x800705AA` in the OBS log).
+
+## Face tracking
+- Off by default. In this version nothing visible uses it yet: face effects come in Phase 8. The app can draw the tracked faces over its preview. They're never drawn into what other apps receive.
+- Five landmarks only: eyes, nose tip and mouth corners. Brow regions and head roll/yaw/pitch are estimates derived from those points. They're enough to anchor 2D effects, but they aren't a 3D head pose.
+- Detection runs a few times per second, and positions in between are predicted. Very fast head movements can briefly leave effects behind (≤ one detection interval).
+- Faces must be roughly frontal and at least ~10% of the frame width (smaller with the 320×180 input on fast CPUs). At the 160×90 fallback used on weak CPUs, landmarks are unreliable (~30% rejected): landmark-anchored effects then hold their last position.
+- On a CPU too slow to detect twice a second within the budget, tracking switches itself off for the session ("off (CPU too slow)" in the app). The video is unaffected.
+- While tracking, the camera service holds ~6–7 MB more memory (the detector's working buffers at 320×180; ~3 MB at 240×135), all released when tracking stops. Real low-end hardware hasn't been measured (docs/face-tracking-design.md).
+
 ## Not yet implemented (later phases)
-- Face tracking and effects (Phase 7–8).
+- Effects (Phase 8).
 - Packaged installer `IXC-Camera-Setup-x64.exe` with an Apps & Features entry (Phase 12). The development installer is `scripts/install-ixc.ps1`.
 - Code signing.
 

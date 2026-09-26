@@ -14,6 +14,7 @@ IXC Camera:
 - never executes code from effect packages or profiles. They are validated data (see `src/common/json.h` for parser limits);
 - respects Windows camera privacy settings and never tries to bypass them;
 - keeps logs free of secrets and personal content, with size-capped rotation;
+- vendors its only third-party code (libfacedetection) unmodified at a pinned commit. The build verifies it by SHA-256, it loads no model files (the weights are compiled in), and it runs only on in-memory frames while face tracking is on;
 - treats `%ProgramData%\IXC Camera\active-profile.json` as untrusted. It's writable by local users and read by the camera service, so it's size-limited, strictly parsed, clamped, and never executed. The service only reads it.
 
 ## Release verification

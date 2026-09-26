@@ -34,6 +34,7 @@ Profile SampleProfile() {
     p.faceTracking = {true, 2, 6};
     p.tier = PerformanceTier::UltraLow;
     p.gpu = GpuMode::Off;
+    p.smoothMotion = false;
     p.hotkeys = {{"effects.toggle", "Ctrl+Alt+F8"}};
     return p;
 }

@@ -40,6 +40,16 @@ ctest --preset release
 
 Build output goes to `build/<preset>/`. The app is `src/app/IXCCamera.exe` and the tests are `tests/ixc_unit_tests.exe`.
 
+### Options
+
+| CMake option | Default | Effect |
+|---|---|---|
+| `IXC_WITH_FACE_TRACKING` | ON | Compiles the vendored libfacedetection (`third_party/libfacedetection`, BSD-3-Clause) twice, portable + AVX2, into `ixc_face`. OFF builds IXC without it: face tracking reports "not included in this build", and each binary is ~0.59 MB smaller. Configure-time SHA-256 checks refuse modified vendored files. |
+| `IXC_WARNINGS_AS_ERRORS` | ON | `/WX` for IXC code. Vendored code is built at `/W0`. |
+| `IXC_BUILD_TESTS` | ON | Unit and hardware tests. |
+
+Example: `cmake --preset release -B build/noface -DIXC_WITH_FACE_TRACKING=OFF`, then `cmake --build build/noface`.
+
 ## Compiler policy
 
 All targets link the `ixc_settings` interface target (see [cmake/CompilerSettings.cmake](../cmake/CompilerSettings.cmake)):

@@ -23,6 +23,9 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(IXC_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 option(IXC_ENABLE_ASAN "Build with AddressSanitizer (test builds only)" OFF)
 option(IXC_BUILD_TESTS "Build unit tests" ON)
+# Face tracking uses the vendored libfacedetection (BSD-3-Clause, third_party/libfacedetection).
+# OFF builds IXC without it: face tracking then reports "not included in this build".
+option(IXC_WITH_FACE_TRACKING "Build face tracking (libfacedetection)" ON)
 
 include(cmake/CompilerSettings.cmake)
 

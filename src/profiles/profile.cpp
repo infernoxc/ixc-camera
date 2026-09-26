@@ -280,7 +280,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
 
     static constexpr const char* kKnown[] = {"schemaVersion", "name", "sourceCameraId", "width", "height", "fpsNumerator",
                                              "fpsDenominator", "mirror", "zoom", "crop", "image", "effects",
-                                             "faceTracking", "performanceTier", "gpu", "hotkeys"};
+                                             "faceTracking", "performanceTier", "gpu", "smoothMotion", "hotkeys"};
     for (const auto& [k, v] : doc.AsObject()) {
         if (std::find(std::begin(kKnown), std::end(kKnown), k) == std::end(kKnown)) {
             w.push_back("unknown field \"" + k.substr(0, 64) + "\" ignored");
@@ -294,6 +294,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
     r.Int("fpsNumerator", p.fpsNumerator, 0, 10'000'000);
     r.Int("fpsDenominator", p.fpsDenominator, 0, 10'000'000);
     r.Bool("mirror", p.mirror);
+    r.Bool("smoothMotion", p.smoothMotion);
     r.Num("zoom", p.zoom);
 
     if (const json::Value* c = r.Get("crop")) {
@@ -406,6 +407,7 @@ std::string ProfileToJson(const Profile& p) {
                                       {"detectionIntervalFrames", p.faceTracking.detectionIntervalFrames}}},
         {"performanceTier", std::string(ToString(p.tier))},
         {"gpu", p.gpu == GpuMode::Off ? "off" : "auto"},
+        {"smoothMotion", p.smoothMotion},
         {"hotkeys", std::move(hotkeys)},
     };
     return json::Serialize(Value(std::move(doc)));

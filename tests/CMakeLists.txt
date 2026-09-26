@@ -8,8 +8,10 @@ add_executable(ixc_unit_tests
     test_pipeline.cpp
     test_active_profile.cpp
     test_gpu_pipeline.cpp
-    test_backend_selector.cpp)
-target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing ixc_processing_gpu)
+    test_backend_selector.cpp
+    test_exposure_governor.cpp
+    test_face.cpp)
+target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing ixc_processing_gpu ixc_face)
 
 add_test(NAME unit COMMAND ixc_unit_tests)
 set_tests_properties(unit PROPERTIES TIMEOUT 120 LABELS "unit")
@@ -35,3 +37,8 @@ set_tests_properties(camera_enumerate camera_capture_nv12 camera_capture_rgb32 c
     SKIP_RETURN_CODE 77
     TIMEOUT 180
     RUN_SERIAL TRUE)
+# Face tracking engine on live frames from the first physical camera (detection success depends
+# on someone being in view, so only the engine's operation is checked). Skipped without a camera
+# or when built with IXC_WITH_FACE_TRACKING=OFF.
+add_test(NAME face_engine_live COMMAND ixc_probe --bench-face 4)
+set_tests_properties(face_engine_live PROPERTIES TIMEOUT 120 LABELS "hardware" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)

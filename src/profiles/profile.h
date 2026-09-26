@@ -88,6 +88,9 @@ struct Profile {
     FaceTrackingSettings faceTracking;
     PerformanceTier tier = PerformanceTier::Auto;
     GpuMode gpu = GpuMode::Auto;
+    // Keep the camera at its full frame rate in low light (fixed exposure + brightness
+    // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
+    bool smoothMotion = true;
     std::vector<HotkeyBinding> hotkeys;
 
     bool operator==(const Profile&) const = default;

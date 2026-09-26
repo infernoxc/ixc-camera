@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — Phase 7 (in progress)
+
+### Fixed
+- **Choppy video in low light** (reported in OBS). The root cause was the webcam's automatic exposure, which dropped the Lenovo FHD Webcam to an uneven 14–20 FPS on "30 FPS" modes. It was the same with the webcam direct; IXC's pipeline, queues and negotiation were measured clean. New **Smooth motion** (on by default, app checkbox, profile `smoothMotion`): fixes the exposure to one that fits a frame, verifies that the frame rate recovers, compensates brightness in software (≤ +1.5 EV) and restores automatic exposure when the session ends. Result: IXC in OBS's format went from ~20 FPS / 64 ms gaps to 30.0 FPS, 4.4 ms jitter and 0 long gaps. See docs/performance.md.
+
+### Added
+- **Face tracking** (optional, off by default; app checkbox "Face tracking", profile `faceTracking.enabled`):
+  - libfacedetection (YuNet, BSD-3-Clause) vendored unmodified at a pinned commit, with build-time SHA-256 checks;
+  - compiled as portable + AVX2 builds with runtime selection;
+  - detection on a background thread at an adaptive 2–8 Hz within a per-tier CPU budget; input 240×135 (320×180 for small faces on fast CPUs, 160×90 fallback); turns itself off if the CPU can't keep up;
+  - tracker with stable IDs, adaptive smoothing and prediction between detections; box, 5 landmarks, brow regions, mouth centre, head roll/yaw/pitch estimates, confidence; up to 4 faces;
+  - runs inside IXC Camera while streaming (trace "FaceTracking") and in the app preview, with optional face markers (preview only);
+  - no thread and no memory when off;
+  - CMake option `IXC_WITH_FACE_TRACKING`;
+  - 15 unit tests (114 total), a `face_engine_live` hardware test, `ixc_probe --bench-face`, and UI smoke checks.
+- `ixc_probe`: `--dshow-capture` timing analysis and histogram, `--camera-controls`, `--set-exposure`, `--set-ae-priority`, `--smooth-motion`. There are also "StreamTiming" and "SmoothMotion" traces in the camera source and `tests/bench_baseline.ps1`.
+- 11 exposure-governor unit tests (99 total). The UI smoke test covers the Smooth motion checkbox.
+
 ## 0.5.0 — Phase 6 GPU pipeline, benchmark-driven (2026-09-26)
 
 ### Added

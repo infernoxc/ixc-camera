@@ -7,6 +7,9 @@
 #include <ksmedia.h>
 #include <mferror.h>
 
+#include <algorithm>
+#include <cmath>
+
 using Microsoft::WRL::ComPtr;
 using Microsoft::WRL::Make;
 
@@ -146,8 +149,19 @@ void MediaStream::BeginProcessingSession() {
         std::lock_guard lock(mu_);
         if (shutdown_ || !descriptor_) return;
         if (FAILED(descriptor_->GetMediaTypeHandler(&handler)) || FAILED(handler->GetCurrentMediaType(&type))) return;
+        UINT32 n = 0, d = 1;
+        timing_ = Timing{};
+        if (SUCCEEDED(MFGetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, &n, &d)) && n) timing_.frameIntervalMs = 1000.0 * d / n;
     }
-    processor_.BeginSession(type.Get());
+    // Camera controls reach the physical camera through our source's IKsControl forwarding.
+    ComPtr<IKsControl> ks;
+    ComPtr<IMFMediaSource> parent;
+    {
+        std::lock_guard lock(mu_);
+        parent = parent_;
+    }
+    if (parent) parent.As(&ks);
+    processor_.BeginSession(type.Get(), ks.Get());
 }
 
 // ---- event generator ------------------------------------------------------------------------------
@@ -205,8 +219,23 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* token) {
         if (shutdown_) return MF_E_SHUTDOWN;
         if (!devStream_) return MF_E_INVALIDREQUEST;  // not started yet
         dev = devStream_;
+        ++timing_.requests;
+        timing_.maxOutstanding = std::max(timing_.maxOutstanding, ++timing_.outstanding);
     }
     return dev->RequestSample(token);
+}
+
+void MediaStream::ReportTimingLocked() {
+    const Timing& t = timing_;
+    if (t.delivered == 0) return;
+    const double meanGap = t.gaps ? t.sumGapMs / t.gaps : 0;
+    const double jitter = t.gaps ? std::sqrt(std::max(0.0, t.sumGapSqMs / t.gaps - meanGap * meanGap)) : 0;
+    IXC_TRACE("StreamTiming", TraceLoggingUInt64(t.requests, "requests"), TraceLoggingUInt64(t.delivered, "delivered"),
+              TraceLoggingInt64(t.maxOutstanding, "maxOutstanding"), TraceLoggingFloat64(meanGap, "meanGapMs"),
+              TraceLoggingFloat64(jitter, "jitterMs"), TraceLoggingFloat64(t.maxGapMs, "maxGapMs"), TraceLoggingUInt64(t.longGaps, "longGaps"),
+              TraceLoggingFloat64(t.sumProcessMs / t.delivered, "avgProcessMs"), TraceLoggingFloat64(t.maxProcessMs, "maxProcessMs"),
+              TraceLoggingFloat64(t.frameIntervalMs, "nominalMs"));
+    timing_ = Timing{};
 }
 
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE state) {
@@ -221,6 +250,10 @@ STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE state) {
     const HRESULT hr = dev->SetStreamState(state);
     // Frame Server stops a client's stream this way (no MEStreamStopped arrives), so this is
     // where an idle camera must let go of its settings watcher and frame pool.
+    if (SUCCEEDED(hr) && state == MF_STREAM_STATE_STOPPED) {
+        std::lock_guard lock(mu_);
+        ReportTimingLocked();
+    }
     if (SUCCEEDED(hr)) {
         if (state == MF_STREAM_STATE_STOPPED) processor_.EndSession();
         else if (state == MF_STREAM_STATE_RUNNING && !processor_.Active()) BeginProcessingSession();
@@ -301,9 +334,28 @@ void MediaStream::OnDeviceStreamEvent(IMFAsyncResult* result) {
 HRESULT MediaStream::ProcessSample(IMFSample* sample) {
     // The single insertion point of the IXC image pipeline. Runs on the source's serial work
     // queue; never blocks and never allocates per frame (the processor uses a bounded pool).
+    LARGE_INTEGER arrival, done, freq;
+    QueryPerformanceCounter(&arrival);
     const ComPtr<IMFSample> out = processor_.Process(sample);
+    QueryPerformanceCounter(&done);
+    QueryPerformanceFrequency(&freq);
     std::lock_guard lock(mu_);
     if (shutdown_) return S_OK;
+    // Timing of frames arriving from the physical camera and of IXC's processing.
+    const double processMs = 1000.0 * static_cast<double>(done.QuadPart - arrival.QuadPart) / static_cast<double>(freq.QuadPart);
+    timing_.sumProcessMs += processMs;
+    timing_.maxProcessMs = std::max(timing_.maxProcessMs, processMs);
+    if (timing_.lastArrivalQpc) {
+        const double gap = 1000.0 * static_cast<double>(arrival.QuadPart - timing_.lastArrivalQpc) / static_cast<double>(freq.QuadPart);
+        timing_.sumGapMs += gap;
+        timing_.sumGapSqMs += gap * gap;
+        timing_.maxGapMs = std::max(timing_.maxGapMs, gap);
+        ++timing_.gaps;
+        if (gap > timing_.frameIntervalMs * 1.5) ++timing_.longGaps;
+    }
+    timing_.lastArrivalQpc = arrival.QuadPart;
+    ++timing_.delivered;
+    if (timing_.outstanding > 0) --timing_.outstanding;
     ++framesDelivered_;
     if (framesDelivered_ == 1) IXC_TRACE("FirstFrame", TraceLoggingUInt32(streamId_, "streamId"));
     return events_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, out.Get());

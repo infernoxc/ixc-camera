@@ -21,6 +21,8 @@ public:
     // Lays the panel out in the given rectangle; returns the height it used.
     int Layout(int x, int y, int width, int rowHeight, int gap);
     void Refresh();  // reload control positions from the profile
+    // App-only option (not part of the profile): draw tracked faces over the preview.
+    bool FaceOverlay() const { return faceOverlayOn_; }
 
     // Message routing from the parent window. Return true when handled.
     bool OnScroll(HWND control);
@@ -44,7 +46,9 @@ private:
     Profile* profile_ = nullptr;
     std::function<void()> onChange_;
     std::vector<Slider> sliders_;
-    HWND header_ = nullptr, mirror_ = nullptr, reset_ = nullptr, gpu_ = nullptr;
+    HWND header_ = nullptr, mirror_ = nullptr, reset_ = nullptr, gpu_ = nullptr, smooth_ = nullptr;
+    HWND face_ = nullptr, faceOverlay_ = nullptr;
+    bool faceOverlayOn_ = true;
     int firstId_ = 0;
 };
 

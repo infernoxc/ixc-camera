@@ -17,12 +17,17 @@
 #include "camera/format_select.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
+#include "face/downscale.h"
+#include "face/face_engine.h"
 #include "processing/gpu/gpu_pipeline.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
 
 #include <windows.h>
 #include <dshow.h>
+#include <ks.h>
+#include <ksmedia.h>
+#include <ksproxy.h>
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfreadwrite.h>
@@ -48,7 +53,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -56,7 +61,11 @@ struct Options {
     OutputFormat output = OutputFormat::Nv12;
     std::string subtype;  // restrict native mode selection, e.g. "MJPG"
     std::string sourceDll;  // --source-test
+    int aePriority = -1;    // --set-ae-priority
+    int exposure = 99;      // --set-exposure (99 = leave, 100 = auto)
     bool requireCamera = false;
+    bool smoothMotion = false;
+    bool noSmooth = false;
 };
 
 bool ParseArgs(int argc, char** argv, Options& o) {
@@ -68,7 +77,11 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--dshow-capture") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::DirectShowCapture; o.seconds = std::atoi(v); }
         else if (a == "--bench-pipeline") o.mode = Options::Mode::BenchPipeline;
         else if (a == "--bench-gpu") o.mode = Options::Mode::BenchGpu;
+        else if (a == "--camera-controls") o.mode = Options::Mode::CameraControls;
+        else if (a == "--set-exposure") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.exposure = std::string(v) == "auto" ? 100 : std::atoi(v); }
+        else if (a == "--set-ae-priority") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.aePriority = std::atoi(v); }
         else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
+        else if (a == "--bench-face") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::BenchFace; o.seconds = std::atoi(v); }
         else if (a == "--source-effect-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceEffectTest; o.sourceDll = v; }
         else if (a == "--source-test") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::SourceTest; o.sourceDll = v; }
         else if (a == "--seconds") { const char* v = next(); if (!v) return false; o.seconds = std::atoi(v); }
@@ -92,6 +105,8 @@ bool ParseArgs(int argc, char** argv, Options& o) {
             o.subtype = v;
             for (auto& c : o.subtype) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         } else if (a == "--require-camera") o.requireCamera = true;
+        else if (a == "--smooth-motion") o.smoothMotion = true;
+        else if (a == "--no-smooth-motion") o.noSmooth = true;
         else return false;
     }
     return o.mode != Options::Mode::None && o.seconds > 0 && o.seconds <= 7200 && o.cycles > 0 && o.cycles <= 10000;
@@ -179,6 +194,7 @@ public:
     }
 
     void SetLumaBytes(DWORD n) { lumaBytes_ = n; }
+    HANDLE FrameEvent() const { return event_; }  // auto-reset, signalled per new frame
     std::uint64_t Consumed() const { return consumed_; }
     double MeanSample() const { return lastMean_; }
 
@@ -634,7 +650,15 @@ public:
     }
     STDMETHODIMP_(ULONG) AddRef() override { return 2; }   // stack object; lifetime managed by the caller
     STDMETHODIMP_(ULONG) Release() override { return 1; }
-    STDMETHODIMP SampleCB(double, IMediaSample* s) override {
+    STDMETHODIMP SampleCB(double sampleTime, IMediaSample* s) override {
+        // Timing record per frame (fixed array: no allocation in the callback).
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const std::uint64_t slot = frames.load();
+        if (slot < kMaxRecords) {
+            arrivalQpc[slot] = now.QuadPart;
+            stamp[slot] = sampleTime;
+        }
         ++frames;
         BYTE* p = nullptr;
         if (s && SUCCEEDED(s->GetPointer(&p)) && p) {
@@ -646,9 +670,51 @@ public:
         return S_OK;
     }
     STDMETHODIMP BufferCB(double, BYTE*, long) override { return S_OK; }
+    static constexpr std::uint64_t kMaxRecords = 4096;
     std::atomic<std::uint64_t> frames{0};
     std::atomic<double> meanByte{-1};
+    std::vector<long long> arrivalQpc = std::vector<long long>(kMaxRecords);
+    std::vector<double> stamp = std::vector<double>(kMaxRecords);
 };
+
+// Frame-timing statistics shared by the DirectShow and Media Foundation smoothness reports.
+struct TimingReport {
+    double fps = 0, meanMs = 0, jitterMs = 0, maxGapMs = 0, p99Ms = 0;
+    int longGaps = 0;          // intervals > 1.5x the nominal frame time
+    int stampBackwards = 0;    // timestamps not increasing
+    double queueSpreadMs = 0;  // max-min of (arrival - timestamp): variation caused by buffering
+};
+
+TimingReport AnalyzeTiming(const std::vector<double>& arrivalMs, const std::vector<double>& stampMs, double nominalMs) {
+    TimingReport r;
+    const size_t n = arrivalMs.size();
+    if (n < 3) return r;
+    std::vector<double> iv;
+    for (size_t i = 1; i < n; ++i) iv.push_back(arrivalMs[i] - arrivalMs[i - 1]);
+    double sum = 0, sq = 0;
+    for (double v : iv) { sum += v; sq += v * v; r.maxGapMs = std::max(r.maxGapMs, v); if (v > nominalMs * 1.5) ++r.longGaps; }
+    r.meanMs = sum / iv.size();
+    r.jitterMs = std::sqrt(std::max(0.0, sq / iv.size() - r.meanMs * r.meanMs));
+    r.fps = 1000.0 / r.meanMs;
+    std::vector<double> sorted = iv;
+    std::sort(sorted.begin(), sorted.end());
+    r.p99Ms = sorted[std::min(sorted.size() - 1, static_cast<size_t>(sorted.size() * 0.99))];
+    double mn = 1e18, mx = -1e18;
+    for (size_t i = 0; i < n; ++i) {
+        if (i && stampMs[i] <= stampMs[i - 1]) ++r.stampBackwards;
+        const double d = arrivalMs[i] - stampMs[i];
+        mn = std::min(mn, d);
+        mx = std::max(mx, d);
+    }
+    r.queueSpreadMs = mx - mn;
+    return r;
+}
+
+void PrintTiming(const char* label, const TimingReport& r, double nominalFps) {
+    std::printf("%s: %.2f fps (nominal %.0f) | interval mean %.1f ms, jitter %.1f ms, p99 %.1f ms, max %.1f ms | long gaps %d | "
+                "timestamps not increasing %d | arrival-vs-timestamp spread %.1f ms\n",
+                label, r.fps, nominalFps, r.meanMs, r.jitterMs, r.p99Ms, r.maxGapMs, r.longGaps, r.stampBackwards, r.queueSpreadMs);
+}
 
 int DirectShowCapture(const Options& o) {
     const std::string want = o.camera.empty() ? "IXC Camera" : o.camera;
@@ -704,6 +770,43 @@ int DirectShowCapture(const Options& o) {
     if (SUCCEEDED(hr)) hr = graph->AddFilter(grabberFilter.Get(), L"Grabber");
     if (SUCCEEDED(hr)) hr = CoCreateInstance(kClsidNullRenderer, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&nullRenderer));
     if (SUCCEEDED(hr)) hr = graph->AddFilter(nullRenderer.Get(), L"Null");
+    // Force the requested format (like choosing Resolution/FPS/Video Format in OBS), so the
+    // physical camera and IXC Camera are compared like for like.
+    double nominalFps = 0;
+    if (SUCCEEDED(hr) && o.request.width) {
+        ComPtr<IAMStreamConfig> cfg;
+        stage = "SetFormat";
+        hr = builder->FindInterface(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, source.Get(), IID_PPV_ARGS(&cfg));
+        int count = 0, size = 0;
+        if (SUCCEEDED(hr)) hr = cfg->GetNumberOfCapabilities(&count, &size);
+        bool set = false;
+        for (int i = 0; SUCCEEDED(hr) && i < count && !set; ++i) {
+            AM_MEDIA_TYPE* mt = nullptr;
+            VIDEO_STREAM_CONFIG_CAPS caps{};
+            if (FAILED(cfg->GetStreamCaps(i, &mt, reinterpret_cast<BYTE*>(&caps))) || !mt) continue;
+            if (mt->formattype == FORMAT_VideoInfo && mt->cbFormat >= sizeof(VIDEOINFOHEADER)) {
+                auto* vih = reinterpret_cast<VIDEOINFOHEADER*>(mt->pbFormat);
+                const bool sizeOk = vih->bmiHeader.biWidth == static_cast<LONG>(o.request.width) &&
+                                    std::labs(vih->bmiHeader.biHeight) == static_cast<LONG>(o.request.height);
+                const bool subOk = o.subtype.empty() || SubtypeName(mt->subtype) == o.subtype;
+                const REFERENCE_TIME interval = static_cast<REFERENCE_TIME>(10'000'000.0 / o.request.fps);
+                const bool fpsOk = interval >= caps.MinFrameInterval && interval <= caps.MaxFrameInterval;
+                if (sizeOk && subOk && fpsOk) {
+                    vih->AvgTimePerFrame = interval;
+                    set = SUCCEEDED(cfg->SetFormat(mt));
+                    nominalFps = o.request.fps;
+                }
+            }
+            if (mt->cbFormat) CoTaskMemFree(mt->pbFormat);
+            if (mt->pUnk) mt->pUnk->Release();
+            CoTaskMemFree(mt);
+        }
+        if (SUCCEEDED(hr) && !set) {
+            std::printf("camera: %s\nerror: format %ux%u @ %.0f %s not offered by DirectShow\nRESULT: FAIL\n", name.c_str(), o.request.width,
+                        o.request.height, o.request.fps, o.subtype.c_str());
+            return 1;
+        }
+    }
     if (SUCCEEDED(hr)) { stage = "RenderStream"; hr = builder->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, source.Get(), grabberFilter.Get(), nullRenderer.Get()); }
     if (SUCCEEDED(hr)) hr = graph.As(&control);
     if (SUCCEEDED(hr)) { stage = "Run"; hr = control->Run(); }
@@ -718,22 +821,102 @@ int DirectShowCapture(const Options& o) {
     if (SUCCEEDED(grabber->GetConnectedMediaType(&connected))) {
         if (connected.formattype == FORMAT_VideoInfo && connected.pbFormat && connected.cbFormat >= sizeof(VIDEOINFOHEADER)) {
             const auto* vih = reinterpret_cast<const VIDEOINFOHEADER*>(connected.pbFormat);
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), "%ldx%ld %s", vih->bmiHeader.biWidth, std::labs(vih->bmiHeader.biHeight),
-                          SubtypeName(connected.subtype).c_str());
+            char buf[128];
+            const double connectedFps = vih->AvgTimePerFrame ? 10'000'000.0 / static_cast<double>(vih->AvgTimePerFrame) : 0;
+            std::snprintf(buf, sizeof(buf), "%ldx%ld %s @ %.2f fps%s", vih->bmiHeader.biWidth, std::labs(vih->bmiHeader.biHeight),
+                          SubtypeName(connected.subtype).c_str(), connectedFps, o.request.width ? "" : " (device default)");
             fmt = buf;
+            if (nominalFps == 0 && connectedFps > 0) nominalFps = connectedFps;
         }
         if (connected.cbFormat) CoTaskMemFree(connected.pbFormat);
         if (connected.pUnk) connected.pUnk->Release();
     }
+    const ProcessSample p0 = SampleProcess();
     Sleep(static_cast<DWORD>(o.seconds) * 1000);
     control->Stop();
+    const ProcessSample p1 = SampleProcess();
     const auto frames = counter.frames.load();
     std::printf("camera: %s (DirectShow)\nconnected format: %s\nframes: %llu in %d s (%.2f fps), sample value mean %.1f\n", name.c_str(),
                 fmt.c_str(), static_cast<unsigned long long>(frames), o.seconds, static_cast<double>(frames) / o.seconds,
                 counter.meanByte.load());
+
+    // Skip the first second (start-up), then analyse arrival times and timestamps.
+    LARGE_INTEGER qf;
+    QueryPerformanceFrequency(&qf);
+    const size_t n = static_cast<size_t>(std::min<std::uint64_t>(frames, GrabberCounter::kMaxRecords));
+    std::vector<double> arrival, stamps;
+    for (size_t i = 0; i < n; ++i) {
+        const double a = 1000.0 * static_cast<double>(counter.arrivalQpc[i] - counter.arrivalQpc[0]) / static_cast<double>(qf.QuadPart);
+        if (a < 1000.0) continue;
+        arrival.push_back(a);
+        stamps.push_back(counter.stamp[i] * 1000.0);
+    }
+    const double nominal = nominalFps > 0 ? nominalFps : 30.0;
+    PrintTiming("timing", AnalyzeTiming(arrival, stamps, 1000.0 / nominal), nominal);
+    // Interval histogram (10 ms buckets): an uneven cadence looks choppy even with a good average.
+    int hist[12] = {};
+    for (size_t i = 1; i < arrival.size(); ++i) hist[std::min(11, static_cast<int>((arrival[i] - arrival[i - 1]) / 10.0))]++;
+    std::printf("interval histogram:");
+    for (int b = 0; b < 12; ++b) if (hist[b]) std::printf(" %d-%dms:%d", b * 10, b * 10 + 9, hist[b]);
+    std::printf("\n");
+    std::printf("process: cpu %.1f%% of one core, private %.1f MB\n",
+                100.0 * static_cast<double>(p1.cpu100ns - p0.cpu100ns) / 1e7 / o.seconds, p1.privateBytes / 1048576.0);
     std::printf("RESULT: %s\n", frames > 0 ? "PASS" : "FAIL");
     return frames > 0 ? 0 : 1;
+}
+
+// Reads (and with --set-ae-priority 0|1 temporarily sets) the camera's UVC exposure controls.
+// "Auto-exposure priority" lets a webcam lower its frame rate in low light; that alone can turn
+// 30 FPS into 15-20 FPS.
+int CameraControls(const Options& o) {
+    CameraInfo cam;
+    int exitCode = 0;
+    if (!PickCamera(o, cam, exitCode)) return exitCode;
+    ComPtr<IMFMediaSource> source;
+    HRESULT hr = CreateCameraSource(cam.symbolicLink, source);
+    ComPtr<IKsControl> ks;
+    if (SUCCEEDED(hr)) hr = source.As(&ks);
+    if (FAILED(hr)) { std::printf("error: %s\n", Error{hr, "OpenControls", "Camera controls unavailable."}.Describe().c_str()); return 1; }
+    auto get = [&](ULONG id, LONG& value, ULONG& flags) {
+        KSPROPERTY_CAMERACONTROL_S s{};
+        s.Property.Set = PROPSETID_VIDCAP_CAMERACONTROL;
+        s.Property.Id = id;
+        s.Property.Flags = KSPROPERTY_TYPE_GET;
+        ULONG ret = 0;
+        const HRESULT h = ks->KsProperty(&s.Property, sizeof(s), &s, sizeof(s), &ret);
+        value = s.Value;
+        flags = s.Flags;
+        return h;
+    };
+    auto set = [&](ULONG id, LONG value, ULONG flags) {
+        KSPROPERTY_CAMERACONTROL_S s{};
+        s.Property.Set = PROPSETID_VIDCAP_CAMERACONTROL;
+        s.Property.Id = id;
+        s.Property.Flags = KSPROPERTY_TYPE_SET;
+        s.Value = value;
+        s.Flags = flags;
+        ULONG ret = 0;
+        return ks->KsProperty(&s.Property, sizeof(s), &s, sizeof(s), &ret);
+    };
+    LONG v = 0;
+    ULONG f = 0;
+    HRESULT h = get(KSPROPERTY_CAMERACONTROL_AUTO_EXPOSURE_PRIORITY, v, f);
+    std::printf("camera: %s\nauto-exposure priority: %s\n", cam.name.c_str(),
+                SUCCEEDED(h) ? (v ? "ON (camera may lower FPS in low light)" : "OFF (constant frame rate)") : ("not supported (" + HResultHex(h) + ")").c_str());
+    h = get(KSPROPERTY_CAMERACONTROL_EXPOSURE, v, f);
+    if (SUCCEEDED(h)) std::printf("exposure: value %ld, mode %s\n", v, (f & KSPROPERTY_CAMERACONTROL_FLAGS_AUTO) ? "auto" : "manual");
+    if (o.exposure != 99) {
+        // 100 = back to automatic exposure; otherwise a fixed log2-seconds value (e.g. -7 = 1/128 s).
+        h = o.exposure == 100 ? set(KSPROPERTY_CAMERACONTROL_EXPOSURE, v, KSPROPERTY_CAMERACONTROL_FLAGS_AUTO)
+                              : set(KSPROPERTY_CAMERACONTROL_EXPOSURE, o.exposure, KSPROPERTY_CAMERACONTROL_FLAGS_MANUAL);
+        std::printf("set exposure %s: %s\n", o.exposure == 100 ? "auto" : std::to_string(o.exposure).c_str(), SUCCEEDED(h) ? "ok" : HResultHex(h).c_str());
+    }
+    if (o.aePriority >= 0) {
+        h = set(KSPROPERTY_CAMERACONTROL_AUTO_EXPOSURE_PRIORITY, o.aePriority, KSPROPERTY_CAMERACONTROL_FLAGS_MANUAL);
+        std::printf("set auto-exposure priority %d: %s\n", o.aePriority, SUCCEEDED(h) ? "ok" : HResultHex(h).c_str());
+    }
+    source->Shutdown();
+    return 0;
 }
 
 // Video capture devices as DirectShow applications (OBS, many conferencing apps) see them.
@@ -837,10 +1020,249 @@ const char* OutputName(OutputFormat f) {
     return "?";
 }
 
+// ---- face tracking benchmark ------------------------------------------------------------------------
+// Runs the real FaceEngine on live camera frames (kept in memory only, never saved), once per
+// detector build, and reports what matters for low-end PCs: detection rate and cost, frame-thread
+// cost, detection success and landmark validity, CPU and RAM.
+
+// Locks an NV12 sample and exposes its planes; unlocks on destruction.
+class LockedNv12 {
+public:
+    LockedNv12(IMFSample* s, const FrameLayout& l) {
+        if (FAILED(s->GetBufferByIndex(0, &buf_))) return;
+        BYTE* start = nullptr;
+        DWORD length = 0;
+        if (SUCCEEDED(buf_.As(&b2_)) && SUCCEEDED(b2_->Lock2DSize(MF2DBuffer_LockFlags_Read, &scan0_, &pitch_, &start, &length))) {
+            locked2d_ = true;
+        } else if (SUCCEEDED(buf_->Lock(&start, nullptr, &length))) {
+            scan0_ = start;
+            pitch_ = l.stride > 0 ? l.stride : static_cast<LONG>(l.width);
+        } else {
+            return;
+        }
+        locked_ = true;
+        const size_t used = length - static_cast<size_t>(scan0_ - start);
+        const size_t rows = pitch_ > 0 ? used / static_cast<size_t>(pitch_) * 2 / 3 : 0;
+        if (pitch_ <= 0 || rows < l.height) return;
+        planes_ = {scan0_, scan0_ + rows * static_cast<size_t>(pitch_), pitch_, pitch_, static_cast<int>(l.width & ~1u),
+                   static_cast<int>(l.height & ~1u)};
+        ok_ = true;
+    }
+    ~LockedNv12() {
+        if (!locked_) return;
+        if (locked2d_) b2_->Unlock2D();
+        else buf_->Unlock();
+    }
+    bool ok() const { return ok_; }
+    const processing::Nv12Planes& planes() const { return planes_; }
+
+private:
+    ComPtr<IMFMediaBuffer> buf_;
+    ComPtr<IMF2DBuffer2> b2_;
+    BYTE* scan0_ = nullptr;
+    LONG pitch_ = 0;
+    bool locked_ = false, locked2d_ = false, ok_ = false;
+    processing::Nv12Planes planes_{};
+};
+
+// Full area-average reference downscale (what the Phase 7 detector benchmark used).
+void AreaAverageBgr(const processing::Nv12Planes& p, const processing::YuvFormat& fmt, std::uint8_t* dst, int w, int h) {
+    for (int oy = 0; oy < h; ++oy) {
+        const int y0 = oy * p.height / h, y1 = (oy + 1) * p.height / h;
+        for (int ox = 0; ox < w; ++ox) {
+            const int x0 = ox * p.width / w, x1 = (ox + 1) * p.width / w;
+            int sb = 0, sg = 0, sr = 0, n = 0;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const std::uint8_t* c = p.uv + static_cast<ptrdiff_t>(y / 2) * p.uvStride + (x / 2) * 2;
+                    const std::uint32_t v = processing::YuvToBgra(p.y[static_cast<ptrdiff_t>(y) * p.yStride + x], c[0], c[1], fmt);
+                    sb += v & 0xFF;
+                    sg += (v >> 8) & 0xFF;
+                    sr += (v >> 16) & 0xFF;
+                    ++n;
+                }
+            }
+            std::uint8_t* o = dst + (static_cast<size_t>(oy) * w + ox) * 3;
+            o[0] = static_cast<std::uint8_t>(sb / n);
+            o[1] = static_cast<std::uint8_t>(sg / n);
+            o[2] = static_cast<std::uint8_t>(sr / n);
+        }
+    }
+}
+
+int BenchFace(const Options& o) {
+    CaptureConfig cfg;
+    int exitCode = 0;
+    if (!Resolve(o, cfg, exitCode)) return exitCode;
+    cfg.output = OutputFormat::Nv12;
+    cfg.smoothMotion = !o.noSmooth;  // default: the camera's real rate, as IXC Camera delivers it
+    if (!face::DetectorAvailable()) {
+        std::printf("face tracking is not included in this build (IXC_WITH_FACE_TRACKING=OFF)\n");
+        return 77;
+    }
+
+    Consumer consumer;  // used only for its frame event
+    ComPtr<CaptureSession> session;
+    if (FAILED(CaptureSession::Create(&consumer, session))) return 1;
+    const Error err = session->Start(cfg);
+    if (FAILED(err.hr)) {
+        std::printf("error: %s\n", err.Describe().c_str());
+        session->Close();
+        return 1;
+    }
+    const FrameLayout layout = session->Layout();
+    processing::YuvFormat fmt = processing::DefaultYuvFormat(layout.height);
+    if (layout.nominalRange == MFNominalRange_0_255) fmt.fullRange = true;
+    const auto active = session->ActiveFormat();
+    std::printf("camera: %s  %s -> NV12 %ux%u  (CPU AVX2: %s)\n", cfg.cameraName.c_str(), Describe(active).c_str(), layout.width,
+                layout.height, face::BestSimdPath() == face::SimdPath::Avx2 ? "yes" : "no");
+    Sleep(4000);  // Smooth motion settles, camera exposure settles
+
+    // Takes the newest frame (waits up to 1 s) and runs f(planes).
+    const HANDLE ev = consumer.FrameEvent();
+    auto withFrame = [&](auto&& f) {
+        for (int tries = 0; tries < 50; ++tries) {
+            auto frame = session->TakeFrame();
+            if (frame) {
+                LockedNv12 lk(frame->Get(), layout);
+                if (lk.ok()) {
+                    f(lk.planes());
+                    return true;
+                }
+            }
+            WaitForSingleObject(ev, 20);
+        }
+        return false;
+    };
+
+    // 1) Detector input check, same detector, 10 frames: the engine's input (sparse sampler +
+    //    brightness normalization) vs the same sampler without normalization vs a full area
+    //    average (the Phase 7 benchmark's method). Box agreement is IoU against the area average.
+    {
+        face::Detector det(face::BestSimdPath());
+        struct Variant {
+            const char* name;
+            std::vector<std::uint8_t> img = std::vector<std::uint8_t>(240 * 135 * 3);
+            int found = 0, lmOk = 0, agree = 0;
+            double conf = 0, iou = 0;
+            face::Detection d[2];
+            int n = 0;
+        } v[3] = {{"engine (normalized)"}, {"sampler, raw"}, {"area average, raw"}};
+        double lumaSum = 0, gainSum = 0;
+        for (int i = 0; i < 10; ++i) {
+            withFrame([&](const processing::Nv12Planes& p) {
+                float gain = 1;
+                face::DownscaleNv12ToBgr(p, fmt, v[0].img.data(), 240, 135, true, &gain);
+                face::DownscaleNv12ToBgr(p, fmt, v[1].img.data(), 240, 135, false);
+                AreaAverageBgr(p, fmt, v[2].img.data(), 240, 135);
+                gainSum += gain;
+                std::uint64_t s = 0;
+                for (int y = 0; y < p.height; y += 8)
+                    for (int x = 0; x < p.width; x += 8) s += p.y[static_cast<ptrdiff_t>(y) * p.yStride + x];
+                lumaSum += static_cast<double>(s) / ((p.height / 8.0) * (p.width / 8.0));
+            });
+            for (auto& x : v) {
+                x.n = det.Detect(x.img.data(), 240, 135, 240 * 3, 0.5f, x.d, 2);
+                if (x.n > 0) {
+                    ++x.found;
+                    x.conf += x.d[0].confidence;
+                    x.lmOk += x.d[0].landmarksPlausible;
+                }
+            }
+            for (auto& x : v) {
+                if (x.n > 0 && v[2].n > 0) {
+                    ++x.agree;
+                    x.iou += face::IoU(x.d[0].box, v[2].d[0].box);
+                }
+            }
+            Sleep(100);
+        }
+        std::printf("detector input check (240x135, 10 frames, raw luma %.0f, normalization gain %.2f):\n", lumaSum / 10, gainSum / 10);
+        for (auto& x : v) {
+            std::printf("  %-20s found %2d/10  confidence %.2f  landmarks ok %2d  IoU vs area average %.2f\n", x.name, x.found,
+                        x.found ? x.conf / x.found : 0.0, x.lmOk, x.agree ? x.iou / x.agree : 0.0);
+        }
+    }
+
+    // 2) The engine, per detector build.
+    std::printf("\n%-9s %-8s %6s %14s %8s %14s %9s %9s %8s %9s %11s %9s\n", "build", "input", "det/s", "detect ms", "cpu ms",
+                "stage ms", "onFrame", "face %", "lm ok %", "worker %", "RAM +MB", "warmup");
+    std::vector<face::SimdPath> paths = {face::SimdPath::Portable};
+    if (face::BestSimdPath() == face::SimdPath::Avx2) paths.insert(paths.begin(), face::SimdPath::Avx2);
+    for (face::SimdPath path : paths) {
+        const ProcessSample before = SampleProcess();
+        face::FaceEngine engine;
+        face::EngineConfig ec;
+        ec.forcePortable = path == face::SimdPath::Portable;
+        const double startT = face::FaceEngine::NowMs();
+        engine.Start(ec);
+        const double startCallMs = face::FaceEngine::NowMs() - startT;
+        std::uint64_t frames = 0, framesWithFace = 0;
+        double onFrameMax = 0, onFrameSum = 0, peakPrivate = 0;
+        face::FaceSnapshot snap;
+        float cx = 0, cy = 0, bw = 0;
+        face::Landmarks lm{};
+        const double t0 = face::FaceEngine::NowMs();
+        double nextMem = t0;
+        while (face::FaceEngine::NowMs() - t0 < o.seconds * 1000.0) {
+            WaitForSingleObject(ev, 100);  // next frame
+            auto frame = session->TakeFrame();
+            if (!frame) continue;
+            LockedNv12 lk(frame->Get(), layout);
+            if (!lk.ok()) continue;
+            const double now = face::FaceEngine::NowMs();
+            engine.OnFrame(lk.planes(), fmt, now, 1000.0 / std::max(1.0, active.Fps()));
+            const double callMs = face::FaceEngine::NowMs() - now;
+            onFrameMax = std::max(onFrameMax, callMs);
+            onFrameSum += callMs;
+            ++frames;
+            engine.Snapshot(now, snap);
+            if (snap.count > 0) {
+                ++framesWithFace;
+                cx = snap.faces[0].box.Center().x;
+                cy = snap.faces[0].box.Center().y;
+                bw = snap.faces[0].box.w;
+                lm = snap.faces[0].lm;
+            }
+            if (now >= nextMem) {
+                peakPrivate = std::max(peakPrivate, static_cast<double>(SampleProcess().privateBytes));
+                nextMem = now + 500;
+            }
+        }
+        const double elapsed = face::FaceEngine::NowMs() - t0;
+        const face::EngineStatus s = engine.Status();
+        engine.Stop();
+        const ProcessSample after = SampleProcess();
+        char stage[32], detect[32], ram[32], input[16];
+        std::snprintf(input, sizeof(input), "%dx%d", s.inputWidth, s.inputHeight);
+        std::snprintf(detect, sizeof(detect), "%.1f / %.1f", s.avgDetectMs, s.maxDetectMs);
+        std::snprintf(stage, sizeof(stage), "%.2f / %.2f", s.avgStageMs, s.maxStageMs);
+        std::snprintf(ram, sizeof(ram), "%.1f / %.1f", (peakPrivate - static_cast<double>(before.privateBytes)) / 1048576.0,
+                      (static_cast<double>(after.privateBytes) - static_cast<double>(before.privateBytes)) / 1048576.0);
+        std::printf("%-9s %-8s %6.1f %14s %8.1f %14s %6.2f ms %8.0f%% %8.0f%% %8.1f%% %11s %6.1f ms\n", face::ToString(s.path),
+                    input, s.detections * 1000.0 / elapsed, detect, s.avgDetectCpuMs, stage, onFrameMax,
+                    frames ? 100.0 * framesWithFace / frames : 0.0, s.detectionsWithFace ? 100.0 * s.landmarksValid / s.detectionsWithFace : 0.0,
+                    100.0 * s.workerCpuMs / elapsed, ram, s.warmupMs);
+        std::printf("          state %s, %llu frames (%.1f fps), %llu detections, Start() %.2f ms, avg onFrame %.3f ms\n",
+                    face::ToString(s.state), static_cast<unsigned long long>(frames), frames * 1000.0 / elapsed,
+                    static_cast<unsigned long long>(s.detections), startCallMs, frames ? onFrameSum / frames : 0.0);
+        if (framesWithFace) {
+            std::printf("          last face: centre (%.2f, %.2f) width %.2f; eyes (%.2f,%.2f) (%.2f,%.2f) nose (%.2f,%.2f) "
+                        "mouth (%.2f,%.2f) (%.2f,%.2f)\n",
+                        cx, cy, bw, lm.leftEye.x, lm.leftEye.y, lm.rightEye.x, lm.rightEye.y, lm.nose.x, lm.nose.y, lm.mouthLeft.x,
+                        lm.mouthLeft.y, lm.mouthRight.x, lm.mouthRight.y);
+        }
+    }
+    session->Stop();
+    session->Close();
+    return 0;
+}
+
 int Capture(const Options& o) {
     CaptureConfig cfg;
     int exitCode = 0;
     if (!Resolve(o, cfg, exitCode)) return exitCode;
+    cfg.smoothMotion = o.smoothMotion;
 
     Consumer consumer;
     ComPtr<CaptureSession> session;
@@ -888,6 +1310,7 @@ int Capture(const Options& o) {
     const auto st = session->Stats();
     const auto active = session->ActiveFormat();
     const auto state = session->State();
+    const double smoothEv = session->SmoothCompensationEv();  // before Stop() clears it
 
     stop = true;
     worker.join();
@@ -921,6 +1344,10 @@ int Capture(const Options& o) {
     else std::printf("capture->app latency: not available (no device timestamp)\n");
     std::printf("sample value mean:    %.1f%s\n", consumer.MeanSample(),
                 IsEqualGUID(layout.subtype, MFVideoFormat_NV12) ? " (luma 0-255)" : " (raw bytes)");
+    if (o.smoothMotion) {
+        std::printf("smooth motion:        +%.2f EV software gain (raw luma %.1f -> ~%.1f after the pipeline)\n", smoothEv,
+                    consumer.MeanSample(), consumer.MeanSample() * std::exp2(smoothEv));
+    }
     std::printf("cpu:                  %.2f%% of one core, %.2f%% of machine (%lu logical CPUs)\n", 100.0 * cpuSec / wall,
                 100.0 * cpuSec / wall / si.dwNumberOfProcessors, si.dwNumberOfProcessors);
     if (sys1.total > sys0.total) {
@@ -1032,7 +1459,9 @@ int main(int argc, char** argv) {
                 case Options::Mode::SourceEffectTest: rc = SourceEffectTest(o); break;
                 case Options::Mode::BenchPipeline: rc = BenchPipeline(); break;
                 case Options::Mode::BenchGpu: rc = BenchGpu(); break;
+                case Options::Mode::CameraControls: rc = CameraControls(o); break;
                 case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
+                case Options::Mode::BenchFace: rc = BenchFace(o); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;
                 case Options::Mode::None: break;

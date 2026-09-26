@@ -53,7 +53,7 @@ public static class Ui {
 }
 '@
 
-$BM_CLICK = 0x00F5; $WM_CLOSE = 0x0010
+$BM_CLICK = 0x00F5; $BM_GETCHECK = 0x00F0; $WM_CLOSE = 0x0010
 $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 106; $IdHint = 107
 $IdVcamStatus = 109; $IdVcamUse = 110   # must match ControlId in src/app/main.cpp
 $failures = @()
@@ -104,7 +104,7 @@ $st = [Ui]::PreviewStats($preview)
 Check ($st[0] -gt 0.5 -and $st[1] -gt 3) 'preview shows a live image (not black/flat)'
 
 # Picture adjustments: move the Brightness slider like a user would (TBM_SETPOS + WM_HSCROLL).
-$IdBrightnessTrack = 202; $IdReset = 238; $IdGpu = 239   # kFirstPanelId 200: header, label/track/value per slider, mirror, reset, gpu
+$IdBrightnessTrack = 202; $IdReset = 238; $IdGpu = 239; $IdSmooth = 240; $IdFace = 241   # kFirstPanelId 200: header, label/track/value per slider, mirror, reset, gpu, smooth, face
 $track = [Ui]::GetDlgItem($hwnd, $IdBrightnessTrack); $reset = [Ui]::GetDlgItem($hwnd, $IdReset)
 $settingsFile = Join-Path $env:ProgramData 'IXC Camera\active-profile.json'
 $before = [Ui]::PreviewStats($preview)[2]
@@ -129,6 +129,31 @@ if (Test-Path (Split-Path $settingsFile)) {
     [Ui]::SendMessageW($gpuBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     Start-Sleep -Milliseconds 800
     Check ((Get-Content $settingsFile -Raw) -match '"gpu": "auto"') 'GPU switch back on is published'
+    # Smooth motion switch: on by default; off/on is published live.
+    $smoothBox = [Ui]::GetDlgItem($hwnd, $IdSmooth)
+    Check ([int][Ui]::SendMessageW($smoothBox, $BM_GETCHECK, [IntPtr]::Zero, [IntPtr]::Zero) -eq 1) 'Smooth motion is on by default'
+    [Ui]::SendMessageW($smoothBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    Check ((Get-Content $settingsFile -Raw) -match '"smoothMotion": false') 'Smooth motion off is published'
+    [Ui]::SendMessageW($smoothBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    Check ((Get-Content $settingsFile -Raw) -match '"smoothMotion": true') 'Smooth motion back on is published'
+    # Face tracking: off by default (no thread); on runs in the preview and is published; off stops it.
+    $faceBox = [Ui]::GetDlgItem($hwnd, $IdFace)
+    Check ([int][Ui]::SendMessageW($faceBox, $BM_GETCHECK, [IntPtr]::Zero, [IntPtr]::Zero) -eq 0) 'Face tracking is off by default'
+    $threadsOff = (Get-Process -Id $p.Id).Threads.Count
+    [Ui]::SendMessageW($faceBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 2600
+    Check ((Get-Content $settingsFile -Raw) -match '"enabled": true') 'Face tracking on is published'
+    $faceStatus = [Ui]::Text($status)
+    "status:  $faceStatus"
+    Check ($faceStatus -match 'face: (searching|tracking)') 'Face tracking runs in the preview'
+    $threadsOn = (Get-Process -Id $p.Id).Threads.Count
+    [Ui]::SendMessageW($faceBox, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 1500
+    Check ((Get-Content $settingsFile -Raw) -match '"enabled": false') 'Face tracking off is published'
+    Check (-not ([Ui]::Text($status) -match 'face')) 'Face tracking off: nothing running'
+    Check ((Get-Process -Id $p.Id).Threads.Count -lt $threadsOn) "Face tracking thread exits when off ($threadsOff -> $threadsOn -> $((Get-Process -Id $p.Id).Threads.Count) threads)"
 }
 
 $proc = Get-Process -Id $p.Id; $proc.Refresh()

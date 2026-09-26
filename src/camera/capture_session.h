@@ -18,6 +18,7 @@
 #include "camera/frame_stats.h"
 #include "camera/latest_mailbox.h"
 #include "camera/reconnect_policy.h"
+#include "camera/smooth_motion.h"
 #include "diagnostics/error.h"
 
 #include <cfgmgr32.h>
@@ -46,6 +47,7 @@ struct CaptureConfig {
     std::string cameraName;
     CaptureFormat format;  // requested native mode (from EnumerateFormats)
     OutputFormat output = OutputFormat::Nv12;
+    bool smoothMotion = false;  // keep the negotiated frame rate in low light (camera/smooth_motion.h)
 };
 
 struct FrameLayout {
@@ -85,6 +87,11 @@ public:
     std::uint64_t DroppedFrames() const { return frames_.Dropped(); }
     int ReconnectAttempts() const;
 
+    // Smooth motion: live on/off, and the software brightness gain (EV) the preview must add so it
+    // matches what the camera delivered before its exposure was fixed. 0 when inactive.
+    void SetSmoothMotion(bool enabled) { smoothWanted_.store(enabled); }
+    double SmoothCompensationEv() const { return smoothEv_.load(); }
+
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
     STDMETHODIMP_(ULONG) AddRef() override;
@@ -113,6 +120,7 @@ private:
     static void CALLBACK RetryTimerCallback(PTP_CALLBACK_INSTANCE, void* ctx, PTP_TIMER);
     static DWORD CALLBACK DeviceNotifyCallback(HCMNOTIFICATION, void* ctx, CM_NOTIFY_ACTION action,
                                                PCM_NOTIFY_EVENT_DATA data, DWORD size);
+    void FeedSmoothMotion(IMFSample* sample);  // reader callback only
     void HandleLoss();
     void AttemptReconnect();
     void OnDeviceInterfaceChange(bool arrival, const wchar_t* link);
@@ -134,6 +142,15 @@ private:
 
     mutable std::mutex statsMu_;
     FrameStats stats_;
+
+    // Smooth motion runs on the reader callback (serialized); started/stopped with the stream.
+    std::mutex smoothMu_;
+    SmoothMotion smooth_;
+    bool smoothRunning_ = false;  // Begin() called for the current stream
+    bool smoothBlocked_ = true;   // between teardown and the next successful open
+    double smoothFps_ = 0;
+    std::atomic<bool> smoothWanted_{false};
+    std::atomic<double> smoothEv_{0};
 
     std::mutex listenerMu_;
     ICaptureListener* listener_;

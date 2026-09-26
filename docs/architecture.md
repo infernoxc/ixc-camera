@@ -80,6 +80,32 @@ IXCCamera.exe (user)                          Frame Server service (LOCAL SERVIC
 - The profile field `gpu` (`auto` | `off`) and the app checkbox let users force CPU-only.
 - Software adapters (Microsoft Basic Render Driver) are refused. Direct3D DLLs are delay-loaded.
 
+## Smooth motion (Phase 7 prerequisite, implemented)
+
+- `camera::ExposureGovernor` is pure logic. `camera::SmoothMotion` applies it through the camera's UVC exposure control (`IKsControl`). Both the IXC Camera source and the app's `CaptureSession` use it. When the camera's automatic exposure slows it below the negotiated rate, it sets a fixed exposure that fits one frame, verifies the rate recovers, compensates brightness in software through the pipeline's exposure table, and restores automatic exposure when the session ends. See docs/performance.md for the measurements.
+
+## Face tracking (Phase 7, implemented)
+
+```
+frame thread (source / preview)               worker thread (below normal priority)
+───────────────────────────────               ─────────────────────────────────────
+WantsFrame(now)?  ── no ──▶ (2 atomic loads)
+   │ yes (a detection is due, worker idle)
+   ▼
+lock frame → DownscaleNv12ToBgr ──────────▶   Detector (libfacedetection, AVX2 or portable)
+   (sparse 2x2 samples, dark-frame gain,        │ box + 5 landmarks, confidence
+    ~0.5-0.8 ms, into one reused buffer)        ▼
+                                              Tracker.Update (IDs, adaptive smoothing, velocity)
+Snapshot(now) ◀── predicted faces ─────────   Cadence.OnDetection (rate + input size vs CPU budget)
+```
+
+- **`ixc_face`** (static lib): `face_types` (normalized source coordinates, derived brows, mouth centre, roll/yaw/pitch estimates, source→output mapping), `downscale`, `detector` (runtime SIMD dispatch), `tracker` and `cadence` (pure logic, unit-tested), and `face_engine` (thread + staging).
+- **Zero cost when off:** the engine isn't started, so there's no thread and no buffer. The frame path checks one flag.
+- **Never blocks video:** the frame thread only stages a small image when the worker is idle and a detection is due. Inference runs on its own thread and the video never waits for it. Between detections, positions are predicted from the smoothed velocity (at most 200 ms ahead).
+- **Degrades instead of lagging:** detection runs at 8 Hz while faces move, 3 Hz when stable, 4 Hz while searching and 2 Hz after 5 s without a face, capped by a CPU budget (a fraction of one core per performance tier: 6–15%). If 240×135 can't reach 2 Hz within the budget, input drops to 160×90 (face box only). If even that can't, tracking switches itself off (`TooSlow`). Small faces on fast CPUs get 320×180.
+- **Where it runs:** in the IXC Camera source while a client streams, when the profile enables `faceTracking`. The session statistics go to the "FaceTracking" trace. It also runs in the app preview, which can draw the tracked faces, preview only. Phase 8 effects consume `FaceSnapshot`.
+- **Build option:** `IXC_WITH_FACE_TRACKING` (ON by default). OFF compiles the engine without the detector, and the state reports "not included in this build".
+
 ## Open design questions
 
 1. **Processing a webcam another app controls** (Windows shared mode, `IMFSensorDevice::SetSensorDeviceMode(Shared)`). This would let IXC Camera run while another app uses the physical webcam, at that app's format. Deferred.

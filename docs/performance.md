@@ -146,6 +146,57 @@ The first implementation used `UpdateSubresource`, and the driver's hidden uploa
 - **Never on PCs with < 4 GB RAM or < 1 GB free**, where memory matters more. Direct3D is delay-loaded: it isn't even loaded unless a GPU attempt happens.
 - The CPU path is always present and is the fallback for any GPU failure.
 
+## Phase 7 prerequisite: choppy video, root cause and fix (2026-09-26)
+
+Reported: IXC Camera looked extremely laggy/choppy in OBS. Measured before changing anything, with the Lenovo FHD Webcam direct and IXC Camera at the same formats (MF and DirectShow, 720p/1080p/1280×960 NV12) and the user's OBS logs.
+
+### What it was not
+- **Not IXC's pipeline.** Lenovo direct and IXC Camera measured the same: ~19.9 FPS, 5.6 ms jitter, 64 ms max gap. Inside the source, at most 1 sample is outstanding (no queue), and processing takes 0.6–2 ms per frame.
+- **Not buffering or negotiation.** The format is negotiated exactly (1280×960 NV12 @ 30 for OBS), the latency is 36–37 ms, and 0 frames are dropped.
+- **OBS scene setup made it worse but didn't cause it.** OBS canvas at 60 FPS. The scenes had two DirectShow sources on the same camera, sometimes IXC at 1280×720 and at 1280×960 at once, or the Lenovo and IXC together. The second source can't start (`0x800705AA`) and shows a frozen frame. The first one is unaffected.
+
+### Root cause
+The camera's **automatic exposure**. In normal room light it chose ~1/16 s exposures, so a "30 FPS" mode delivered an **uneven ~20 FPS** (a mix of 48 ms and 64 ms frames; in a darker room 14 FPS at 70–80 ms). On a 60 FPS canvas that's visibly choppy. The same happens with the Lenovo direct. Turning off "auto-exposure priority" didn't help. A fixed exposure did:
+
+| Lenovo, 1080p "30 FPS" | FPS | Jitter | Luma |
+|---|---|---|---|
+| Auto exposure (room light) | 19.9 | 5.6 ms (max 64 ms) | 69 |
+| Auto exposure (darker room) | 13.8–14.1 | 7.7 ms (max 80 ms) | 35–50 |
+| Fixed 1/32 s (UVC −5) | **30.0** | 4.3 ms (max 48 ms) | 18–44 (darker) |
+| Fixed 1/64 s (−6) | 30.0 | | darker still |
+| Fixed 1/16 s (−4) | 15.6 | | |
+
+### Fix: Smooth motion (on by default, `"smoothMotion"`, app checkbox)
+`camera/exposure_governor` (pure logic, 11 unit tests) plus `camera/smooth_motion` (UVC `IKsControl`). It's used by the IXC Camera source and the app's capture:
+1. Skip 8 frames (auto exposure converging), then measure 20 frames. If the rate is below 85% of nominal, set the longest fixed exposure that fits one frame (`floor(log2(1/fps))`: −5 at 30 FPS).
+2. Skip 8 frames, then verify 20. If the camera didn't speed up, give it back its auto exposure and stop trying.
+3. Compensate the lost brightness in software: `log2(lumaBefore/lumaAfter)`, capped at +1.5 EV, added to the exposure lookup table (no extra per-frame cost). It's re-measured 3× over the next ~3 s because the camera's gain keeps settling.
+4. Once locked: a timing-only watchdog (30-frame windows) re-applies the fixed exposure if something else gives the camera its auto exposure back.
+5. At session end, the camera's original exposure value is restored in auto mode. That happens before the capture reader is flushed, because the Lenovo rejects control changes after a flush (`0xC00D36B6`). The successful decision is remembered in memory for the process's next session, which then starts smooth in about 1 s and is still re-verified.
+
+A camera the user set to manual exposure is left alone. Cost: one QPC read per frame, plus a 1-in-64-pixel luma sample while deciding (not once locked).
+
+### After the fix (same PC, same scene)
+| Path | FPS | Jitter | Max gap | Long gaps | Notes |
+|---|---|---|---|---|---|
+| IXC, DirectShow 1280×960 NV12 (OBS format), 15 s | **30.02** | 4.4 ms | 48 ms | 0 | client 1.1% CPU, 24.7 MB |
+| IXC, MF 1080p30, first session | 30.1 from t≈4 s | 4.3 ms | 48 ms (after lock) | | first ~4 s at the camera's auto rate |
+| IXC, MF 1080p30, next session | 30.1 from t≈2 s | 4.4 ms | | | remembered decision |
+| App capture path, Lenovo 1080p | 30.1 | 4.3 ms | 48 ms | | +0.78–1.0 EV applied |
+| Another app flips the camera back to auto mid-stream | recovers | | | | watchdog re-asserted once |
+
+- Brightness after compensation stays within ~0.1–0.3 EV of auto exposure. Image noise is a little higher (it's software gain).
+- The camera was confirmed back in auto exposure after every session.
+- Resource baseline (`tests/bench_baseline.ps1`, default profile): 29.77 FPS (was 24.6), 36.5 ms latency, 0 drops. Camera service 14.4% of one core and 61.3 MB while streaming (was 16.2% / 60.6 MB). App startup 121 ms / 4.3 MB.
+
+## Phase 7: face tracking
+
+The full results are in [face-tracking-design.md](face-tracking-design.md) ("Final benchmark"). In short:
+- With face tracking on, IXC Camera streaming is unchanged: 29.79 vs 29.81 FPS, 37.2 vs 37.0 ms latency, 182 vs 176 ms to the first frame, 0 dropped.
+- The detector worker used 1.7–2.0% of one core (AVX2) or 3.4–3.9% (portable) at the idle/search rate.
+- The frame thread spends 0.5–0.8 ms only on the few frames that feed a detection, 0.05–0.08 ms per frame on average.
+- With a face in view: found in 100% of detections with valid landmarks, 3.5–7 detections/s. In the camera service tracking costs +5 % of one core and +6–7 MB while on (released when off). Warm-up takes 2–6 ms.
+
 ## Pending (not measured)
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
 - 30-minute burn-in: scheduled for Phase 10.

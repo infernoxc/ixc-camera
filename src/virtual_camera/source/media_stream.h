@@ -68,6 +68,17 @@ private:
     Microsoft::WRL::ComPtr<IMFMediaEventQueue> events_;
     Microsoft::WRL::ComPtr<IMFAsyncCallback> devCallback_;
     unsigned long long framesDelivered_ = 0;
+    // Smoothness diagnostics (per session, reported via trace when the stream stops).
+    struct Timing {
+        unsigned long long requests = 0, delivered = 0;
+        long long outstanding = 0, maxOutstanding = 0;  // requests waiting for a frame
+        long long lastArrivalQpc = 0;
+        double maxGapMs = 0, sumGapMs = 0, sumGapSqMs = 0;
+        unsigned long long gaps = 0, longGaps = 0;     // longGaps: > 1.5x the frame interval
+        double maxProcessMs = 0, sumProcessMs = 0;
+        double frameIntervalMs = 33.3;
+    } timing_;
+    void ReportTimingLocked();
 };
 
 // Keeps only NV12 media types from a physical stream descriptor (falling back to YUY2 when a

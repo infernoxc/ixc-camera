@@ -10,6 +10,7 @@
 // Phase 6 replaces this with a Direct3D 11 swap chain fed by the GPU pipeline.
 
 #include "camera/capture_session.h"
+#include "face/face_engine.h"
 #include "processing/color.h"
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
@@ -28,6 +29,7 @@ namespace ixc::app {
 
 class PreviewWindow {
 public:
+    ~PreviewWindow();
     static bool RegisterClass(HINSTANCE instance);
     HWND Create(HWND parent, HINSTANCE instance, int id);
     HWND hwnd() const { return hwnd_; }
@@ -43,11 +45,19 @@ public:
     // nullptr or identity params = show the camera frame unchanged.
     void SetPipeline(std::shared_ptr<const processing::PipelineParams> params);
 
+    // Face tracking on the previewed frames: nullptr = off (no thread, no memory). Restarts only
+    // when the settings actually change.
+    void SetFaceTracking(const face::EngineConfig* config);
+    // Draw the tracked faces over the preview (preview only; never sent to apps).
+    void SetFaceOverlay(bool on);
+    face::EngineStatus FaceStatus() const { return face_.Status(); }
+
     static constexpr UINT kFrameMessage = WM_APP + 10;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     void Paint(HDC dc, const RECT& client);
+    void PaintFaces(HDC dc, int dx, int dy, int dw, int dh);
     bool ConvertHeldFrame(int dstW, int dstH);
 
     HWND hwnd_ = nullptr;
@@ -64,6 +74,11 @@ private:
     std::vector<std::uint32_t> bgra_;  // display-size conversion buffer, reused
     int bgraW_ = 0, bgraH_ = 0;
     wchar_t placeholder_[160] = L"";
+
+    face::FaceEngine face_;
+    face::EngineConfig faceConfig_;
+    bool faceOverlay_ = true;
+    HPEN facePen_ = nullptr, landmarkPen_ = nullptr;
 };
 
 }  // namespace ixc::app

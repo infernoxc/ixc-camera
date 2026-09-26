@@ -1,5 +1,6 @@
 #include "virtual_camera/source/frame_processor.h"
 
+#include "face/face_settings.h"
 #include "profiles/active_profile.h"
 #include "virtual_camera/source/trace.h"
 
@@ -64,7 +65,7 @@ private:
 
 FrameProcessor::~FrameProcessor() { EndSession(); }
 
-void FrameProcessor::BeginSession(IMFMediaType* type) {
+void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
     EndSession();
     std::lock_guard session(sessionMu_);
     {
@@ -75,9 +76,21 @@ void FrameProcessor::BeginSession(IMFMediaType* type) {
         nv12_ = type && SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &sub)) && IsEqualGUID(sub, MFVideoFormat_NV12);
         if (type) MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width_, &height_);
         fullRange_ = type && MFGetAttributeUINT32(type, MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235) == MFNominalRange_0_255;
+        UINT32 n = 0, d = 1;
+        nominalFps_ = type && SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &n, &d)) && d ? static_cast<double>(n) / d : 0;
+        frameIntervalMs_ = nominalFps_ > 0 ? 1000.0 / nominalFps_ : 33.3;
+        compensationEv_ = 0;
         counters_ = {};
     }
+    ks_ = ks;
     ReloadSettings();
+    {
+        std::lock_guard lock(smoothMu_);
+        std::lock_guard l2(mu_);
+        smoothEnabled_ = profile_.smoothMotion;
+        smooth_.Begin(ks_.Get(), smoothEnabled_ && nv12_, nominalFps_);
+    }
+    UpdateFaceTracking();
 
     // Watch the settings folder while streaming only (thread-pool wait, no polling).
     const auto dir = ActiveProfileDirectory();
@@ -101,6 +114,19 @@ void FrameProcessor::EndSession() {
         UnregisterWaitEx(wait_, INVALID_HANDLE_VALUE);  // waits for a running reload to finish
         wait_ = nullptr;
     }
+    StopFaceTracking();
+    int smoothExposure = 0;
+    double smoothEv = 0;
+    int smoothReasserts = 0;
+    HRESULT smoothRestore = S_FALSE;
+    {
+        std::lock_guard lock(smoothMu_);
+        smoothExposure = smooth_.AppliedExposure();
+        smoothEv = smooth_.CompensationEv();
+        smoothReasserts = smooth_.Reasserts();
+        smoothRestore = smooth_.End();  // gives the camera its automatic exposure back
+    }
+    ks_.Reset();
     if (change_ != INVALID_HANDLE_VALUE) {
         FindCloseChangeNotification(change_);
         change_ = INVALID_HANDLE_VALUE;
@@ -129,6 +155,8 @@ void FrameProcessor::EndSession() {
                   TraceLoggingUInt64(c.poolExhausted, "poolExhausted"), TraceLoggingUInt64(c.errors, "errors"),
                   TraceLoggingUInt64(c.settingsReloads, "reloads"), TraceLoggingBoolean(c.inputIsGpuSurface, "gpuInput"),
                   TraceLoggingUInt64(c.processed ? c.processUsTotal / c.processed : 0, "avgUs"), TraceLoggingUInt64(c.processUsMax, "maxUs"));
+        IXC_TRACE("SmoothMotion", TraceLoggingInt32(smoothExposure, "fixedExposureLog2s"), TraceLoggingFloat64(smoothEv, "compensationEv"),
+                  TraceLoggingInt32(smoothReasserts, "reasserts"), TraceLoggingHResult(smoothRestore, "restoreAuto"));
     }
 }
 
@@ -136,6 +164,58 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
     auto* self = static_cast<FrameProcessor*>(ctx);
     FindNextChangeNotification(self->change_);  // re-arm before reading, so no change is missed
     self->ReloadSettings();
+    {
+        // Smooth motion switched on/off mid-session: restart it (turning it off restores auto exposure).
+        std::lock_guard lock(self->smoothMu_);
+        std::lock_guard l2(self->mu_);
+        if (self->smoothSettingChanged_) {
+            self->smoothSettingChanged_ = false;
+            self->smooth_.End();
+            self->smoothEnabled_ = self->profile_.smoothMotion;
+            self->compensationEv_ = 0;
+            self->Recompile();
+            self->smooth_.Begin(self->ks_.Get(), self->smoothEnabled_ && self->nv12_, self->nominalFps_);
+        }
+    }
+    self->UpdateFaceTracking();  // face tracking switched on/off or reconfigured
+}
+
+void FrameProcessor::UpdateFaceTracking() {
+    bool want = false;
+    face::EngineConfig cfg;
+    {
+        std::lock_guard lock(mu_);
+        want = profile_.faceTracking.enabled && nv12_ && type_ != nullptr;
+        cfg = face::EngineConfigFor(profile_);
+    }
+    if (want) {
+        std::lock_guard fl(faceMu_);
+        if (face_.Running() && face::SameEngineConfig(cfg, faceConfig_)) return;
+    }
+    StopFaceTracking();  // off, or restarting with new settings
+    if (!want) return;
+    std::lock_guard fl(faceMu_);
+    faceConfig_ = cfg;
+    const bool started = face_.Start(cfg);
+    IXC_TRACE("FaceTrackingStart", TraceLoggingBoolean(started, "started"), TraceLoggingInt32(cfg.maxFaces, "maxFaces"),
+              TraceLoggingFloat64(cfg.cpuBudget, "cpuBudget"), TraceLoggingInt32(cfg.fixedIntervalFrames, "fixedIntervalFrames"));
+}
+
+void FrameProcessor::StopFaceTracking() {
+    std::lock_guard fl(faceMu_);
+    if (!face_.Running()) return;
+    const double sessionMs = face::FaceEngine::NowMs() - face_.StartedAtMs();
+    face_.Stop();  // joins the worker; its statistics stay readable
+    const face::EngineStatus s = face_.Status();
+    IXC_TRACE("FaceTracking", TraceLoggingString(face::ToString(s.lastActiveState), "state"),
+              TraceLoggingString(face::ToString(s.path), "simd"), TraceLoggingInt32(s.inputWidth, "inputW"),
+              TraceLoggingInt32(s.inputHeight, "inputH"), TraceLoggingUInt64(s.framesSeen, "frames"),
+              TraceLoggingUInt64(s.detections, "detections"), TraceLoggingFloat64(sessionMs > 0 ? s.detections * 1000.0 / sessionMs : 0, "detectHz"),
+              TraceLoggingUInt64(s.detectionsWithFace, "withFace"), TraceLoggingUInt64(s.landmarksValid, "landmarksValid"),
+              TraceLoggingFloat64(s.avgDetectMs, "avgDetectMs"), TraceLoggingFloat64(s.maxDetectMs, "maxDetectMs"),
+              TraceLoggingFloat64(s.avgStageMs, "avgStageMs"), TraceLoggingFloat64(s.maxStageMs, "maxStageMs"),
+              TraceLoggingFloat64(sessionMs > 0 ? 100.0 * s.workerCpuMs / sessionMs : 0, "workerCpuPct"),
+              TraceLoggingFloat64(s.warmupMs, "warmupMs"), TraceLoggingFloat64(sessionMs / 1000.0, "seconds"));
 }
 
 void FrameProcessor::ReloadSettings() {
@@ -158,6 +238,7 @@ void FrameProcessor::ReloadSettings() {
         profile_.image.sharpness = 0;
     }
     ++counters_.settingsReloads;
+    smoothSettingChanged_ = profile_.smoothMotion != smoothEnabled_;
     Recompile();
     IXC_TRACE("SettingsLoaded", TraceLoggingBoolean(r.ok, "valid"), TraceLoggingBoolean(missing, "missing"),
               TraceLoggingBoolean(params_ && params_->identity, "identity"),
@@ -171,7 +252,10 @@ void FrameProcessor::Recompile() {
         params_ = std::move(identity);
         return;
     }
-    params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(profile_, width_, height_, fullRange_));
+    // Smooth motion's software brightness compensation rides on the exposure tone step.
+    Profile effective = profile_;
+    effective.image.exposureEv += compensationEv_;
+    params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases
@@ -190,6 +274,59 @@ HRESULT FrameProcessor::EnsureAllocator(IMFMediaType* type, ComPtr<IMFVideoSampl
 }
 
 ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
+    // Smooth motion: watch the real frame rate/brightness until a decision is made (then this
+    // costs nothing). A changed compensation recompiles the parameters for the next frames.
+    {
+        std::lock_guard lock(smoothMu_);
+        if (smooth_.Active() && input) {
+            UINT32 w = 0, h = 0;
+            {
+                std::lock_guard l2(mu_);
+                w = width_;
+                h = height_;
+            }
+            ComPtr<IMFMediaBuffer> b;
+            if (SUCCEEDED(input->GetBufferByIndex(0, &b))) {
+                LockedNv12 frame(b.Get(), w, h, false);
+                if (frame.ok() && smooth_.OnFrame(frame.y(), frame.pitch(), static_cast<int>(w), static_cast<int>(h))) {
+                    std::lock_guard l2(mu_);
+                    compensationEv_ = smooth_.CompensationEv();
+                    Recompile();
+                }
+            }
+        }
+    }
+
+    // Face tracking: the buffer is locked only on the frames the engine will actually sample
+    // (a few per second); every other frame costs two atomic reads.
+    if (input) {
+        std::lock_guard fl(faceMu_);
+        const double now = face::FaceEngine::NowMs();
+        if (face_.WantsFrame(now)) {
+            UINT32 w = 0, h = 0;
+            bool full = false;
+            double interval = 33.3;
+            {
+                std::lock_guard l2(mu_);
+                w = width_;
+                h = height_;
+                full = fullRange_;
+                interval = frameIntervalMs_;
+            }
+            ComPtr<IMFMediaBuffer> b;
+            if (SUCCEEDED(input->GetBufferByIndex(0, &b))) {
+                LockedNv12 frame(b.Get(), w, h, false);
+                if (frame.ok()) {
+                    processing::YuvFormat fmt = processing::DefaultYuvFormat(h);
+                    fmt.fullRange = full;
+                    const processing::Nv12Planes planes{frame.y(), frame.uv(), frame.pitch(), frame.pitch(), static_cast<int>(w & ~1u),
+                                                        static_cast<int>(h & ~1u)};
+                    face_.OnFrame(planes, fmt, now, interval);
+                }
+            }
+        }
+    }
+
     std::shared_ptr<const processing::PipelineParams> params;
     ComPtr<IMFMediaType> type;
     UINT32 width = 0, height = 0;
