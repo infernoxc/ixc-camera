@@ -1,0 +1,35 @@
+# Build output
+/build/
+/out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+*.res
+
+# IDE / tooling
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+compile_commands.json
+
+# Secrets and signing material — never commit
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.snk
+.env
+secrets/
+
+# Personal data — never commit
+*.log
+captures/
+diagnostics-export/
+*.mp4
+*.mkv

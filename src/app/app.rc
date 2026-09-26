@@ -1,0 +1,31 @@
+#include <winres.h>
+#include "ixc/version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION IXC_VERSION_MAJOR, IXC_VERSION_MINOR, IXC_VERSION_PATCH, 0
+ PRODUCTVERSION IXC_VERSION_MAJOR, IXC_VERSION_MINOR, IXC_VERSION_PATCH, 0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "IXC Camera contributors"
+            VALUE "FileDescription", "IXC Camera"
+            VALUE "FileVersion", IXC_VERSION_STRING
+            VALUE "InternalName", "IXCCamera"
+            VALUE "LegalCopyright", "MIT License. Copyright (c) 2026 IXC Camera contributors"
+            VALUE "OriginalFilename", "IXCCamera.exe"
+            VALUE "ProductName", IXC_PRODUCT_NAME
+            VALUE "ProductVersion", IXC_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

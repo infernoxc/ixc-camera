@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: ${{ matrix.preset }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, release]
+    steps:
+      # Actions are pinned to full commit SHAs.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Build and test
+        shell: pwsh
+        run: ./scripts/build.ps1 -Preset ${{ matrix.preset }} -Test
+
+  repo-hygiene:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Reject committed binaries, keys and logs
+        shell: pwsh
+        run: |
+          $bad = git ls-files | Where-Object { $_ -match '\.(exe|dll|lib|obj|pdb|pfx|p12|pem|key|snk|log)$' -or $_ -match '^build/' }
+          if ($bad) { $bad; throw 'Forbidden files are tracked in the repository.' }
