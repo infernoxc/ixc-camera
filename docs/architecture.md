@@ -20,7 +20,9 @@ This document describes the target architecture. Items marked **(planned)** don'
 ```
 
 - **`ixc_core`** (static lib, exists now): strings, a strict JSON reader/writer, atomic file I/O, the rotating log, HRESULT diagnostics, and the profile model and store. It's shared by the UI and the media source.
-- **`IXCCamera.exe`** (skeleton exists): Win32 UI. It isn't needed for the camera to work once a profile is saved and the camera is registered.
+- **`ixc_camera`** (static lib, exists now): enumerates cameras and their native modes, negotiates a format, and captures through the asynchronous Source Reader. Frames are handed off zero-copy through a single-slot newest-frame mailbox. A lost camera triggers a bounded backoff, then a zero-CPU wait for device arrival. The Phase 4 media source reuses this for the physical side.
+- **`ixc_processing`** (static lib, started): CPU colour conversion (NV12 → BGRA at display size). The GPU pipeline arrives in Phase 6.
+- **`IXCCamera.exe`** (Phase 3 UI exists): Win32 UI. It isn't needed for the camera to work once a profile is saved and the camera is registered.
 - **IXC media source** (planned, Phase 4): a user-mode `IMFMediaSource` in a COM DLL, registered as a software camera via `MFCreateVirtualCamera` (Windows build 22000+). Windows Frame Server loads it on demand when a client opens IXC Camera, and it opens the physical webcam only for that session. No kernel driver.
 
 ## Rules the code follows
