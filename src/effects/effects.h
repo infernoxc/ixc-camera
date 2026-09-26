@@ -54,6 +54,8 @@ struct EffectConfig {
 };
 
 // Compiles the profile's enabled effects (unknown ids ignored, strengths clamped).
+// Compiles the profile's effects; an empty (inactive) config when profile.effectsEnabled is off.
+std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool fullRange);
 std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry>& effects, bool fullRange);
 
 struct FrameContext {

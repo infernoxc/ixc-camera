@@ -38,7 +38,7 @@ Native Windows 11 webcam enhancer exposed as a Media Foundation software virtual
 - `src/processing/gpu` D3D11 path (byte-identical to CPU; `test_gpu_pipeline.cpp`) · `backend_selector` (when to use the GPU) · `adaptive_processor`
 - Any change to `Nv12Processor` math must be mirrored in `gpu/pipeline.hlsl`. The exactness tests fail otherwise.
 - Benchmarks: `ixc_probe --bench-pipeline`, `--bench-gpu`, `--bench-gpu-memory`. Record results in docs/performance.md.
-- Phases 1–6 are done. Phase 7 (Smooth motion + face tracking, `src/face`, vendored `third_party/libfacedetection`) is committed. Phase 8 (effects, `src/effects`, `ixc_probe --bench-effects`) done. The user allows committing and moving to the next phase without asking once tests pass.
+- Phases 1–6 are done. Phase 7 (Smooth motion + face tracking, `src/face`, vendored `third_party/libfacedetection`) is committed. Phase 8 (effects, `src/effects`, `ixc_probe --bench-effects`) and Phase 9 (profiles UI, `app_settings`, hotkeys) done. The user allows committing and moving to the next phase without asking once tests pass.
 - `src/face`: tracker/cadence are pure logic (`test_face.cpp`). The detector is compiled twice (lfd_scalar/lfd_avx2, no `/arch:AVX2`). Benchmark: `ixc_probe --bench-face N` (needs a person in view for detection numbers).
 - Frame Server stops a client with `SetStreamState(STOPPED)`, not an MEStreamStopped event. Free per-session resources there.
 

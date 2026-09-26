@@ -233,3 +233,15 @@ IXC_TEST(ProfileStore_CorruptFileReportsErrorAndIsNotOverwritten) {
     IXC_REQUIRE(SUCCEEDED(ReadFileLimited(dir.path() / L"broken.json", 1024, text)));
     IXC_CHECK_EQ(text, std::string("{\"schemaVersion\": 1,"));
 }
+
+#include "profiles/app_settings.h"
+
+IXC_TEST(AppSettings_RoundTripAndLenientParsing) {
+    ixc::AppSettings s;
+    s.activeProfile = "evening-call";
+    s.hotkeysEnabled = false;
+    IXC_CHECK(ixc::AppSettingsFromJson(ixc::AppSettingsToJson(s)) == s);
+    IXC_CHECK(ixc::AppSettingsFromJson("not json") == ixc::AppSettings{});                         // damaged: defaults
+    IXC_CHECK(ixc::AppSettingsFromJson(R"({"activeProfile": "..\evil"})").activeProfile == "default");  // never a path
+    IXC_CHECK(ixc::AppSettingsFromJson(R"({"hotkeysEnabled": "yes"})").hotkeysEnabled);             // wrong type: default
+}

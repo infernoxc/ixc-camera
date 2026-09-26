@@ -91,6 +91,7 @@ struct Profile {
     // Keep the camera at its full frame rate in low light (fixed exposure + brightness
     // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
     bool smoothMotion = true;
+    bool effectsEnabled = true;  // master switch (hotkey), keeps the effect list intact
     std::vector<HotkeyBinding> hotkeys;
 
     bool operator==(const Profile&) const = default;

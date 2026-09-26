@@ -145,3 +145,14 @@ IXC_TEST(Effects_FaceCoordinatesFollowZoomAndMirror) {
         for (int x = 0; x < 320; x += 2) (x < 160 ? left : right) += f.V(x, y) > 130;
     IXC_CHECK(right > 0 && left == 0);
 }
+
+IXC_TEST(Effects_MasterSwitchDisablesAll) {
+    Profile p;
+    p.effects = {{"color.mono", 100}, {"blush.tone", 80}};
+    IXC_CHECK(CompileEffects(p, false)->Active());
+    p.effectsEnabled = false;
+    IXC_CHECK(!CompileEffects(p, false)->Active());
+    IXC_CHECK(!CompileEffects(p, false)->needsFaces);  // no tracker either
+    const ProfileLoadResult r = ProfileFromJson(ProfileToJson(p));
+    IXC_CHECK(r.ok && !r.profile.effectsEnabled && r.profile.effects.size() == 2);  // list kept
+}

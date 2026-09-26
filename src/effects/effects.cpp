@@ -392,3 +392,9 @@ size_t EffectRenderer::ScratchBytes() const {
 }
 
 }  // namespace ixc::effects
+
+namespace ixc::effects {
+std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool fullRange) {
+    return CompileEffects(profile.effectsEnabled ? profile.effects : std::vector<EffectEntry>{}, fullRange);
+}
+}  // namespace ixc::effects

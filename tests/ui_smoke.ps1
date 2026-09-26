@@ -171,6 +171,34 @@ if (Test-Path (Split-Path $settingsFile)) {
     foreach ($id in $IdPortrait, $IdMono, $IdBlush) { [Ui]::SendMessageW([Ui]::GetDlgItem($hwnd, $id), $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
     Start-Sleep -Milliseconds 1500
     Check ((Get-Content $settingsFile -Raw) -match '"effects": \[\]') 'effects off are published'
+    # Profiles: type a new name + Save creates it and makes it active; selecting the old one switches back.
+    $IdProfile = 112; $IdProfileSave = 113; $WM_SETTEXT = 0x000C; $WM_HOTKEY = 0x0312
+    $combo = [Ui]::GetDlgItem($hwnd, $IdProfile)
+    $original = [Ui]::Text($combo)
+    $profDir = Join-Path $env:LOCALAPPDATA 'IXC Camera\profiles'
+    [Ui]::SendMessageW($combo, $WM_SETTEXT, [IntPtr]::Zero, (New-Object Text.StringBuilder 'Smoke Test')) | Out-Null
+    [Ui]::SendMessageW([Ui]::GetDlgItem($hwnd, $IdProfileSave), $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 500
+    Check (Test-Path (Join-Path $profDir 'smoke-test.json')) 'Save with a new name creates a profile'
+    Check ((Get-Content (Join-Path $env:LOCALAPPDATA 'IXC Camera\app-settings.json') -Raw) -match '"smoke-test"') 'new profile becomes the active one'
+    # Hotkeys (simulated WM_HOTKEY): Ctrl+Alt+F8 effects off/on, Ctrl+Alt+F11 mirror.
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    Check ((Get-Content $settingsFile -Raw) -match '"effectsEnabled": false') 'effects hotkey switches effects off (published)'
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]1, [IntPtr]::Zero) | Out-Null
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]4, [IntPtr]::Zero) | Out-Null
+    Start-Sleep -Milliseconds 800
+    $pub = Get-Content $settingsFile -Raw
+    Check ($pub -match '"effectsEnabled": true' -and $pub -match '"mirror": true') 'effects hotkey back on; mirror hotkey toggles mirror'
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]4, [IntPtr]::Zero) | Out-Null
+    # Previous-profile hotkey returns to the original profile (only two... or more: select it explicitly).
+    $idx = [int][Ui]::SendMessageW($combo, 0x0158, [IntPtr](-1), (New-Object Text.StringBuilder $original))  # CB_FINDSTRINGEXACT
+    [Ui]::SendMessageW($combo, 0x014E, [IntPtr]$idx, [IntPtr]::Zero) | Out-Null                               # CB_SETCURSEL
+    [Ui]::SendMessageW($hwnd, 0x0111, [IntPtr](($IdProfile) -bor (1 -shl 16)), $combo) | Out-Null              # WM_COMMAND CBN_SELCHANGE
+    Start-Sleep -Milliseconds 500
+    Check ((Get-Content (Join-Path $env:LOCALAPPDATA 'IXC Camera\app-settings.json') -Raw) -match ('"' + $original + '"')) "selecting '$original' switches back"
+    [IO.File]::Delete((Join-Path $profDir 'smoke-test.json'))
+    for ($t = 0; $t -lt 15 -and (Get-Process -Id $p.Id).Threads.Count -ge $threadsOn; $t++) { Start-Sleep -Milliseconds 200 }  # pool threads linger
     Check ((Get-Process -Id $p.Id).Threads.Count -lt $threadsOn) "Face tracking thread exits when off ($threadsOff -> $threadsOn -> $((Get-Process -Id $p.Id).Threads.Count) threads)"
 }
 

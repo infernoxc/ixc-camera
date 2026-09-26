@@ -1,0 +1,21 @@
+#pragma once
+
+// Per-user app settings that aren't part of a camera profile (%LOCALAPPDATA%\IXC Camera\app-settings.json).
+// Lenient by design: a missing or damaged file gives defaults (it holds no user content worth
+// protecting; profiles themselves are never reset silently).
+
+#include <string>
+#include <string_view>
+
+namespace ixc {
+
+struct AppSettings {
+    std::string activeProfile = "default";  // profile store stem
+    bool hotkeysEnabled = true;             // global Ctrl+Alt hotkeys (see docs/hotkeys in README)
+    bool operator==(const AppSettings&) const = default;
+};
+
+AppSettings AppSettingsFromJson(std::string_view text);
+std::string AppSettingsToJson(const AppSettings& s);
+
+}  // namespace ixc

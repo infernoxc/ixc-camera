@@ -12,6 +12,7 @@
 #include "camera/capture_session.h"
 #include "camera/device_enum.h"
 #include "camera/format_select.h"
+#include "common/fileio.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
@@ -20,6 +21,7 @@
 #include "ixc/version.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
+#include "profiles/app_settings.h"
 #include "profiles/profile_store.h"
 #include "virtual_camera/registration.h"
 
@@ -33,6 +35,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <commdlg.h>
+
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -60,6 +64,13 @@ enum ControlId : int {
     kIdPrivacy,
     kIdVcamStatus,
     kIdVcamUse,
+    kIdProfileLabel,
+    kIdProfile,
+    kIdProfileSave,
+    kIdProfileDelete,
+    kIdProfileImport,
+    kIdProfileExport,
+    kIdHotkeys,
 };
 
 constexpr UINT kStateMessage = WM_APP + 11;
@@ -119,6 +130,19 @@ private:
     void OnPictureChanged();
     void UpdatePipeline();
     void SaveAndPublish();
+    // Profiles and hotkeys (Phase 9).
+    void RefreshProfileList();
+    void SwitchProfile(const std::string& stem);
+    void CycleProfile(int step);
+    void SaveProfileAs();
+    void DeleteProfile();
+    void ImportProfile();
+    void ExportProfile();
+    void SaveAppSettings();
+    void RegisterHotkeys();
+    void UnregisterHotkeys();
+    void OnHotkey(int id);
+    std::string UniqueStem(std::string_view name) const;
     static void CALLBACK OnVcamProcessExit(void* ctx, BOOLEAN timedOut);
 
     HINSTANCE instance_;
@@ -126,6 +150,11 @@ private:
     HWND cameraLabel_ = nullptr, camera_ = nullptr, formatLabel_ = nullptr, format_ = nullptr, startStop_ = nullptr;
     HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr;
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
+    HWND profileLabel_ = nullptr, profileCombo_ = nullptr, profileSave_ = nullptr, profileDelete_ = nullptr;
+    HWND profileImport_ = nullptr, profileExport_ = nullptr, hotkeys_ = nullptr;
+    AppSettings app_;
+    std::string stem_ = "default";  // active profile file
+    bool hotkeysRegistered_ = false;
     vcam::Status vcam_;
     HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
     HANDLE vcamWait_ = nullptr;
@@ -174,6 +203,9 @@ bool MainWindow::Create(int showCmd) {
 
     LoadProfile();
     panel_.Refresh();
+    RefreshProfileList();
+    SendMessageW(hotkeys_, BM_SETCHECK, app_.hotkeysEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
+    RegisterHotkeys();
     RefreshCameras();
     RefreshVcamStatus();
     // Make sure IXC Camera applies this user's current settings (write only when they differ).
@@ -204,6 +236,13 @@ void MainWindow::CreateControls() {
     ShowWindow(privacy_, SW_HIDE);
     vcamStatus_ = make(WC_STATICW, L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, kIdVcamStatus);
     vcamUse_ = make(WC_BUTTONW, L"Use this webcam for IXC Camera", BS_PUSHBUTTON | WS_TABSTOP, kIdVcamUse);
+    profileLabel_ = make(WC_STATICW, L"Profile", SS_LEFT | SS_CENTERIMAGE, kIdProfileLabel);
+    profileCombo_ = make(WC_COMBOBOXW, L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, kIdProfile);  // type a name to save a new one
+    profileSave_ = make(WC_BUTTONW, L"Save", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileSave);
+    profileDelete_ = make(WC_BUTTONW, L"Delete", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileDelete);
+    profileImport_ = make(WC_BUTTONW, L"Import…", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileImport);
+    profileExport_ = make(WC_BUTTONW, L"Export…", BS_PUSHBUTTON | WS_TABSTOP, kIdProfileExport);
+    hotkeys_ = make(WC_BUTTONW, L"Hotkeys (Ctrl+Alt+F8–F11)", BS_AUTOCHECKBOX | WS_TABSTOP, kIdHotkeys);
     preview_.Clear(L"Choose a camera and select Start preview.");
     panel_.Create(hwnd_, instance_, kFirstPanelId, &profile_, [this] { OnPictureChanged(); });
 }
@@ -213,7 +252,8 @@ void MainWindow::ApplyFont() {
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi_);
     font_ = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_, vcamStatus_, vcamUse_}) {
+    for (HWND h : {cameraLabel_, camera_, formatLabel_, format_, startStop_, status_, hint_, privacy_, vcamStatus_, vcamUse_, profileLabel_,
+                   profileCombo_, profileSave_, profileDelete_, profileImport_, profileExport_, hotkeys_}) {
         SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
     panel_.SetFont(font_);
@@ -244,7 +284,21 @@ void MainWindow::Layout() {
 
     const bool privacyVisible = IsWindowVisible(privacy_) != FALSE;
     const int bottomH = rowH * 3 + 2 * gap + (privacyVisible ? rowH + gap : 0);
-    const int previewTop = y + rowH + gap;
+    // Profile row.
+    {
+        int px = pad;
+        const int py = y + rowH + gap, bw = Scale(80);
+        MoveWindow(profileLabel_, px, py, labelW, rowH, TRUE);
+        px += labelW + gap;
+        MoveWindow(profileCombo_, px, py, Scale(200), Scale(300), TRUE);
+        px += Scale(200) + gap;
+        for (HWND b : {profileSave_, profileDelete_, profileImport_, profileExport_}) {
+            MoveWindow(b, px, py, bw, rowH, TRUE);
+            px += bw + gap;
+        }
+        MoveWindow(hotkeys_, px, py, std::max(0, w - pad - px), rowH, TRUE);
+    }
+    const int previewTop = y + 2 * (rowH + gap);
     const int previewH = std::max(0, h - previewTop - bottomH - pad);
     // Picture adjustments on the right of the preview; the preview stays the visual centre.
     const int panelW = Scale(300);
@@ -366,14 +420,18 @@ void MainWindow::OnVcamDone(DWORD exitCode) {
 // ---- profile ------------------------------------------------------------------------------------
 
 void MainWindow::LoadProfile() {
-    ProfileLoadResult r = store_.Load("default");
+    std::string text;
+    if (SUCCEEDED(ReadFileLimited(dataDir_ / L"app-settings.json", 16 * 1024, text))) app_ = AppSettingsFromJson(text);
+    stem_ = app_.activeProfile;
+    if (stem_ != "default" && !std::filesystem::exists(store_.directory() / Utf8ToWide(stem_ + ".json"))) stem_ = "default";
+    ProfileLoadResult r = store_.Load(stem_);
     if (r.ok) {
         profile_ = r.profile;
         profileLoaded_ = true;
-        for (const auto& w : r.warnings) log::Warn("profiles", "default: " + w);
+        for (const auto& w : r.warnings) log::Warn("profiles", stem_ + ": " + w);
         return;
     }
-    if (std::filesystem::exists(store_.directory() / L"default.json")) {
+    if (std::filesystem::exists(store_.directory() / Utf8ToWide(stem_ + ".json"))) {
         // Never overwrite a profile we couldn't read. Keep it on disk and run with defaults
         // without saving over it.
         log::Error("profiles", "default profile unreadable, not overwriting: " + r.error);
@@ -386,9 +444,193 @@ void MainWindow::LoadProfile() {
 
 void MainWindow::SaveProfile() {
     if (!profileLoaded_) return;
-    std::string stem = "default";
+    std::string stem = stem_;
     const HRESULT hr = store_.Save(profile_, stem);
     if (FAILED(hr)) log::Error("profiles", Error{hr, "SaveProfile", "IXC Camera could not save the profile."}.Describe());
+}
+
+// ---- profiles and hotkeys ---------------------------------------------------------------------------
+
+void MainWindow::SaveAppSettings() {
+    app_.activeProfile = stem_;
+    const HRESULT hr = WriteFileAtomic(dataDir_ / L"app-settings.json", AppSettingsToJson(app_));
+    if (FAILED(hr)) log::Warn("app", "could not save app settings: " + HResultHex(hr));
+}
+
+void MainWindow::RefreshProfileList() {
+    SendMessageW(profileCombo_, CB_RESETCONTENT, 0, 0);
+    auto entries = store_.List();
+    if (std::none_of(entries.begin(), entries.end(), [&](const auto& e) { return e.stem == stem_; })) entries.push_back({stem_, {}});
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stem < b.stem; });
+    for (const auto& e : entries) {
+        const int i = static_cast<int>(SendMessageW(profileCombo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(W(e.stem).c_str())));
+        if (e.stem == stem_) SendMessageW(profileCombo_, CB_SETCURSEL, static_cast<WPARAM>(i), 0);
+    }
+    EnableWindow(profileDelete_, entries.size() > 1);
+}
+
+std::string MainWindow::UniqueStem(std::string_view name) const {
+    const std::string base = ProfileStore::MakeStem(name);
+    std::string stem = base;
+    for (int n = 2; std::filesystem::exists(store_.directory() / Utf8ToWide(stem + ".json")); ++n) stem = base + "-" + std::to_string(n);
+    return stem;
+}
+
+void MainWindow::SwitchProfile(const std::string& stem) {
+    if (stem == stem_) return;
+    ProfileLoadResult r = store_.Load(stem);
+    if (!r.ok) {
+        SetWindowTextW(hint_, (L"Profile \"" + W(stem) + L"\" could not be read and was left unchanged: " + W(r.error)).c_str());
+        RefreshProfileList();
+        return;
+    }
+    if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // keep the old profile's last change
+    // The camera and format in use stay as they are; everything else comes from the profile.
+    Profile next = r.profile;
+    next.sourceCameraId = profile_.sourceCameraId;
+    next.width = profile_.width;
+    next.height = profile_.height;
+    next.fpsNumerator = profile_.fpsNumerator;
+    next.fpsDenominator = profile_.fpsDenominator;
+    profile_ = std::move(next);
+    stem_ = stem;
+    SaveAppSettings();
+    panel_.Refresh();
+    UpdatePipeline();
+    SaveAndPublish();
+    RefreshProfileList();
+    SetWindowTextW(hint_, (L"Profile: " + W(stem_)).c_str());
+}
+
+void MainWindow::CycleProfile(int step) {
+    auto entries = store_.List();
+    if (entries.size() < 2) return;
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stem < b.stem; });
+    auto it = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.stem == stem_; });
+    const int n = static_cast<int>(entries.size());
+    const int cur = it == entries.end() ? 0 : static_cast<int>(it - entries.begin());
+    SwitchProfile(entries[static_cast<size_t>(((cur + step) % n + n) % n)].stem);
+}
+
+void MainWindow::SaveProfileAs() {
+    wchar_t buf[128] = L"";
+    GetWindowTextW(profileCombo_, buf, 128);
+    const std::string name = WideToUtf8(buf);
+    if (!IsValidProfileName(name)) {
+        SetWindowTextW(hint_, L"Type a profile name (up to 64 characters) in the Profile box, then select Save.");
+        return;
+    }
+    const std::string stem = ProfileStore::MakeStem(name);
+    if (stem != stem_) {
+        stem_ = std::filesystem::exists(store_.directory() / Utf8ToWide(stem + ".json")) ? stem : UniqueStem(name);
+        profile_.name = name;
+    }
+    profileLoaded_ = true;
+    SaveProfile();
+    SaveAppSettings();
+    RefreshProfileList();
+    SetWindowTextW(hint_, (L"Saved profile \"" + W(stem_) + L"\".").c_str());
+}
+
+void MainWindow::DeleteProfile() {
+    auto entries = store_.List();
+    if (entries.size() < 2) return;
+    const std::wstring msg = L"Delete the profile \"" + W(stem_) + L"\"? This can't be undone.";
+    if (MessageBoxW(hwnd_, msg.c_str(), L"IXC Camera", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    const std::string doomed = stem_;
+    std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stem < b.stem; });
+    const auto next = std::find_if(entries.begin(), entries.end(), [&](const auto& e) { return e.stem != doomed; });
+    SwitchProfile(next->stem);
+    if (FAILED(store_.Remove(doomed))) SetWindowTextW(hint_, L"The profile file could not be deleted.");
+    RefreshProfileList();
+}
+
+void MainWindow::ImportProfile() {
+    wchar_t path[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{sizeof(ofn)};
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = L"IXC profile (*.json)\0*.json\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    std::string text;
+    HRESULT hr = ReadFileLimited(path, ProfileStore::kMaxProfileFileBytes, text);
+    ProfileLoadResult r = SUCCEEDED(hr) ? ProfileFromJson(text) : ProfileLoadResult{};
+    if (!r.ok) {
+        const std::wstring why = FAILED(hr) ? W(Error{hr, "ImportProfile", ""}.Describe()) : W(r.error);
+        MessageBoxW(hwnd_, (L"This file isn't a valid IXC profile and wasn't imported.\n\n" + why).c_str(), L"IXC Camera", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    std::string stem = UniqueStem(r.profile.name);  // never overwrites an existing profile
+    hr = store_.Save(r.profile, stem);
+    if (FAILED(hr)) {
+        SetWindowTextW(hint_, L"The imported profile could not be saved.");
+        return;
+    }
+    SwitchProfile(stem);
+    if (!r.warnings.empty()) {
+        SetWindowTextW(hint_, (L"Imported \"" + W(stem) + L"\" with " + std::to_wstring(r.warnings.size()) +
+                               L" value(s) adjusted to valid ranges.").c_str());
+    }
+}
+
+void MainWindow::ExportProfile() {
+    std::wstring name = W(stem_) + L".json";
+    wchar_t path[MAX_PATH];
+    wcsncpy_s(path, name.c_str(), _TRUNCATE);
+    OPENFILENAMEW ofn{sizeof(ofn)};
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrFilter = L"IXC profile (*.json)\0*.json\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = L"json";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return;
+    const HRESULT hr = WriteFileAtomic(path, ProfileToJson(profile_));
+    SetWindowTextW(hint_, SUCCEEDED(hr) ? L"Profile exported." : L"The profile could not be exported.");
+}
+
+// Global hotkeys (RegisterHotKey: no keyboard hook, no polling). Ctrl+Alt combinations so plain
+// F-keys stay free for games; they work while the IXC app runs, even minimized.
+enum HotkeyId { kHkEffects = 1, kHkNextProfile, kHkPrevProfile, kHkMirror };
+
+void MainWindow::RegisterHotkeys() {
+    UnregisterHotkeys();
+    if (!app_.hotkeysEnabled) return;
+    const struct { int id; UINT vk; const wchar_t* name; } keys[] = {
+        {kHkEffects, VK_F8, L"Ctrl+Alt+F8"}, {kHkNextProfile, VK_F9, L"Ctrl+Alt+F9"},
+        {kHkPrevProfile, VK_F10, L"Ctrl+Alt+F10"}, {kHkMirror, VK_F11, L"Ctrl+Alt+F11"}};
+    std::wstring taken;
+    for (const auto& k : keys) {
+        if (!RegisterHotKey(hwnd_, k.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, k.vk)) taken += (taken.empty() ? L"" : L", ") + std::wstring(k.name);
+    }
+    hotkeysRegistered_ = true;
+    if (!taken.empty()) SetWindowTextW(hint_, (L"Another app already uses " + taken + L"; those IXC hotkeys are unavailable.").c_str());
+}
+
+void MainWindow::UnregisterHotkeys() {
+    if (!hotkeysRegistered_) return;
+    for (int id = kHkEffects; id <= kHkMirror; ++id) UnregisterHotKey(hwnd_, id);
+    hotkeysRegistered_ = false;
+}
+
+void MainWindow::OnHotkey(int id) {
+    switch (id) {
+        case kHkEffects:
+            profile_.effectsEnabled = !profile_.effectsEnabled;
+            SetWindowTextW(hint_, profile_.effectsEnabled ? L"Effects on (Ctrl+Alt+F8)" : L"Effects off (Ctrl+Alt+F8)");
+            break;
+        case kHkNextProfile: CycleProfile(1); return;
+        case kHkPrevProfile: CycleProfile(-1); return;
+        case kHkMirror:
+            profile_.mirror = !profile_.mirror;
+            panel_.Refresh();
+            break;
+        default: return;
+    }
+    UpdatePipeline();
+    SaveAndPublish();
 }
 
 // ---- cameras and formats ------------------------------------------------------------------------
@@ -549,7 +791,7 @@ void MainWindow::UpdatePipeline() {
     Profile effective = profile_;
     effective.image.exposureEv += smoothEv_;
     preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
-    auto fx = effects::CompileEffects(profile_.effects, fullRange);
+    auto fx = effects::CompileEffects(profile_, fullRange);
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
@@ -730,6 +972,26 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case kIdVcamUse:
                     UseSelectedForIxcCamera();
                     return 0;
+                case kIdProfile:
+                    if (HIWORD(wp) == CBN_SELCHANGE) {
+                        const int sel = static_cast<int>(SendMessageW(profileCombo_, CB_GETCURSEL, 0, 0));
+                        wchar_t item[128] = L"";
+                        if (sel >= 0 && SendMessageW(profileCombo_, CB_GETLBTEXTLEN, static_cast<WPARAM>(sel), 0) < 128) {
+                            SendMessageW(profileCombo_, CB_GETLBTEXT, static_cast<WPARAM>(sel), reinterpret_cast<LPARAM>(item));
+                            SwitchProfile(WideToUtf8(item));
+                        }
+                    }
+                    return 0;
+                case kIdProfileSave: SaveProfileAs(); return 0;
+                case kIdProfileDelete: DeleteProfile(); return 0;
+                case kIdProfileImport: ImportProfile(); return 0;
+                case kIdProfileExport: ExportProfile(); return 0;
+                case kIdHotkeys:
+                    app_.hotkeysEnabled = SendMessageW(hotkeys_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                    SaveAppSettings();
+                    RegisterHotkeys();
+                    if (!app_.hotkeysEnabled) UnregisterHotkeys();
+                    return 0;
                 case kIdPrivacy:
                     ShellExecuteW(hwnd_, L"open", L"ms-settings:privacy-webcam", nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
@@ -749,6 +1011,10 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+
+        case WM_HOTKEY:
+            OnHotkey(static_cast<int>(wp));
+            return 0;
 
         case kVcamDoneMessage:
             OnVcamDone(static_cast<DWORD>(wp));
@@ -780,6 +1046,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             KillTimer(hwnd_, kStatusTimer);
+            UnregisterHotkeys();
             if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // don't lose the last slider move
             if (session_) {
                 session_->Close();

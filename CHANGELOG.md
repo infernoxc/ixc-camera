@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased — Phase 8 effects
+## Unreleased — Phase 9 profiles and hotkeys
+
+### Added
+- **Named profiles** in the app: the Profile box lists saved profiles (select to switch); type a new name and select Save to create one; Delete (with confirmation, never the last profile); Import… (validated, clamped with a warning count, never overwrites an existing profile) and Export… for backup. Switching keeps the camera and format in use and applies everything else live, including in IXC Camera. The active profile is remembered in `app-settings.json`.
+- **Effects master switch** (`effectsEnabled` in profiles): turns all effects off without losing the list.
+- **Global hotkeys** (while the IXC app runs, even minimized; `RegisterHotKey`, no keyboard hook or polling): Ctrl+Alt+F8 effects on/off, Ctrl+Alt+F9 / F10 next / previous profile, Ctrl+Alt+F11 mirror. Ctrl+Alt combinations leave plain F-keys to games. A checkbox turns them off; a hotkey another app already owns is reported.
+- Tests: app settings parsing (never a path), master switch, UI smoke checks for profiles and hotkeys (29 UI checks).
+
+## Phase 8 — Effects (2026-09-26)
 
 ### Added
 - **Effect framework** (`src/effects`): built-in, original effects described by metadata (category, face needs, cost class, fallback), compiled once per settings change and rendered in place on the processed frame by a renderer with fixed, reused scratch memory. Nothing external is loaded or executed.

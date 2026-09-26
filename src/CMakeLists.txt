@@ -7,7 +7,8 @@ add_library(ixc_core STATIC
     diagnostics/log.cpp
     profiles/profile.cpp
     profiles/profile_store.cpp
-    profiles/active_profile.cpp)
+    profiles/active_profile.cpp
+    profiles/app_settings.cpp)
 target_include_directories(ixc_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ixc_core PUBLIC ixc_settings)
 

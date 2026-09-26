@@ -258,7 +258,7 @@ void FrameProcessor::Recompile() {
     Profile effective = profile_;
     effective.image.exposureEv += compensationEv_;
     params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
-    effects_ = effects::CompileEffects(profile_.effects, fullRange_);
+    effects_ = effects::CompileEffects(profile_, fullRange_);
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases
