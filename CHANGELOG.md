@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased — Phase 11 compatibility
+## 0.9.0 — Phase 12 installer (2026-09-26)
+
+### Added
+- **IXC-Camera-Setup-x64.exe**: native installer and uninstaller with the binaries embedded (no installer framework). It checks Windows 11 and x64, upgrades in place, sets the settings-folder permissions, registers and verifies the COM source and the system camera, and adds a Start menu shortcut and an Apps & features entry. It offers launch-on-finish (unelevated), with Retry or full rollback on any failed stage. It has documented exit codes and a log. Uninstall removes everything IXC-owned, with an optional full reset of profiles. See docs/installer.md.
+- Version 0.9.0.
+
+## Phase 11 — Compatibility (2026-09-26)
 
 ### Added
 - **Browser test** (`tests/browser_camera.ps1`, ctest `browser_getusermedia`): a Chromium browser (Edge, Chrome or Brave), headless with a throwaway profile, opens IXC Camera through getUserMedia and counts frames (never shown or saved). Brave: 1280×720 → 29.9 FPS, 1920×1080 → 30.0 FPS. This is the capture path Chrome, Edge, Discord and Teams use.
