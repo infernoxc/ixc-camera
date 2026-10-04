@@ -118,7 +118,7 @@ add_library(ixc_segmentation STATIC
 target_link_libraries(ixc_segmentation PUBLIC ixc_processing)
 
 # ixc_effects: built-in IXC effects applied to the processed frame (Phase 8).
-add_library(ixc_effects STATIC effects/effects.cpp)
+add_library(ixc_effects STATIC effects/effects.cpp effects/stickers.cpp)
 target_link_libraries(ixc_effects PUBLIC ixc_face ixc_segmentation)
 
 add_subdirectory(virtual_camera)

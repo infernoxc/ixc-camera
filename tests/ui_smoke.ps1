@@ -96,7 +96,9 @@ $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 
 $IdProfile = 200; $IdProfileSave = 201; $IdHotkeys = 205; $IdReset = 206; $IdMirror = 207; $IdSlider0 = 210
 $IdMaster = 230; $IdAllOff = 231; $IdEffect0 = 240; $IdStrength0 = 260
 $IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdVcamStatus = 290; $IdVcamUse = 291
-$effectIds = 'blush.tone', 'beauty.basic', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
+$effectIds = 'blush.tone', 'beauty.basic', 'background.blur', 'background.studio', 'sticker.shades', 'sticker.hearts', 'sticker.crown',
+             'sticker.puppy', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
+$IdxMono = [array]::IndexOf($effectIds, 'color.mono'); $IdxVivid = [array]::IndexOf($effectIds, 'color.vivid')
 
 $failures = @()
 function Check([bool]$ok, [string]$what) { if ($ok) { "  PASS  $what" } else { "  FAIL  $what"; $script:failures += $what } }
@@ -219,18 +221,22 @@ try {
             Start-Sleep -Milliseconds 2200
             Check ([Ui]::Text($status) -match 'face: (searching|tracking)') 'a face effect starts face tracking automatically'
         }
+        if ($effectIds[$i] -eq 'background.blur') {
+            Start-Sleep -Milliseconds 2200
+            Check ([Ui]::Text($status) -match 'background: (\d+/s|off \(CPU too slow\))') 'a background effect starts person segmentation automatically'
+        }
         Click $t
         $pub = Published
         Check (-not (Checked $t) -and -not $pub.Contains('"' + $effectIds[$i] + '"') -and -not [Ui]::IsWindowVisible($s)) "$($effectIds[$i]): switch off removes it"
     }
-    Click (P ($IdEffect0 + 5)); Click (P ($IdEffect0 + 6))   # mono + vivid
+    Click (P ($IdEffect0 + $IdxMono)); Click (P ($IdEffect0 + $IdxVivid))   # mono + vivid
     Click (P $IdMaster)
     $pub = Published
-    Check ($pub -match '"effectsEnabled": false' -and -not [Ui]::IsWindowEnabled((P ($IdEffect0 + 5)))) 'Effects master switch off: published, effect rows disabled'
+    Check ($pub -match '"effectsEnabled": false' -and -not [Ui]::IsWindowEnabled((P ($IdEffect0 + $IdxMono)))) 'Effects master switch off: published, effect rows disabled'
     Click (P $IdMaster)
     Check ((Published) -match '"effectsEnabled": true') 'Effects master switch back on'
     Click (P $IdAllOff)
-    Check ((Published) -match '"effects": \[\]' -and -not (Checked (P ($IdEffect0 + 5)))) 'All off clears every effect'
+    Check ((Published) -match '"effects": \[\]' -and -not (Checked (P ($IdEffect0 + $IdxMono)))) 'All off clears every effect'
 
     # --- Feature switches ---------------------------------------------------------------------------------
     Check (Checked (P $IdSmooth)) 'Smooth motion is on by default'
@@ -284,8 +290,8 @@ try {
 
     # --- Persistence across a restart -------------------------------------------------------------------------
     SetSlider (P $IdSlider0) 33
-    Click (P ($IdEffect0 + 6))            # Vivid on
-    SetSlider (P ($IdStrength0 + 6)) 55
+    Click (P ($IdEffect0 + $IdxVivid))    # Vivid on
+    SetSlider (P ($IdStrength0 + $IdxVivid)) 55
     Click (P $IdMarkers)                  # face markers off (app setting)
     Start-Sleep -Milliseconds 600
     $p.Refresh(); $mb = $p.PrivateMemorySize64 / 1MB
@@ -293,7 +299,7 @@ try {
     Check ((Launch)) 'relaunch'
     Start-Sleep -Milliseconds 1500
     Check ([int][Ui]::SendMessageW((P $IdSlider0), $TBM_GETPOS, [IntPtr]::Zero, [IntPtr]::Zero) -eq 33) 'restart: Brightness 33 restored'
-    Check ((Checked (P ($IdEffect0 + 6))) -and [int][Ui]::SendMessageW((P ($IdStrength0 + 6)), $TBM_GETPOS, [IntPtr]::Zero, [IntPtr]::Zero) -eq 55) 'restart: Vivid on at 55% restored'
+    Check ((Checked (P ($IdEffect0 + $IdxVivid))) -and [int][Ui]::SendMessageW((P ($IdStrength0 + $IdxVivid)), $TBM_GETPOS, [IntPtr]::Zero, [IntPtr]::Zero) -eq 55) 'restart: Vivid on at 55% restored'
     Check (-not (Checked (P $IdMarkers))) 'restart: Show face markers off restored'
     Click (P $IdReset); Click (P $IdAllOff); Click (P $IdMarkers); Start-Sleep -Milliseconds 500
 

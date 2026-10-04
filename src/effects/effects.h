@@ -40,15 +40,16 @@ struct EffectInfo {
 const std::vector<EffectInfo>& Catalog();
 const EffectInfo* Find(std::string_view id);
 
-enum class Kind { Blush, Beauty, Portrait, Grade, BackgroundBlur, BackgroundStudio };
+enum class Kind { Blush, Beauty, Portrait, Grade, BackgroundBlur, BackgroundStudio, Sticker };
 
 // Compiled settings for one frame size-independent chain.
 struct EffectConfig {
     struct Face {
         Kind kind;
-        float strength;  // 0..1
+        float strength;   // 0..1
+        int variant = 0;  // Sticker: stickers::Id
     };
-    std::vector<Face> faceEffects;   // background, portrait, beauty, blush (in application order)
+    std::vector<Face> faceEffects;   // background, portrait, beauty, blush, stickers (in application order)
     bool grade = false;              // colour/lighting LUTs below are not identity
     std::array<std::uint8_t, 256> yLut{}, uLut{}, vLut{};
     bool needsFaces = false;
@@ -93,6 +94,7 @@ private:
     // Person-mask background effects: blur (soft, defocused background) or a studio backdrop.
     void Background(const processing::Nv12Frame& f, const FrameContext& ctx, Kind kind, float a);
     void BuildLowRes(const processing::Nv12Frame& f);  // lowY_/lowUV_: 1/8-scale frame
+    void Sticker(const processing::Nv12Frame& f, int variant, float a, bool fullRange);
 
     Region face_;
     float presence_ = 0;  // 0..1 fade for face-anchored effects
