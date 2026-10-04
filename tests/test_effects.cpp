@@ -140,6 +140,23 @@ IXC_TEST(Effects_PortraitSoftensBackgroundNotSubject) {
     IXC_CHECK(detail(f) < detail(before) * 0.5);                     // corner blurred
 }
 
+IXC_TEST(Effects_PortraitSoftensBackgroundColour) {
+    // Colour detail in the background is blurred too, not just brightness.
+    Frame f(320, 180);
+    for (int y = 0; y < 180; y += 2)
+        for (int x = 0; x < 320; x += 2) {
+            f.U(x, y) = static_cast<std::uint8_t>(64 + std::rand() % 128);
+            f.V(x, y) = static_cast<std::uint8_t>(64 + std::rand() % 128);
+        }
+    Frame before = f;
+    EffectRenderer r;
+    r.Apply(f.View(), *One("portrait.soft"), {nullptr, {}, false});
+    IXC_CHECK_EQ(f.U(160, 112), before.U(160, 112));  // subject colour unchanged
+    IXC_CHECK_EQ(f.V(160, 112), before.V(160, 112));
+    auto detail = [](Frame& fr) { double s = 0; for (int y = 4; y < 24; y += 2) for (int x = 4; x < 24; x += 2) s += std::abs(fr.U(x + 2, y) - fr.U(x, y)); return s; };
+    IXC_CHECK(detail(f) < detail(before) * 0.5);       // corner colour blurred
+}
+
 IXC_TEST(Effects_FaceCoordinatesFollowZoomAndMirror) {
     // Face at the source's left; mirrored output puts the face warmth on the right half.
     EffectRenderer r;

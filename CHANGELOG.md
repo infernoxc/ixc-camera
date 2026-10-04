@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Portrait now blurs and mutes the background's colour, not only its brightness.** The low-resolution colour background was computed every frame but never applied, so colour edges stayed sharp behind the subject. Adds the chroma pass (half the luma cost).
+- **Blush Tone skin smoothing fades in at the intended rate.** The face fade was applied twice to the smoothing (it ramped in late and dropped sharply on tracking hiccups).
+
 ## 0.10.0 — Redesigned control panel, branding, installer shortcuts (2026-09-26)
 
 ### Changed

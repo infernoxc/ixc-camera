@@ -230,9 +230,9 @@ void EffectRenderer::Tint(const processing::Nv12Frame& f, face::PointF c, float 
 // matched against lens-on/lens-off frames (docs/blush-tone.md). The global grade comes from
 // EffectConfig; this adds the face treatment: soft glowing skin and rosy under-eyes and nose tip.
 void EffectRenderer::Blush(const processing::Nv12Frame& f, float a) {
+    if (!face_.valid || a * presence_ < 0.01f || face_.eyeDist < 4) return;
+    Beauty(f, a * kBlushSkin.smoothing, kBlushSkin.radiusDiv, kBlushSkin.edge);  // applies presence_ itself
     a *= presence_;
-    if (!face_.valid || a < 0.01f || face_.eyeDist < 4) return;
-    Beauty(f, a * kBlushSkin.smoothing, kBlushSkin.radiusDiv, kBlushSkin.edge);
     Tint(f, {face_.x + face_.w / 2, face_.y + face_.h * 0.5f}, face_.w * 0.62f, face_.h * 0.72f, kBlushFace.dY, kBlushFace.dU, kBlushFace.dV, a, 60);
     const float ed = face_.eyeDist;
     for (const face::PointF& e : {face_.eyeL, face_.eyeR}) {
@@ -428,6 +428,7 @@ void EffectRenderer::Portrait(const processing::Nv12Frame& f, float a) {
         }
     };
     plane(f.y, f.yStride, f.width, f.height, 1, 1.0f, lowY_.data());
+    plane(f.uv, f.uvStride, f.width / 2, f.height / 2, 2, 2.0f, lowUV_.data());  // UV pairs: half resolution
 }
 
 void EffectRenderer::Grade(const processing::Nv12Frame& f, const EffectConfig& cfg) {
