@@ -95,7 +95,7 @@ $WM_SETTEXT = 0x000C; $WM_HOTKEY = 0x0312
 $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 106; $IdHint = 107
 $IdProfile = 200; $IdProfileSave = 201; $IdHotkeys = 205; $IdReset = 206; $IdMirror = 207; $IdSlider0 = 210
 $IdMaster = 230; $IdAllOff = 231; $IdEffect0 = 240; $IdStrength0 = 260
-$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdVcamStatus = 290; $IdVcamUse = 291
+$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdVcamStatus = 290; $IdVcamUse = 291
 $effectIds = 'blush.tone', 'beauty.basic', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
 
 $failures = @()
@@ -238,6 +238,9 @@ try {
     Click (P $IdSmooth); Check ((Published) -match '"smoothMotion": true') 'Smooth motion back on is published'
     Click (P $IdGpu); Check ((Published) -match '"gpu": "off"') 'GPU acceleration off is published (CPU only)'
     Click (P $IdGpu); Check ((Published) -match '"gpu": "auto"') 'GPU acceleration back on is published'
+    Check (-not (Checked (P $IdAutoFrame))) 'Auto-framing is off by default'
+    Click (P $IdAutoFrame); Check ((Published) -match '"autoFraming": true') 'Auto-framing on is published'
+    Click (P $IdAutoFrame); Check ((Published) -match '"autoFraming": false') 'Auto-framing back off is published'
     Start-Sleep -Milliseconds 1500
     $threadsOff = $p.Threads.Count; $p.Refresh(); $threadsOff = $p.Threads.Count
     Check (-not (Checked (P $IdFace)) -and -not ([Ui]::Text($status) -match 'face:')) 'Face tracking off by default: not running'

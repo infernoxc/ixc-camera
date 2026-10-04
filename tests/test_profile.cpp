@@ -35,6 +35,7 @@ Profile SampleProfile() {
     p.tier = PerformanceTier::UltraLow;
     p.gpu = GpuMode::Off;
     p.smoothMotion = false;
+    p.autoFraming = true;
     p.hotkeys = {{"effects.toggle", "Ctrl+Alt+F8"}};
     return p;
 }

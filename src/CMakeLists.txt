@@ -69,7 +69,8 @@ add_library(ixc_face STATIC
     face/tracker.cpp
     face/cadence.cpp
     face/detector.cpp
-    face/face_engine.cpp)
+    face/face_engine.cpp
+    face/auto_framer.cpp)
 target_link_libraries(ixc_face PUBLIC ixc_processing)
 if(IXC_WITH_FACE_TRACKING)
     # The vendored library is compiled twice (portable + AVX2) into separate namespaces. It is

@@ -218,7 +218,7 @@ void FrameProcessor::UpdateFaceTracking() {
     {
         std::lock_guard lock(mu_);
         // Face-aware effects need the tracker even when "face tracking" itself isn't ticked.
-        want = (profile_.faceTracking.enabled || (effects_ && effects_->needsFaces)) && nv12_ && type_ != nullptr;
+        want = (profile_.faceTracking.enabled || profile_.autoFraming || (effects_ && effects_->needsFaces)) && nv12_ && type_ != nullptr;
         cfg = face::EngineConfigFor(profile_);
     }
     if (want) {
@@ -395,10 +395,12 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     bool nv12 = false;
     std::uint64_t generation = 0;
     std::shared_ptr<const effects::EffectConfig> fx;
+    bool autoFraming = false;
     {
         std::lock_guard lock(mu_);
         params = params_;
         generation = generation_;
+        autoFraming = profile_.autoFraming;
         type = type_;
         width = width_;
         height = height_;
@@ -419,6 +421,33 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         counters_.inputKnown = true;
         counters_.inputIsGpuSurface = gpu;
     }
+    // Faces for this frame (auto-framing and face effects share one snapshot).
+    face::FaceSnapshot snap;
+    if ((autoFraming || (fx && fx->needsFaces)) && input) {
+        std::lock_guard fl(faceMu_);
+        face_.Snapshot(face::FaceEngine::NowMs(), snap);
+    }
+    // Auto-framing: a per-frame copy of the parameters with the framed source rectangle (a stack
+    // copy, no allocation). Its own generation key lets the CPU/GPU choice see the zoom.
+    processing::PipelineParams framed;
+    if (autoFraming && nv12 && params) {
+        const face::ViewRect base{params->srcX, params->srcY, params->srcW, params->srcH};
+        const face::ViewRect v = framer_.Update(base, face::LargestFace(snap), face::FaceEngine::NowMs());
+        if (framer_.Framing()) {
+            framed = *params;
+            framed.srcX = v.x;
+            framed.srcY = v.y;
+            framed.srcW = v.w;
+            framed.srcH = v.h;
+            framed.geometryIdentity = false;
+            framed.identity = false;
+            params = std::shared_ptr<const processing::PipelineParams>(params, &framed);  // aliasing: no allocation
+            generation |= 1ull << 63;
+        }
+    } else if (!autoFraming) {
+        framer_.Reset();
+    }
+
     LARGE_INTEGER t0;
     QueryPerformanceCounter(&t0);
 
@@ -462,11 +491,6 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
                 ok = processor_.Process(in, o, *params, generation);
             }
             if (ok && fx) {
-                face::FaceSnapshot snap;
-                if (fx->needsFaces) {
-                    std::lock_guard fl(faceMu_);
-                    face_.Snapshot(face::FaceEngine::NowMs(), snap);
-                }
                 effects::FrameContext ctx;
                 ctx.faces = &snap;
                 ctx.fullRange = fullRange_;

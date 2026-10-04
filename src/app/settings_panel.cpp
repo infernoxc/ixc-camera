@@ -123,6 +123,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
 
     // Camera features
     smooth_ = toggle(kIdSmoothMotion, L"Smooth motion", L"Keeps the full frame rate in low light");
+    autoFraming_ = toggle(kIdAutoFraming, L"Auto-framing", L"Zooms and pans to keep you in the picture");
     face_ = toggle(kIdFaceTracking, L"Face tracking", L"Off");
     faceMarkers_ = toggle(kIdFaceMarkers, L"Show face markers", L"Preview only, never sent to apps");
     gpu_ = toggle(kIdGpu, L"GPU acceleration", L"Zoom only, when measured faster");
@@ -209,6 +210,7 @@ void SettingsPanel::LayoutContent(int width) {
 
     beginCard(L"CAMERA FEATURES", nullptr);
     row(smooth_);
+    row(autoFraming_);
     row(face_);
     place(faceMarkers_, x + Scale(14), y, w - Scale(14), WidgetHeight(faceMarkers_));
     y += WidgetHeight(faceMarkers_) + gap;
@@ -278,6 +280,7 @@ void SettingsPanel::Refresh() {
     SendMessageW(mirror_, BM_SETCHECK, profile_->mirror ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(gpu_, BM_SETCHECK, profile_->gpu == GpuMode::Auto ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(smooth_, BM_SETCHECK, profile_->smoothMotion ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(autoFraming_, BM_SETCHECK, profile_->autoFraming ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(faceMarkers_, BM_SETCHECK, faceOverlay_ ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(effectsMaster_, BM_SETCHECK, profile_->effectsEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -355,6 +358,7 @@ bool SettingsPanel::OnCommand(HWND control, int code) {
         case kIdMirror: profile_->mirror = checked(mirror_); break;
         case kIdGpu: profile_->gpu = checked(gpu_) ? GpuMode::Auto : GpuMode::Off; break;
         case kIdSmoothMotion: profile_->smoothMotion = checked(smooth_); break;
+        case kIdAutoFraming: profile_->autoFraming = checked(autoFraming_); break;
         case kIdFaceTracking: profile_->faceTracking.enabled = checked(face_); break;
         case kIdFaceMarkers: faceOverlay_ = checked(faceMarkers_); break;
         case kIdEffectsMaster:

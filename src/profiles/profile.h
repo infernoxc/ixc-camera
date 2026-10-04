@@ -91,6 +91,9 @@ struct Profile {
     // Keep the camera at its full frame rate in low light (fixed exposure + brightness
     // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
     bool smoothMotion = true;
+    // Keep the tracked face framed: zoom and pan smoothly inside the crop/zoom rectangle (uses
+    // face tracking). See face/auto_framer.h.
+    bool autoFraming = false;
     bool effectsEnabled = true;  // master switch (hotkey), keeps the effect list intact
     std::vector<HotkeyBinding> hotkeys;
 

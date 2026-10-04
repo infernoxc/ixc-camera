@@ -11,6 +11,7 @@
 
 #include "camera/capture_session.h"
 #include "effects/effects.h"
+#include "face/auto_framer.h"
 #include "face/face_engine.h"
 #include "processing/color.h"
 #include "processing/gpu/adaptive_processor.h"
@@ -49,6 +50,8 @@ public:
     // Face tracking on the previewed frames: nullptr = off (no thread, no memory). Restarts only
     // when the settings actually change.
     void SetFaceTracking(const face::EngineConfig* config);
+    // Auto-framing (needs face tracking running): the preview follows the face like IXC Camera.
+    void SetAutoFraming(bool on) { autoFraming_ = on; dirty_ = sample_ != nullptr; }
     // Draw the tracked faces over the preview (preview only; never sent to apps).
     void SetFaceOverlay(bool on);
     face::EngineStatus FaceStatus() const { return face_.Status(); }
@@ -84,6 +87,10 @@ private:
 
     face::FaceEngine face_;
     face::EngineConfig faceConfig_;
+    bool autoFraming_ = false;
+    face::AutoFramer framer_;
+    processing::PipelineParams framed_;  // per-frame copy of pipeline_ with the framed rectangle
+    face::OutputMapping shownMap_;       // source → preview mapping of the last converted frame
     bool faceOverlay_ = true;
     std::shared_ptr<const effects::EffectConfig> effects_;
     effects::EffectRenderer renderer_;

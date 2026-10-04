@@ -12,7 +12,8 @@ add_executable(ixc_unit_tests
     test_exposure_governor.cpp
     test_face.cpp
     test_effects.cpp
-    test_segmentation.cpp)
+    test_segmentation.cpp
+    test_auto_framer.cpp)
 target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing ixc_processing_gpu ixc_face ixc_effects ixc_segmentation)
 
 add_test(NAME unit COMMAND ixc_unit_tests)

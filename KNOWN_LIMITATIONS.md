@@ -28,6 +28,11 @@
   - Needs the camera's UVC exposure control. Cameras without one are left unchanged.
 - OBS: add **one** source per camera. Two sources on the same camera (or IXC Camera at two resolutions, or the webcam and IXC Camera together) can't both stream: the second shows a frozen picture (`0x800705AA` in the OBS log).
 
+## Auto-framing
+- Auto-framing is a digital zoom: at its maximum (2.5×) a 720p camera shows a visibly softer picture. Use 1080p when possible.
+- It follows the largest face only, and moves when face tracking does (a few detections per second, predicted in between). Very fast movements are followed with a short delay.
+- While framing, the picture is processed on the CPU even if the profile is otherwise neutral (≈7 ms per 1080p frame on the reference Ryzen).
+
 ## Face tracking
 - Off by default. In this version nothing visible uses it yet: face effects come in Phase 8. The app can draw the tracked faces over its preview. They're never drawn into what other apps receive.
 - Five landmarks only: eyes, nose tip and mouth corners. Brow regions and head roll/yaw/pitch are estimates derived from those points. They're enough to anchor 2D effects, but they aren't a 3D head pose.
