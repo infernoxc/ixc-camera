@@ -53,11 +53,7 @@ void PreviewWindow::PaintFaces(HDC dc, int dx, int dy, int dw, int dh) {
     face_.Snapshot(face::FaceEngine::NowMs(), snap);
     if (snap.count == 0) return;
     // Faces are tracked in source coordinates; the preview shows the processed output.
-    face::OutputMapping m;
-    if (pipeline_ && !pipeline_->identity) {
-        m = {static_cast<float>(pipeline_->srcX), static_cast<float>(pipeline_->srcY), static_cast<float>(pipeline_->srcW),
-             static_cast<float>(pipeline_->srcH), pipeline_->mirror};
-    }
+    const face::OutputMapping m = shownMap_;  // includes auto-framing
     if (!facePen_) facePen_ = CreatePen(PS_SOLID, 2, RGB(80, 220, 120));
     if (!landmarkPen_) landmarkPen_ = CreatePen(PS_SOLID, 1, RGB(255, 210, 60));
     auto px = [&](face::PointF p) { return POINT{dx + static_cast<int>(p.x * dw), dy + static_cast<int>(p.y * dh)}; };
@@ -194,13 +190,39 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
             const double segNow = seg::SegmentationEngine::NowMs();
             if (seg_.WantsFrame(segNow)) seg_.OnFrame(p, YuvFormatFor(layout_), segNow);
 
+            // Auto-framing: follow the face by moving the source rectangle (as IXC Camera does).
+            const processing::PipelineParams* params = pipeline_.get();
+            std::uint64_t generation = pipelineGeneration_;
+            face::FaceSnapshot snap;
+            if (autoFraming_ && params) {
+                face_.Snapshot(now, snap);
+                const face::ViewRect base{params->srcX, params->srcY, params->srcW, params->srcH};
+                const face::ViewRect v = framer_.Update(base, face::LargestFace(snap), now);
+                if (framer_.Framing()) {
+                    framed_ = *params;
+                    framed_.srcX = v.x;
+                    framed_.srcY = v.y;
+                    framed_.srcW = v.w;
+                    framed_.srcH = v.h;
+                    framed_.geometryIdentity = false;
+                    framed_.identity = false;
+                    params = &framed_;
+                    generation |= 1ull << 63;
+                }
+            } else {
+                framer_.Reset();
+            }
+            shownMap_ = params ? face::OutputMapping{static_cast<float>(params->srcX), static_cast<float>(params->srcY),
+                                                     static_cast<float>(params->srcW), static_cast<float>(params->srcH), params->mirror}
+                               : face::OutputMapping{};
+
             // Apply IXC's pipeline at full resolution first (exactly what apps receive).
-            if (pipeline_ && !pipeline_->identity) {
+            if (params && !params->identity) {
                 const size_t frameBytes = static_cast<size_t>(p.width) * static_cast<size_t>(p.height) * 3 / 2;
                 if (processed_.size() != frameBytes) processed_.assign(frameBytes, 0);
                 const processing::Nv12Frame out{processed_.data(), processed_.data() + static_cast<size_t>(p.width) * p.height,
                                                 p.width, p.width, p.width, p.height};
-                if (processor_.Process(p, out, *pipeline_, pipelineGeneration_)) p = {out.y, out.uv, out.yStride, out.uvStride, p.width, p.height};
+                if (processor_.Process(p, out, *params, generation)) p = {out.y, out.uv, out.yStride, out.uvStride, p.width, p.height};
             }
             // Effects, exactly as IXC Camera applies them (in place on the processed frame).
             if (effects_ && effects_->Active()) {
@@ -214,8 +236,7 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
                         memcpy(uvDst + static_cast<size_t>(y) * p.width, p.uv + static_cast<size_t>(y) * p.uvStride, static_cast<size_t>(p.width));
                     p = {processed_.data(), uvDst, p.width, p.width, p.width, p.height};
                 }
-                face::FaceSnapshot snap;
-                if (effects_->needsFaces) face_.Snapshot(now, snap);
+                if (effects_->needsFaces && !(autoFraming_ && params)) face_.Snapshot(now, snap);
                 effects::FrameContext ctx;
                 ctx.faces = &snap;
                 ctx.fullRange = YuvFormatFor(layout_).fullRange;
@@ -223,10 +244,7 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
                     seg_.Snapshot(segMask_);
                     ctx.mask = &segMask_;
                 }
-                if (pipeline_) {
-                    ctx.map = {static_cast<float>(pipeline_->srcX), static_cast<float>(pipeline_->srcY), static_cast<float>(pipeline_->srcW),
-                               static_cast<float>(pipeline_->srcH), pipeline_->mirror};
-                }
+                ctx.map = shownMap_;
                 const processing::Nv12Frame fx{processed_.data(), processed_.data() + static_cast<size_t>(p.width) * p.height, p.width, p.width,
                                                p.width, p.height};
                 renderer_.Apply(fx, *effects_, ctx);

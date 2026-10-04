@@ -43,6 +43,7 @@ enum PanelId : int {
     kIdFaceTracking,
     kIdFaceMarkers,
     kIdGpu,
+    kIdAutoFraming,
     kIdVcamStatus = 290,
     kIdVcamUse,
 };
@@ -107,7 +108,7 @@ private:
     HWND effectsMaster_ = nullptr, effectsAllOff_ = nullptr;
     std::vector<HWND> effectToggles_, effectSliders_;
     std::vector<int> effectStrength_;  // last strength per effect (restored when switched back on)
-    HWND smooth_ = nullptr, face_ = nullptr, faceMarkers_ = nullptr, gpu_ = nullptr;
+    HWND smooth_ = nullptr, face_ = nullptr, faceMarkers_ = nullptr, gpu_ = nullptr, autoFraming_ = nullptr;
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
     bool faceOverlay_ = true;
     int contentHeight_ = 0, scroll_ = 0, width_ = 0;

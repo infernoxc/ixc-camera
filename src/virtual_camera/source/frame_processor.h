@@ -14,6 +14,7 @@
 
 #include "camera/smooth_motion.h"
 #include "effects/effects.h"
+#include "face/auto_framer.h"
 #include "face/face_engine.h"
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
@@ -106,6 +107,9 @@ private:
     std::mutex segMu_;
     seg::SegmentationEngine seg_;
     seg::SegMask segMask_;
+
+    // Auto-framing: moves the pipeline's source rectangle to follow the face (frame thread only).
+    face::AutoFramer framer_;
 
     // Effects (Phase 8): compiled config swapped under mu_; the renderer is frame-thread only.
     std::shared_ptr<const effects::EffectConfig> effects_;

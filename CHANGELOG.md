@@ -7,6 +7,7 @@
   - Background Blur defocuses everything behind you. The blur is mask-weighted, so your outline doesn't leave a halo in the blurred background. Strength sets the blur radius.
   - Studio Backdrop replaces the background with a soft, neutral studio gradient (opaque from 60% strength).
   - Both follow crop, zoom and mirror, fade in over a few frames, and appear in the app's Effects card and in IXC Camera.
+- **Auto-framing** (Camera features, off by default): IXC Camera zooms and pans smoothly to keep your face framed (head and shoulders, face ≈30% of the picture height, at most 2.5× digital zoom). It works inside your own crop/zoom, ignores small head movements, eases instead of jumping, and returns to your view 2 s after it loses your face. It turns face tracking on while enabled. `face/auto_framer` is pure logic with tests (`test_auto_framer.cpp`).
 - `src/segmentation`: MediaPipe's Selfie Segmentation model (Apache 2.0) converted to C++ data (`scripts/convert-selfie-model.py`) and run by IXC's own SSE2 kernels. There is no inference runtime and no model file. It runs on a below-normal-priority worker thread within a CPU budget (25% of one core, at most 30 masks/s), only while a background effect is on, and uses ~2.7 MB. On a CPU too slow for that it parks itself, and the background effects switch off.
 - The preview status line shows the segmentation rate and cost ("background: 20/s, 12 ms").
 - `ixc_probe --bench-effects` times the background effects with a person mask and reports the segmentation network's cost.

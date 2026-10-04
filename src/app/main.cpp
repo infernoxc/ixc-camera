@@ -410,10 +410,12 @@ void MainWindow::RefreshFeatureStates() {
                                  return info && info->needsFace;
                              });
     std::wstring face;
-    if (!profile_.faceTracking.enabled && !faceEffects) {
+    const bool neededBy = (faceEffects || profile_.autoFraming) && !profile_.faceTracking.enabled;
+    const wchar_t* neededFor = faceEffects ? L"a face effect" : L"auto-framing";
+    if (!profile_.faceTracking.enabled && !faceEffects && !profile_.autoFraming) {
         face = L"Off: not running";
     } else if (!previewing_) {
-        face = faceEffects && !profile_.faceTracking.enabled ? L"Needed by a face effect · runs with the camera" : L"On · runs with the camera";
+        face = neededBy ? std::wstring(L"Needed by ") + neededFor + L" · runs with the camera" : std::wstring(L"On · runs with the camera");
     } else {
         const face::EngineStatus fs = preview_.FaceStatus();
         wchar_t b[160];
@@ -423,7 +425,7 @@ void MainWindow::RefreshFeatureStates() {
             swprintf_s(b, L"%hs", fs.state == face::EngineState::Searching ? "Searching for a face" : face::ToString(fs.state));
         }
         face = b;
-        if (faceEffects && !profile_.faceTracking.enabled) face += L" · for a face effect";
+        if (neededBy) face += std::wstring(L" · for ") + neededFor;
     }
     panel_.SetFaceTrackingState(face);
     panel_.SetGpuState(profile_.gpu == GpuMode::Off ? L"Off: CPU only"
@@ -937,7 +939,8 @@ void MainWindow::UpdatePipeline() {
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
-    if (profile_.faceTracking.enabled || effectsNeedFaces) {
+    preview_.SetAutoFraming(profile_.autoFraming);
+    if (profile_.faceTracking.enabled || profile_.autoFraming || effectsNeedFaces) {
         const face::EngineConfig fc = face::EngineConfigFor(profile_);
         preview_.SetFaceTracking(&fc);
     } else {
