@@ -7,6 +7,7 @@
   - Background Blur defocuses everything behind you. The blur is mask-weighted, so your outline doesn't leave a halo in the blurred background. Strength sets the blur radius.
   - Studio Backdrop replaces the background with a soft, neutral studio gradient (opaque from 60% strength).
   - Both follow crop, zoom and mirror, fade in over a few frames, and appear in the app's Effects card and in IXC Camera.
+- **Face stickers: Shades, Heart Eyes, Crown and Puppy** (ears and nose). Original vector artwork drawn in code (no image files), anchored to the eyes and nose. They scale with the face, tilt with the head, follow mirror and zoom, and fade in and out with face tracking. Several can be combined. Strength sets opacity (fully opaque from 70%).
 - **Auto-framing** (Camera features, off by default): IXC Camera zooms and pans smoothly to keep your face framed (head and shoulders, face ≈30% of the picture height, at most 2.5× digital zoom). It works inside your own crop/zoom, ignores small head movements, eases instead of jumping, and returns to your view 2 s after it loses your face. It turns face tracking on while enabled. `face/auto_framer` is pure logic with tests (`test_auto_framer.cpp`).
 - `src/segmentation`: MediaPipe's Selfie Segmentation model (Apache 2.0) converted to C++ data (`scripts/convert-selfie-model.py`) and run by IXC's own SSE2 kernels. There is no inference runtime and no model file. It runs on a below-normal-priority worker thread within a CPU budget (25% of one core, at most 30 masks/s), only while a background effect is on, and uses ~2.7 MB. On a CPU too slow for that it parks itself, and the background effects switch off.
 - The preview status line shows the segmentation rate and cost ("background: 20/s, 12 ms").
@@ -14,6 +15,7 @@
 - Tests: `test_segmentation.cpp` (network output against values from the reference TFLite runtime, colour sampling, the engine's thread and memory lifecycle) and background-effect tests (mask, mirror and zoom mapping, no-mask fallback, no per-frame allocation).
 
 ### Fixed
+- `tests/ui_smoke.ps1` addressed effect switches by fixed positions; it now finds them by id, so new effects don't shift its checks.
 - **Portrait now blurs and mutes the background's colour, not only its brightness.** The low-resolution colour background was computed every frame but never applied, so colour edges stayed sharp behind the subject. Adds the chroma pass (half the luma cost).
 - **Blush Tone skin smoothing fades in at the intended rate.** The face fade was applied twice to the smoothing (it ramped in late and dropped sharply on tracking hiccups).
 

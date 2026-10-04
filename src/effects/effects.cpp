@@ -1,5 +1,7 @@
 #include "effects/effects.h"
 
+#include "effects/stickers.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -16,6 +18,10 @@ const std::vector<EffectInfo> kCatalog = {
      "fades in with the first person mask (~0.1 s); off if the CPU is too slow for segmentation"},
     {"background.studio", L"Studio Backdrop", "background", false, true, false, Cost::Moderate,
      "fades in with the first person mask (~0.1 s); off if the CPU is too slow for segmentation"},
+    {"sticker.shades", L"Shades", "sticker", true, false, true, Cost::Low, "fades out without a face; box estimates without landmarks"},
+    {"sticker.hearts", L"Heart Eyes", "sticker", true, false, true, Cost::Low, "fades out without a face; box estimates without landmarks"},
+    {"sticker.crown", L"Crown", "sticker", true, false, true, Cost::Low, "fades out without a face; box estimates without landmarks"},
+    {"sticker.puppy", L"Puppy", "sticker", true, false, true, Cost::Low, "fades out without a face; box estimates without landmarks"},
     {"portrait.soft", L"Portrait", "portrait", true, false, false, Cost::Moderate, "uses a centred subject when no face is tracked"},
     {"color.warm", L"Warm Glow", "color", false, false, false, Cost::VeryLow, "none needed"},
     {"color.cool", L"Cool Breeze", "color", false, false, false, Cost::VeryLow, "none needed"},
@@ -101,6 +107,7 @@ std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry
         else if (id == "background.blur") faceStrength[1] = s;
         else if (id == "portrait.soft") faceStrength[2] = s;
         else if (id == "beauty.basic") faceStrength[3] = s;
+        else if (id.starts_with("sticker.")) continue;  // added below, in drawing order
         else if (id == "blush.tone") {
             faceStrength[4] = s;
             // Global grade of the look (measured curve, defined on video-range levels).
@@ -136,6 +143,20 @@ std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry
     }
     for (int i = 0; i < 5; ++i) {
         if (faceStrength[i] > 0) cfg->faceEffects.push_back({order[i], faceStrength[i]});
+    }
+    // Stickers last, on top of everything: head pieces first, then eyewear.
+    constexpr struct {
+        const char* id;
+        stickers::Id sticker;
+    } kStickers[] = {{"sticker.puppy", stickers::Id::Puppy},
+                     {"sticker.crown", stickers::Id::Crown},
+                     {"sticker.shades", stickers::Id::Shades},
+                     {"sticker.hearts", stickers::Id::HeartEyes}};
+    for (const auto& k : kStickers) {
+        for (const EffectEntry& e : effects) {
+            const float st = static_cast<float>(std::clamp(e.strength, 0.0, 100.0) / 100.0);
+            if (e.id == k.id && st > 0) cfg->faceEffects.push_back({Kind::Sticker, st, static_cast<int>(k.sticker)});
+        }
     }
     for (const auto& e : cfg->faceEffects) {
         const bool background = e.kind == Kind::BackgroundBlur || e.kind == Kind::BackgroundStudio;
@@ -304,6 +325,19 @@ void EffectRenderer::Beauty(const processing::Nv12Frame& f, float a, float radiu
             row[x] = Clamp8(row[x] + diff * 0.85f * keep * m + 3 * m);  // smooth + a touch of glow
         }
     }
+}
+
+// Stickers: anchored to the eyes and nose of the tracked face, fading with its presence. Opacity
+// follows the strength slider (fully opaque from 70%).
+void EffectRenderer::Sticker(const processing::Nv12Frame& f, int variant, float a, bool fullRange) {
+    const float opacity = std::min(1.0f, a / 0.7f) * presence_;
+    if (!face_.valid || opacity < 0.01f || face_.eyeDist < 6) return;
+    stickers::Anchor anchor;
+    const bool swap = face_.eyeL.x > face_.eyeR.x;  // mirrored output: keep the sticker upright
+    anchor.eyeLeft = swap ? face_.eyeR : face_.eyeL;
+    anchor.eyeRight = swap ? face_.eyeL : face_.eyeR;
+    anchor.nose = face_.nose;
+    stickers::Draw(f, static_cast<stickers::Id>(variant), anchor, opacity, fullRange);
 }
 
 // Low-resolution copy of the frame (1/8 luma, same grid for chroma), 4 samples per block.
@@ -650,6 +684,7 @@ void EffectRenderer::Apply(const processing::Nv12Frame& frame, const EffectConfi
             case Kind::Blush: Blush(frame, e.strength); break;
             case Kind::BackgroundBlur:
             case Kind::BackgroundStudio: Background(frame, ctx, e.kind, e.strength); break;
+            case Kind::Sticker: Sticker(frame, e.variant, e.strength, ctx.fullRange); break;
             case Kind::Grade: break;
         }
     }

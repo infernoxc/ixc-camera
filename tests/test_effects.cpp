@@ -286,3 +286,66 @@ IXC_TEST(Effects_BackgroundFollowsMirrorAndZoom) {
     IXC_CHECK_EQ(f.Y(150, 90), b.Y(150, 90));
     IXC_CHECK(Detail(f, 300, 80) < Detail(b, 300, 80) * 0.5);
 }
+
+IXC_TEST(Effects_StickersFollowTheFace) {
+    auto cfg = One("sticker.shades");
+    IXC_CHECK(cfg->Active() && cfg->needsFaces && !cfg->grade && !cfg->needsSegmentation);  // no full-frame pass
+    const face::FaceSnapshot snap = FaceAt(0.4f, 0.3f, 0.2f);  // eyes at x 0.46/0.54, y 0.38 of 320x180
+    EffectRenderer r;
+    Frame f(320, 180, 150, 128);
+    for (int i = 0; i < 20; ++i) {  // presence fade-in
+        Frame g(320, 180, 150, 128);
+        r.Apply(g.View(), *cfg, {&snap, {}, false});
+        f = g;
+    }
+    const int eyeY = static_cast<int>(0.38f * 180);
+    IXC_CHECK(f.Y(static_cast<int>(0.46f * 320), eyeY) < 60);   // dark lens over the left eye
+    IXC_CHECK(f.Y(static_cast<int>(0.54f * 320), eyeY) < 60);   // and the right eye
+    IXC_CHECK_EQ(f.Y(10, 10), 150);                             // far away: untouched
+    IXC_CHECK_EQ(f.Y(160, 170), 150);
+    // Without a face nothing is drawn.
+    EffectRenderer none;
+    Frame g(320, 180, 150, 128);
+    for (int i = 0; i < 5; ++i) none.Apply(g.View(), *cfg, {nullptr, {}, false});
+    IXC_CHECK(g.buf == Frame(320, 180, 150, 128).buf);
+}
+
+IXC_TEST(Effects_StickersTiltWithTheHead) {
+    face::FaceSnapshot snap = FaceAt(0.4f, 0.3f, 0.2f);
+    auto& lm = snap.faces[0].lm;
+    lm.leftEye = {0.45f, 0.33f};  // head tilted: right eye lower (in the image)
+    lm.rightEye = {0.55f, 0.45f};
+    EffectRenderer r;
+    Frame f(320, 180, 150, 128);
+    for (int i = 0; i < 20; ++i) {
+        Frame g(320, 180, 150, 128);
+        r.Apply(g.View(), *One("sticker.hearts"), {&snap, {}, false});
+        f = g;
+    }
+    // Hearts sit on each (tilted) eye: red raises V there.
+    IXC_CHECK(f.V(static_cast<int>(0.45f * 320), static_cast<int>(0.33f * 180)) > 150);
+    IXC_CHECK(f.V(static_cast<int>(0.55f * 320), static_cast<int>(0.45f * 180)) > 150);
+    // Where an untilted sticker would put the right heart (level with the left eye): nothing.
+    IXC_CHECK(f.V(static_cast<int>(0.57f * 320), static_cast<int>(0.30f * 180)) < 140);
+}
+
+IXC_TEST(Effects_StickersAboveTheHeadAndMirrored) {
+    const face::FaceSnapshot snap = FaceAt(0.1f, 0.4f, 0.2f);  // face at the source's left, eyes y 0.48
+    EffectRenderer r;
+    Frame f(320, 180, 150, 128);
+    for (int i = 0; i < 20; ++i) {
+        Frame g(320, 180, 150, 128);
+        r.Apply(g.View(), *One("sticker.crown"), {&snap, {0, 0, 1, 1, true}, false});  // mirrored output
+        f = g;
+    }
+    // Mirrored: the face is on the output's right; the crown is drawn above it (gold: low U).
+    int goldRight = 0, goldLeft = 0;
+    for (int y = 0; y < 80; y += 2)
+        for (int x = 0; x < 320; x += 2) (x >= 160 ? goldRight : goldLeft) += f.U(x, y) < 100;
+    IXC_CHECK(goldRight > 20 && goldLeft == 0);
+    // Nothing below the eyes.
+    int below = 0;
+    for (int y = 100; y < 180; y += 2)
+        for (int x = 0; x < 320; x += 2) below += f.U(x, y) != 128;
+    IXC_CHECK_EQ(below, 0);
+}
