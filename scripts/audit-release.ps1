@@ -56,7 +56,8 @@ Check (-not $hits) ("no secrets in tracked files" + $(if ($hits) { ": $($hits | 
 Check (-not (git -C $root ls-files | Where-Object { $_ -match '\.(pfx|pem|key|env)$|\.log$' })) 'no key, env or log files tracked'
 
 "== vendored code"
-Check ((Get-Content (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Raw) -match 'libfacedetection') 'every vendored component is in THIRD_PARTY_LICENSES.md'
+$licenses = Get-Content (Join-Path $root 'THIRD_PARTY_LICENSES.md') -Raw
+Check (($licenses -match 'libfacedetection') -and ($licenses -match 'MediaPipe Selfie Segmentation')) 'every vendored component is in THIRD_PARTY_LICENSES.md'
 
 ""
 if ($failures) { "AUDIT: FAIL ($failures)"; exit 1 } else { 'AUDIT: PASS' }

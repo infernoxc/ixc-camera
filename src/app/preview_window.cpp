@@ -28,6 +28,7 @@ processing::YuvFormat YuvFormatFor(const camera::FrameLayout& l) {
 
 PreviewWindow::~PreviewWindow() {
     face_.Stop();
+    seg_.Stop();
     if (facePen_) DeleteObject(facePen_);
     if (landmarkPen_) DeleteObject(landmarkPen_);
 }
@@ -131,6 +132,7 @@ void PreviewWindow::Clear(const wchar_t* placeholder) {
     std::vector<std::uint8_t>().swap(processed_);
     processor_.ReleaseGpu();
     face_.Stop();  // no preview: no tracking
+    seg_.Stop();   // nor segmentation
     ++pipelineGeneration_;
     bgraW_ = bgraH_ = 0;
     wcsncpy_s(placeholder_, placeholder ? placeholder : L"", _TRUNCATE);
@@ -185,6 +187,12 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
             // Face tracking samples the camera frame (source coordinates), before processing.
             const double now = face::FaceEngine::NowMs();
             if (face_.WantsFrame(now)) face_.OnFrame(p, YuvFormatFor(layout_), now, 33.3);
+            // Segmentation runs only while a background effect is on (started here, on demand).
+            const bool wantSeg = effects_ && effects_->Active() && effects_->needsSegmentation;
+            if (wantSeg && !seg_.Running()) seg_.Start();
+            else if (!wantSeg && seg_.Running()) seg_.Stop();
+            const double segNow = seg::SegmentationEngine::NowMs();
+            if (seg_.WantsFrame(segNow)) seg_.OnFrame(p, YuvFormatFor(layout_), segNow);
 
             // Apply IXC's pipeline at full resolution first (exactly what apps receive).
             if (pipeline_ && !pipeline_->identity) {
@@ -211,6 +219,10 @@ bool PreviewWindow::ConvertHeldFrame(int dstW, int dstH) {
                 effects::FrameContext ctx;
                 ctx.faces = &snap;
                 ctx.fullRange = YuvFormatFor(layout_).fullRange;
+                if (effects_->needsSegmentation) {
+                    seg_.Snapshot(segMask_);
+                    ctx.mask = &segMask_;
+                }
                 if (pipeline_) {
                     ctx.map = {static_cast<float>(pipeline_->srcX), static_cast<float>(pipeline_->srcY), static_cast<float>(pipeline_->srcW),
                                static_cast<float>(pipeline_->srcH), pipeline_->mirror};

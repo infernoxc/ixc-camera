@@ -185,3 +185,104 @@ IXC_TEST(Effects_MasterSwitchDisablesAll) {
     const ProfileLoadResult r = ProfileFromJson(ProfileToJson(p));
     IXC_CHECK(r.ok && !r.profile.effectsEnabled && r.profile.effects.size() == 2);  // list kept
 }
+
+namespace {
+// Person mask: a centred rectangle (x 0.35..0.65 of the source width), everything else background.
+seg::SegMask CentreMask() {
+    seg::SegMask m;
+    m.generation = 1;
+    m.value.assign(static_cast<size_t>(seg::kMaskW) * seg::kMaskH, 0);
+    for (int y = 0; y < seg::kMaskH; ++y)
+        for (int x = seg::kMaskW * 35 / 100; x < seg::kMaskW * 65 / 100; ++x) m.value[static_cast<size_t>(y) * seg::kMaskW + x] = 255;
+    return m;
+}
+Frame Textured(int w, int h) {
+    Frame f(w, h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) f.Y(x, y) = static_cast<std::uint8_t>(40 + std::rand() % 160);
+    for (int y = 0; y < h; y += 2)
+        for (int x = 0; x < w; x += 2) f.U(x, y) = static_cast<std::uint8_t>(80 + std::rand() % 96);
+    return f;
+}
+double Detail(Frame& fr, int x0, int y0) {
+    double s = 0;
+    for (int y = y0; y < y0 + 10; ++y)
+        for (int x = x0; x < x0 + 10; ++x) s += std::abs(fr.Y(x + 1, y) - fr.Y(x, y));
+    return s;
+}
+}  // namespace
+
+IXC_TEST(Effects_BackgroundBlurUsesPersonMask) {
+    auto cfg = One("background.blur");
+    IXC_CHECK(cfg->Active() && cfg->needsSegmentation && !cfg->needsFaces);
+    const seg::SegMask mask = CentreMask();
+    EffectRenderer r;
+    Frame f = Textured(320, 180);
+    const Frame before = f;
+    for (int i = 0; i < 20; ++i) {  // let the fade-in complete
+        f = before;
+        r.Apply(f.View(), *cfg, {nullptr, {}, false, &mask});
+    }
+    Frame b = before;
+    IXC_CHECK_EQ(f.Y(160, 90), b.Y(160, 90));                   // person untouched
+    IXC_CHECK_EQ(f.U(160, 90), b.U(160, 90));
+    IXC_CHECK(Detail(f, 10, 10) < Detail(b, 10, 10) * 0.5);      // background blurred
+    IXC_CHECK(Detail(f, 290, 150) < Detail(b, 290, 150) * 0.5);
+    const size_t scratch = r.ScratchBytes();
+    f = before;
+    r.Apply(f.View(), *cfg, {nullptr, {}, false, &mask});
+    IXC_CHECK_EQ(r.ScratchBytes(), scratch);  // no per-frame growth
+}
+
+IXC_TEST(Effects_BackgroundWithoutMaskLeavesFrame) {
+    EffectRenderer r;
+    Frame f = Textured(320, 180);
+    const Frame before = f;
+    r.Apply(f.View(), *One("background.blur"), {nullptr, {}, false, nullptr});
+    seg::SegMask empty;  // generation 0: no mask yet
+    r.Apply(f.View(), *One("background.studio"), {nullptr, {}, false, &empty});
+    IXC_CHECK(f.buf == before.buf);
+}
+
+IXC_TEST(Effects_StudioBackdropReplacesBackground) {
+    const seg::SegMask mask = CentreMask();
+    EffectRenderer r;
+    Frame f = Textured(320, 180);
+    const Frame before = f;
+    for (int i = 0; i < 20; ++i) {
+        f = before;
+        r.Apply(f.View(), *One("background.studio", 100), {nullptr, {}, false, &mask});
+    }
+    Frame b = before;
+    IXC_CHECK_EQ(f.Y(160, 90), b.Y(160, 90));          // person untouched
+    IXC_CHECK(Detail(f, 10, 10) < Detail(b, 10, 10) * 0.05);  // background: smooth backdrop, no texture left
+    IXC_CHECK(f.Y(20, 8) > f.Y(20, 170));               // lighter at the top
+    IXC_CHECK(std::abs(f.U(20, 90) - 126) <= 3);        // near-neutral colour
+}
+
+IXC_TEST(Effects_BackgroundFollowsMirrorAndZoom) {
+    // Person in the source's left third; mirrored output must keep the right third sharp instead.
+    seg::SegMask mask;
+    mask.generation = 1;
+    mask.value.assign(static_cast<size_t>(seg::kMaskW) * seg::kMaskH, 0);
+    for (int y = 0; y < seg::kMaskH; ++y)
+        for (int x = 0; x < seg::kMaskW / 3; ++x) mask.value[static_cast<size_t>(y) * seg::kMaskW + x] = 255;
+    EffectRenderer r;
+    Frame f = Textured(320, 180);
+    const Frame before = f;
+    for (int i = 0; i < 20; ++i) {
+        f = before;
+        r.Apply(f.View(), *One("background.blur"), {nullptr, {0, 0, 1, 1, true}, false, &mask});
+    }
+    Frame b = before;
+    IXC_CHECK_EQ(f.Y(300, 90), b.Y(300, 90));                // mirrored person: right side untouched
+    IXC_CHECK(Detail(f, 20, 80) < Detail(b, 20, 80) * 0.5);  // left side is background now
+    // Zoomed to the source's left half (no mirror): the left two thirds of the output are person.
+    EffectRenderer z;
+    for (int i = 0; i < 20; ++i) {
+        f = before;
+        z.Apply(f.View(), *One("background.blur"), {nullptr, {0, 0, 0.5f, 1, false}, false, &mask});
+    }
+    IXC_CHECK_EQ(f.Y(150, 90), b.Y(150, 90));
+    IXC_CHECK(Detail(f, 300, 80) < Detail(b, 300, 80) * 0.5);
+}

@@ -91,6 +91,7 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
         smooth_.Begin(ks_.Get(), smoothEnabled_ && nv12_, nominalFps_);
     }
     UpdateFaceTracking();
+    UpdateSegmentation();
 
     // Watch the settings folder while streaming only (thread-pool wait, no polling).
     const auto dir = ActiveProfileDirectory();
@@ -115,6 +116,7 @@ void FrameProcessor::EndSession() {
         wait_ = nullptr;
     }
     StopFaceTracking();
+    StopSegmentation();
     int smoothExposure = 0;
     double smoothEv = 0;
     int smoothReasserts = 0;
@@ -178,6 +180,36 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
         }
     }
     self->UpdateFaceTracking();  // face tracking switched on/off or reconfigured
+    self->UpdateSegmentation();  // a background effect switched on/off
+}
+
+void FrameProcessor::UpdateSegmentation() {
+    bool want = false;
+    {
+        std::lock_guard lock(mu_);
+        want = effects_ && effects_->needsSegmentation && nv12_ && type_ != nullptr;
+    }
+    {
+        std::lock_guard sl(segMu_);
+        if (want == seg_.Running()) return;
+    }
+    if (!want) {
+        StopSegmentation();
+        return;
+    }
+    std::lock_guard sl(segMu_);
+    const bool started = seg_.Start();
+    IXC_TRACE("SegmentationStart", TraceLoggingBoolean(started, "started"));
+}
+
+void FrameProcessor::StopSegmentation() {
+    std::lock_guard sl(segMu_);
+    if (!seg_.Running()) return;
+    const seg::SegStatus s = seg_.Status();
+    seg_.Stop();
+    IXC_TRACE("Segmentation", TraceLoggingString(seg::ToString(s.state), "state"), TraceLoggingUInt64(s.masks, "masks"),
+              TraceLoggingFloat64(s.avgRunMs, "avgRunMs"), TraceLoggingFloat64(s.maxRunMs, "maxRunMs"),
+              TraceLoggingFloat64(s.avgStageMs, "avgStageMs"), TraceLoggingFloat64(s.masksPerSecond, "masksPerSecond"));
 }
 
 void FrameProcessor::UpdateFaceTracking() {
@@ -330,6 +362,33 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         }
     }
 
+    // Person segmentation: same pattern as face tracking (sampled only when a mask is due).
+    if (input) {
+        std::lock_guard sl(segMu_);
+        const double now = seg::SegmentationEngine::NowMs();
+        if (seg_.WantsFrame(now)) {
+            UINT32 w = 0, h = 0;
+            bool full = false;
+            {
+                std::lock_guard l2(mu_);
+                w = width_;
+                h = height_;
+                full = fullRange_;
+            }
+            ComPtr<IMFMediaBuffer> b;
+            if (SUCCEEDED(input->GetBufferByIndex(0, &b))) {
+                LockedNv12 frame(b.Get(), w, h, false);
+                if (frame.ok()) {
+                    processing::YuvFormat fmt = processing::DefaultYuvFormat(h);
+                    fmt.fullRange = full;
+                    const processing::Nv12Planes planes{frame.y(), frame.uv(), frame.pitch(), frame.pitch(), static_cast<int>(w & ~1u),
+                                                        static_cast<int>(h & ~1u)};
+                    seg_.OnFrame(planes, fmt, now);
+                }
+            }
+        }
+    }
+
     std::shared_ptr<const processing::PipelineParams> params;
     ComPtr<IMFMediaType> type;
     UINT32 width = 0, height = 0;
@@ -411,6 +470,10 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
                 effects::FrameContext ctx;
                 ctx.faces = &snap;
                 ctx.fullRange = fullRange_;
+                if (fx->needsSegmentation) {
+                    seg_.Snapshot(segMask_);  // copies only when a new mask exists
+                    ctx.mask = &segMask_;
+                }
                 if (!params->geometryIdentity) {
                     ctx.map = {static_cast<float>(params->srcX), static_cast<float>(params->srcY), static_cast<float>(params->srcW),
                                static_cast<float>(params->srcH), params->mirror};
