@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -39,6 +40,12 @@ struct EffectInfo {
 // Built-in catalog, in display order.
 const std::vector<EffectInfo>& Catalog();
 const EffectInfo* Find(std::string_view id);
+
+// "Next lens" (Snap-style cycling, hotkeys Ctrl+Alt+F7/F6): the catalog entry after (dir +1) or
+// before (dir -1) `current`, skipping effects already in `effects` other than `current` itself
+// (switched on by the user, so the cycle never touches them). Returns "" for "no lens", which
+// sits between the last and the first entry.
+std::string NextLens(std::string_view current, int dir, const std::vector<EffectEntry>& effects);
 
 enum class Kind { Blush, Beauty, Portrait, Grade, BackgroundBlur, BackgroundStudio, Sticker };
 

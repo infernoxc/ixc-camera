@@ -166,6 +166,7 @@ private:
     AppSettings app_;
     std::string stem_ = "default";  // active profile file
     bool hotkeysRegistered_ = false;
+    std::string cycledLens_;  // the effect the lens hotkeys added last ("" = none); only it is replaced
     vcam::Status vcam_;
     HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
     HANDLE vcamWait_ = nullptr;
@@ -623,6 +624,7 @@ void MainWindow::SwitchProfile(const std::string& stem) {
         RefreshProfileList();
         return;
     }
+    cycledLens_.clear();  // a different effect list: the lens hotkeys start afresh
     if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // keep the old profile's last change
     // The camera and format in use stay as they are; everything else comes from the profile.
     Profile next = r.profile;
@@ -732,14 +734,15 @@ void MainWindow::ExportProfile() {
 
 // Global hotkeys (RegisterHotKey: no keyboard hook, no polling). Ctrl+Alt combinations so plain
 // F-keys stay free for games; they work while the IXC app runs, even minimized.
-enum HotkeyId { kHkEffects = 1, kHkNextProfile, kHkPrevProfile, kHkMirror };
+enum HotkeyId { kHkEffects = 1, kHkNextProfile, kHkPrevProfile, kHkMirror, kHkNextLens, kHkPrevLens };
 
 void MainWindow::RegisterHotkeys() {
     UnregisterHotkeys();
     if (!app_.hotkeysEnabled) return;
     const struct { int id; UINT vk; const wchar_t* name; } keys[] = {
         {kHkEffects, VK_F8, L"Ctrl+Alt+F8"}, {kHkNextProfile, VK_F9, L"Ctrl+Alt+F9"},
-        {kHkPrevProfile, VK_F10, L"Ctrl+Alt+F10"}, {kHkMirror, VK_F11, L"Ctrl+Alt+F11"}};
+        {kHkPrevProfile, VK_F10, L"Ctrl+Alt+F10"}, {kHkMirror, VK_F11, L"Ctrl+Alt+F11"},
+        {kHkNextLens, VK_F7, L"Ctrl+Alt+F7"}, {kHkPrevLens, VK_F6, L"Ctrl+Alt+F6"}};
     std::wstring taken;
     for (const auto& k : keys) {
         if (!RegisterHotKey(hwnd_, k.id, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, k.vk)) taken += (taken.empty() ? L"" : L", ") + std::wstring(k.name);
@@ -750,7 +753,7 @@ void MainWindow::RegisterHotkeys() {
 
 void MainWindow::UnregisterHotkeys() {
     if (!hotkeysRegistered_) return;
-    for (int id = kHkEffects; id <= kHkMirror; ++id) UnregisterHotKey(hwnd_, id);
+    for (int id = kHkEffects; id <= kHkPrevLens; ++id) UnregisterHotKey(hwnd_, id);
     hotkeysRegistered_ = false;
 }
 
@@ -767,6 +770,24 @@ void MainWindow::OnHotkey(int id) {
             profile_.mirror = !profile_.mirror;
             panel_.Refresh();
             break;
+        case kHkNextLens:
+        case kHkPrevLens: {
+            // Snap-style lens cycling. Only the lens these hotkeys added is replaced: effects
+            // switched on by hand stay as they are (and are skipped by the cycle).
+            auto& fx = profile_.effects;
+            const std::string next = effects::NextLens(cycledLens_, id == kHkNextLens ? 1 : -1, fx);
+            fx.erase(std::remove_if(fx.begin(), fx.end(), [&](const EffectEntry& e) { return !cycledLens_.empty() && e.id == cycledLens_; }),
+                     fx.end());
+            cycledLens_ = next;
+            if (!next.empty() && fx.size() < kMaxEnabledEffects) {
+                fx.push_back({next, 70});
+                profile_.effectsEnabled = true;
+            }
+            const effects::EffectInfo* info = effects::Find(next);
+            SetHint((std::wstring(L"Lens: ") + (info ? info->name : L"none") + L"  (Ctrl+Alt+F7 next, Ctrl+Alt+F6 previous)").c_str());
+            panel_.Refresh();
+            break;
+        }
         default: return;
     }
     UpdatePipeline();

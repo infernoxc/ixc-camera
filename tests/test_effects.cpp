@@ -349,3 +349,23 @@ IXC_TEST(Effects_StickersAboveTheHeadAndMirrored) {
         for (int x = 0; x < 320; x += 2) below += f.U(x, y) != 128;
     IXC_CHECK_EQ(below, 0);
 }
+
+IXC_TEST(Effects_NextLensCyclesAndSkipsUserEffects) {
+    const auto& cat = Catalog();
+    const std::vector<EffectEntry> none;
+    IXC_CHECK_EQ(NextLens("", 1, none), std::string(cat.front().id));     // from "no lens" to the first
+    IXC_CHECK_EQ(NextLens("", -1, none), std::string(cat.back().id));     // backwards: the last
+    IXC_CHECK_EQ(NextLens(cat.back().id, 1, none), std::string());        // after the last: no lens
+    IXC_CHECK_EQ(NextLens(cat.front().id, -1, none), std::string());
+    IXC_CHECK_EQ(NextLens(cat[0].id, 1, none), std::string(cat[1].id));
+    // Effects the user switched on are skipped; the current lens itself is not "the user's".
+    const std::vector<EffectEntry> user = {{cat[1].id, 70}, {cat[2].id, 50}, {cat[0].id, 70}};
+    IXC_CHECK_EQ(NextLens(cat[0].id, 1, user), std::string(cat[3].id));
+    const std::vector<EffectEntry> user2 = {{cat[1].id, 70}, {cat[2].id, 50}, {cat[3].id, 70}};  // cat[3] = the current lens
+    IXC_CHECK_EQ(NextLens(cat[3].id, -1, user2), std::string(cat[0].id));
+    IXC_CHECK_EQ(NextLens("unknown.id", 1, none), std::string(cat.front().id));  // unknown: treated as no lens
+    // Every effect switched on by the user: nothing to cycle.
+    std::vector<EffectEntry> all;
+    for (const auto& e : cat) all.push_back({e.id, 70});
+    IXC_CHECK_EQ(NextLens("", 1, all), std::string());
+}

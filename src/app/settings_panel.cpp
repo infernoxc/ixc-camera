@@ -76,7 +76,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     profileImport_ = button(kIdProfileImport, L"Import…", ButtonStyle::Secondary);
     profileExport_ = button(kIdProfileExport, L"Export…", ButtonStyle::Secondary);
     profileDelete_ = button(kIdProfileDelete, L"Delete", ButtonStyle::Danger);
-    hotkeys_ = toggle(kIdHotkeys, L"Global hotkeys", L"Ctrl+Alt+F8 effects · F9/F10 profile · F11 mirror");
+    hotkeys_ = toggle(kIdHotkeys, L"Global hotkeys", L"Ctrl+Alt+F6/F7 lens · F8 effects · F9/F10 profile · F11 mirror");
 
     // Picture
     reset_ = button(kIdPictureReset, L"Reset", ButtonStyle::Ghost);
