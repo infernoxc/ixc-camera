@@ -35,6 +35,7 @@ Details are in [docs/build.md](docs/build.md).
 - [Performance measurements](docs/performance.md)
 - [Compatibility](docs/compatibility.md)
 - [Face tracking design and benchmark](docs/face-tracking-design.md)
+- [Person segmentation model](third_party/mediapipe_selfie_segmenter/README.IXC.md)
 - [Security audit](docs/security-audit.md)
 - [Release notes 0.9.0](docs/release-notes-0.9.0.md)
 - [Known limitations](KNOWN_LIMITATIONS.md)

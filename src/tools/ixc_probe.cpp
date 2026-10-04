@@ -1481,7 +1481,8 @@ int ApplyEffectsToBmp(const Options& o) {
     return 0;
 }
 
-// Per-effect cost on a synthetic textured frame with a face (no camera needed).
+// Per-effect cost on a synthetic textured frame with a face and a person mask (no camera needed),
+// then the segmentation network's own cost (it runs on a worker thread, a few times per second).
 int BenchEffects() {
     std::printf("%-16s %10s %10s %10s\n", "effect", "720p ms", "1080p ms", "scratch KB");
     const face::FaceSnapshot snap = [] {
@@ -1493,6 +1494,11 @@ int BenchEffects() {
         f.landmarksValid = true;
         return s;
     }();
+    seg::SegMask mask;  // person: the centre third of the frame
+    mask.generation = 1;
+    mask.value.assign(static_cast<size_t>(seg::kMaskW) * seg::kMaskH, 0);
+    for (int y = seg::kMaskH / 5; y < seg::kMaskH; ++y)
+        for (int x = seg::kMaskW / 3; x < seg::kMaskW * 2 / 3; ++x) mask.value[static_cast<size_t>(y) * seg::kMaskW + x] = 255;
     std::vector<std::string> ids;
     for (const auto& e : effects::Catalog()) ids.push_back(e.id);
     ids.push_back("all");
@@ -1515,6 +1521,7 @@ int BenchEffects() {
             effects::EffectRenderer r;
             effects::FrameContext ctx;
             ctx.faces = &snap;
+            ctx.mask = &mask;
             for (int i = 0; i < 10; ++i) r.Apply(fr, *cfg, ctx);  // warm-up + face fade-in
             LARGE_INTEGER f0, t0, t1;
             QueryPerformanceFrequency(&f0);
@@ -1527,6 +1534,23 @@ int BenchEffects() {
         }
         std::printf("%-16s %10.2f %10.2f %10.1f\n", id.c_str(), ms[0], ms[1], scratch / 1024.0);
     }
+    // Segmentation network (worker thread, not per frame): median of 15 runs on a 720p frame.
+    std::vector<std::uint8_t> frame(1280 * 720 * 3 / 2, 128);
+    for (size_t i = 0; i < 1280 * 720; ++i) frame[i] = static_cast<std::uint8_t>(60 + (i * 2654435761u >> 26) % 120);
+    const processing::Nv12Planes planes{frame.data(), frame.data() + 1280 * 720, 1280, 1280, 1280, 720};
+    std::vector<double> runs;
+    std::vector<std::uint8_t> out;
+    for (int i = 0; i < 15; ++i) {
+        double ms = 0;
+        if (!seg::SegmentationEngine::SegmentOnce(planes, {}, out, &ms)) {
+            std::printf("segmentation: unavailable\n");
+            return 1;
+        }
+        runs.push_back(ms);
+    }
+    std::sort(runs.begin(), runs.end());
+    std::printf("segmentation network: median %.1f ms, max %.1f ms per mask (worker thread; at a 25%% CPU budget: %.0f masks/s)\n",
+                runs[runs.size() / 2], runs.back(), std::min(30.0, 250.0 / runs[runs.size() / 2]));
     return 0;
 }
 

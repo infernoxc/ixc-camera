@@ -7,3 +7,5 @@ IXC Camera — Copyright (c) 2026 IXC Camera contributors. Licensed under the MI
 "Lenovo" is a trademark of Lenovo. It's mentioned only to identify test hardware.
 
 This product includes libfacedetection (https://github.com/ShiqiYu/libfacedetection), Copyright (c) 2015-2019, Shiqi Yu, used under the BSD 3-Clause License (see THIRD_PARTY_LICENSES.md).
+
+This product includes the MediaPipe Selfie Segmentation model (landscape), Copyright Google LLC, used under the Apache License 2.0 (see THIRD_PARTY_LICENSES.md). IXC converted its weights into C++ data and runs them with its own code.

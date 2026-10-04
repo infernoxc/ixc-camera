@@ -47,6 +47,7 @@
 - No measurements exist yet on Ultra Low / Low hardware. All numbers come from the developer's Ryzen system.
 
 ## Effects
-- Portrait is an approximation without segmentation: the subject is an ellipse around the tracked head and shoulders, so hands, hair and objects outside it are blurred too. It is the most expensive effect (~6 ms per 1080p frame on the reference Ryzen; expect 2–4× that on low-end CPUs). Prefer 720p on weak PCs.
+- **Background Blur and Studio Backdrop** find the person with a small on-device network (MediaPipe Selfie Segmentation, 256×144). The mask is coarser than the video: edges are soft (≈7 px at 1080p), fine hair and fingers can be missed, and objects held close may count as background. People further than ~4 m away, or several people at different distances, may be segmented partly. The mask is a few frames behind fast movement (it's computed 10–30 times per second on a worker thread, not for every frame). On a CPU too slow for 4 masks per second within its budget, the background effects switch themselves off ("background: off (CPU too slow)" in the app). Measured cost: see docs/performance.md (not yet measured on Windows hardware).
+- Portrait is an approximation without segmentation: the subject is an ellipse around the tracked head and shoulders, so hands, hair and objects outside it are blurred too. Prefer Background Blur. It is the most expensive effect (~6 ms per 1080p frame on the reference Ryzen; expect 2–4× that on low-end CPUs). Prefer 720p on weak PCs.
 - Effects add their processing time to the latency (all effects at 1080p: +8–9 ms).
 - Blush and Beauty follow the largest face only.

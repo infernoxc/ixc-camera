@@ -997,6 +997,13 @@ void MainWindow::UpdateStatus() {
         swprintf_s(b, L"  ·  face: %hs %d", face::ToString(fs.state), fs.faces);
         s += b;
     }
+    const seg::SegStatus ss = preview_.SegmentationStatus();
+    if (ss.state == seg::SegState::Running && ss.masks > 0) {
+        swprintf_s(b, L"  ·  background: %.0f/s, %.0f ms", ss.masksPerSecond, ss.avgRunMs);
+        s += b;
+    } else if (ss.state == seg::SegState::TooSlow) {
+        s += L"  ·  background: off (CPU too slow)";
+    }
     SetWindowTextW(status_, s.c_str());
 
     if (st.underSpeed) {

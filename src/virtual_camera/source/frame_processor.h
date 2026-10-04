@@ -18,6 +18,7 @@
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
 #include "profiles/profile.h"
+#include "segmentation/segmentation_engine.h"
 
 #include <mfapi.h>
 #include <mfidl.h>
@@ -97,6 +98,14 @@ private:
     face::FaceEngine face_;
     face::EngineConfig faceConfig_;  // under faceMu_
     double frameIntervalMs_ = 33.3;  // under mu_
+
+    // Person segmentation (only while a background effect is on: then one worker thread, ~3 MB).
+    // segMu_ is taken alone, like faceMu_. segMask_ is the frame thread's copy of the latest mask.
+    void UpdateSegmentation();
+    void StopSegmentation();
+    std::mutex segMu_;
+    seg::SegmentationEngine seg_;
+    seg::SegMask segMask_;
 
     // Effects (Phase 8): compiled config swapped under mu_; the renderer is frame-thread only.
     std::shared_ptr<const effects::EffectConfig> effects_;

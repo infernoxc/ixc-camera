@@ -103,9 +103,22 @@ else()
     target_compile_definitions(ixc_face PUBLIC IXC_FACE_TRACKING=0)
 endif()
 
+# ixc_segmentation: person segmentation for the background effects. MediaPipe's selfie segmenter
+# (Apache-2.0, third_party/mediapipe_selfie_segmenter) is compiled in as data and run by IXC's own
+# kernels: no model file, no runtime library, nothing loaded from disk.
+file(SHA256 ${CMAKE_SOURCE_DIR}/third_party/mediapipe_selfie_segmenter/selfie_segmenter_landscape.inc IXC_SEG_MODEL_SHA)
+if(NOT IXC_SEG_MODEL_SHA STREQUAL "beec5241486c2ad93a96ddd79a6aec6ccadce64d85657c2d48254a579d55b4b4")
+    message(FATAL_ERROR "third_party/mediapipe_selfie_segmenter/selfie_segmenter_landscape.inc differs from the pinned file "
+                        "(see third_party/mediapipe_selfie_segmenter/README.IXC.md).")
+endif()
+add_library(ixc_segmentation STATIC
+    segmentation/selfie_net.cpp
+    segmentation/segmentation_engine.cpp)
+target_link_libraries(ixc_segmentation PUBLIC ixc_processing)
+
 # ixc_effects: built-in IXC effects applied to the processed frame (Phase 8).
 add_library(ixc_effects STATIC effects/effects.cpp)
-target_link_libraries(ixc_effects PUBLIC ixc_face)
+target_link_libraries(ixc_effects PUBLIC ixc_face ixc_segmentation)
 
 add_subdirectory(virtual_camera)
 add_subdirectory(app)

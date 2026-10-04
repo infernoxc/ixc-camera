@@ -20,7 +20,8 @@ Re-run with `scripts/audit-release.ps1 -BuildDir build/release` (exit 0 = pass).
 
 ## Source
 - **Secret scan** of all tracked files (AWS/GitHub/Slack tokens, private keys, password/API-key assignments): no findings. No key, env or log files are tracked.
-- **Vendored code:** libfacedetection only, pinned; SHA-256 is verified at configure time; licence in THIRD_PARTY_LICENSES.md and shipped with the installer.
+- **Vendored code:** libfacedetection, pinned; SHA-256 is verified at configure time; licence in THIRD_PARTY_LICENSES.md and shipped with the installer.
+- **Vendored data:** the MediaPipe Selfie Segmentation weights, converted to a C++ include (`third_party/mediapipe_selfie_segmenter`); SHA-256 verified at configure time. It's a fixed operation list run by IXC's kernels. No model file, runtime or external data is read.
 - **Static analysis** (MSVC `/analyze`, all IXC code, vendored code excluded): 13 warnings, none an actual defect:
   - 3 null-pointer warnings after a successful `GetAllocatedString` / `GetModuleHandle` (not null by API contract). Explicit guards were added anyway: `device_enum.cpp`, `activate.cpp` (camera service), `setup.cpp`.
   - 4 ignored return values of best-effort cleanup (`UnregisterWaitEx`, `CoInitializeEx`): intentional.
