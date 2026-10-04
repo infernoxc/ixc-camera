@@ -11,8 +11,10 @@ namespace {
 ViewRect ClampInside(ViewRect r, const ViewRect& base) {
     r.w = std::min(r.w, base.w);
     r.h = std::min(r.h, base.h);
-    r.x = std::clamp(r.x, base.x, base.x + base.w - r.w);
-    r.y = std::clamp(r.y, base.y, base.y + base.h - r.h);
+    // max(): when r is as large as base, base.x + base.w - r.w can round to just below base.x,
+    // and std::clamp requires lo <= hi.
+    r.x = std::clamp(r.x, base.x, std::max(base.x, base.x + base.w - r.w));
+    r.y = std::clamp(r.y, base.y, std::max(base.y, base.y + base.h - r.h));
     return r;
 }
 
