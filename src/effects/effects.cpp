@@ -79,6 +79,24 @@ const EffectInfo* Find(std::string_view id) {
     return nullptr;
 }
 
+std::string NextLens(std::string_view current, int dir, const std::vector<EffectEntry>& effects) {
+    // Positions 0..n-1 are catalog entries, n is "no lens".
+    const int n = static_cast<int>(kCatalog.size());
+    int pos = n;
+    for (int i = 0; i < n; ++i) {
+        if (current == kCatalog[static_cast<size_t>(i)].id) pos = i;
+    }
+    const int step = dir < 0 ? n : 1;  // n == -1 modulo n + 1
+    for (int k = 0; k <= n; ++k) {
+        pos = (pos + step) % (n + 1);
+        if (pos == n) return {};
+        const std::string_view id = kCatalog[static_cast<size_t>(pos)].id;
+        const bool userOwned = id != current && std::any_of(effects.begin(), effects.end(), [&](const EffectEntry& e) { return e.id == id; });
+        if (!userOwned) return std::string(id);
+    }
+    return {};
+}
+
 std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry>& effects, bool fullRange) {
     auto cfg = std::make_shared<EffectConfig>();
     for (int i = 0; i < 256; ++i) {

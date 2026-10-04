@@ -43,7 +43,8 @@
 
 ## Not yet implemented (later phases)
 - Effect packages from disk (built-in effects only so far); per-effect strength (one shared strength slider).
-- Hotkeys work only while the IXC app is running (IXC Camera itself keeps working without it). They are fixed (Ctrl+Alt+F8–F11) and can be turned off, not remapped. There is no "next effect" hotkey yet.
+- Hotkeys work only while the IXC app is running (IXC Camera itself keeps working without it). They are fixed (Ctrl+Alt+F6–F11) and can be turned off, not remapped.
+- The lens hotkeys (Ctrl+Alt+F7 next, F6 previous) cycle through every built-in effect, one at a time. They replace only the effect they added themselves, at 70% strength, and skip effects you switched on by hand.
 - Profiles are listed by file name (lowercase, spaces become dashes).
 - The installer isn't code-signed yet (SmartScreen warns about an unknown publisher). `scripts/install-ixc.ps1` remains the development installer.
 - Code signing.

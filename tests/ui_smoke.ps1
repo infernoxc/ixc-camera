@@ -281,6 +281,16 @@ try {
     $pub = Published
     Check ($pub -match '"effectsEnabled": true' -and $pub -match '"mirror": true' -and (Checked (P $IdMirror))) 'Ctrl+Alt+F8 back on; Ctrl+Alt+F11 mirror (switch follows)'
     [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]4, [IntPtr]::Zero) | Out-Null
+    # Lens hotkeys (Ctrl+Alt+F7 next = id 5, F6 previous = id 6): one cycled effect, replaced each time.
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]5, [IntPtr]::Zero) | Out-Null
+    $pub = Published
+    Check ($pub.Contains('"' + $effectIds[0] + '"') -and (Checked (P $IdEffect0))) 'Ctrl+Alt+F7: first lens on (published, switch follows)'
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]5, [IntPtr]::Zero) | Out-Null
+    $pub = Published
+    Check ($pub.Contains('"' + $effectIds[1] + '"') -and -not $pub.Contains('"' + $effectIds[0] + '"')) 'Ctrl+Alt+F7 again: next lens replaces it'
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]6, [IntPtr]::Zero) | Out-Null
+    [Ui]::PostMessageW($hwnd, $WM_HOTKEY, [IntPtr]6, [IntPtr]::Zero) | Out-Null
+    Check ((Published) -match '"effects": \[\]') 'Ctrl+Alt+F6 twice: back to no lens'
     $idx = [int][Ui]::SendMessageW($combo, 0x0158, [IntPtr](-1), (New-Object Text.StringBuilder $original))
     [Ui]::SendMessageW($combo, 0x014E, [IntPtr]$idx, [IntPtr]::Zero) | Out-Null
     [Ui]::SendMessageW($content, 0x0111, [IntPtr]($IdProfile -bor (1 -shl 16)), $combo) | Out-Null
