@@ -216,6 +216,15 @@ bool ParsePerformanceTier(std::string_view s, PerformanceTier& out) {
     return false;
 }
 
+std::string_view ToString(ProcessingMode m) {
+    switch (m) {
+        case ProcessingMode::Auto: return "auto";
+        case ProcessingMode::Cpu: return "cpu";
+        case ProcessingMode::Gpu: return "gpu";
+    }
+    return "auto";
+}
+
 std::string_view ToString(AntiFlicker a) {
     switch (a) {
         case AntiFlicker::Auto: return "auto";
@@ -395,7 +404,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
 
     static constexpr const char* kKnown[] = {"schemaVersion", "name", "sourceCameraId", "width", "height", "fpsNumerator",
                                              "fpsDenominator", "mirror", "zoom", "crop", "image", "effects",
-                                             "faceTracking", "performanceTier", "gpu", "smoothMotion", "autoFraming", "effectsEnabled",
+                                             "faceTracking", "performanceTier", "gpu", "processing", "smoothMotion", "autoFraming", "effectsEnabled",
                                              "hotkeys", "background", "antiFlicker"};
     for (const auto& [k, v] : doc.AsObject()) {
         if (std::find(std::begin(kKnown), std::end(kKnown), k) == std::end(kKnown)) {
@@ -481,10 +490,14 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
         }
     }
 
-    if (const json::Value* g = r.Get("gpu")) {
-        if (g->IsString() && g->AsString() == "off") p.gpu = GpuMode::Off;
-        else if (g->IsString() && g->AsString() == "auto") p.gpu = GpuMode::Auto;
+    if (const json::Value* g = r.Get("gpu"); g && !r.Get("processing")) {  // 0.11: "auto" | "off"
+        if (g->IsString() && g->AsString() == "off") p.processing = ProcessingMode::Cpu;
+        else if (g->IsString() && g->AsString() == "auto") p.processing = ProcessingMode::Auto;
         else w.push_back("gpu: expected \"auto\" or \"off\", using \"auto\"");
+    }
+    {
+        static constexpr const char* kModes[] = {"auto", "cpu", "gpu"};
+        ReadEnum(r, "processing", p.processing, kModes);
     }
 
     if (const json::Value* hk = r.Get("hotkeys")) {
@@ -548,7 +561,7 @@ std::string ProfileToJson(const Profile& p) {
                                       {"maxFaces", p.faceTracking.maxFaces},
                                       {"detectionIntervalFrames", p.faceTracking.detectionIntervalFrames}}},
         {"performanceTier", std::string(ToString(p.tier))},
-        {"gpu", p.gpu == GpuMode::Off ? "off" : "auto"},
+        {"processing", std::string(ToString(p.processing))},
         {"smoothMotion", p.smoothMotion},
         {"antiFlicker", std::string(ToString(p.antiFlicker))},
         {"autoFraming", p.autoFraming},

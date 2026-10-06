@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <memory>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,6 +24,14 @@ const char* ToString(SegState s) {
         case SegState::Unavailable: return "unavailable";
     }
     return "?";
+}
+
+void SegmentationEngine::SetMode(ProcessingMode mode) {
+    if (mode_.exchange(static_cast<int>(mode)) != static_cast<int>(mode)) modeVersion_.fetch_add(1);
+}
+
+void SegmentationEngine::SetGpuFactory(GpuRunnerFactory factory) {
+    if (gpuFactory_.exchange(factory) != factory) modeVersion_.fetch_add(1);
 }
 
 double SegmentationEngine::NowMs() {
@@ -189,7 +199,6 @@ void SegmentationEngine::Worker() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     SetThreadDescription(GetCurrentThread(), L"IXC segmentation");
 #endif
-    SelfieNet net;
     MaskRefiner refiner;
     std::vector<std::uint8_t> working;  // the mask being built, swapped in under the lock
     try {
@@ -197,7 +206,64 @@ void SegmentationEngine::Worker() {
     } catch (const std::bad_alloc&) {
         working.clear();
     }
-    if (working.empty() || !net.Init() || !refiner.Init(kNetW, kNetH, kMaskW, kMaskH)) {
+
+    // The network runner, chosen by the processing mode (re-chosen when the mode changes).
+    std::unique_ptr<NetRunner> runner;
+    std::string gpuNote;
+    enum class Auto { MeasureCpu, MeasureGpu, Decided } autoPhase = Auto::Decided;
+    double sumMs = 0, cpuAvg = 0;
+    int measured = 0;
+    unsigned seenVersion = ~0u;
+    ProcessingMode mode = ProcessingMode::Auto;
+    auto useCpu = [&] {
+        if (runner && runner->Backend() == SegBackend::Cpu) return true;
+        runner.reset();  // free the GPU runner first
+        runner = MakeCpuRunner();
+        return runner != nullptr;
+    };
+    auto useGpu = [&] {
+        if (runner && runner->Backend() == SegBackend::Gpu) return true;
+        const GpuRunnerFactory factory = gpuFactory_.load();
+        if (!factory) {
+            gpuNote = "GPU path not available here";
+            return false;
+        }
+        runner.reset();
+        std::string err;
+        runner = factory(err);
+        if (!runner) gpuNote = err.empty() ? "GPU unavailable" : err;
+        return runner != nullptr;
+    };
+    auto publish = [&] {  // status after a runner change
+        std::lock_guard lock(mu_);
+        status_.backend = runner ? runner->Backend() : SegBackend::None;
+        status_.device = runner ? runner->Device() : std::string();
+        status_.gpuNote = gpuNote;
+        status_.memoryBytes = (runner ? runner->MemoryBytes() : 0) + refiner.MemoryBytes() + rgb_.capacity() + guide_.capacity() +
+                              mask_.capacity() + working.capacity();
+    };
+    auto choose = [&] {  // returns false when not even the CPU runner can be made
+        seenVersion = modeVersion_.load();
+        mode = static_cast<ProcessingMode>(mode_.load());
+        gpuNote.clear();
+        autoPhase = Auto::Decided;
+        bool ok;
+        switch (mode) {
+            case ProcessingMode::Gpu: ok = useGpu() || useCpu(); break;
+            case ProcessingMode::Cpu: ok = useCpu(); break;
+            case ProcessingMode::Auto:
+            default:
+                ok = useCpu();
+                autoPhase = gpuFactory_.load() ? Auto::MeasureCpu : Auto::Decided;
+                measured = 0;
+                sumMs = 0;
+                break;
+        }
+        publish();
+        return ok;
+    };
+
+    if (working.empty() || !refiner.Init(kNetW, kNetH, kMaskW, kMaskH) || !choose()) {
         std::lock_guard lock(mu_);
         status_.state = SegState::Unavailable;
         return;  // busy_ stays true: frames are never staged
@@ -205,7 +271,6 @@ void SegmentationEngine::Worker() {
     {
         std::lock_guard lock(mu_);
         status_.state = SegState::Running;
-        status_.memoryBytes = net.MemoryBytes() + refiner.MemoryBytes() + rgb_.capacity() + guide_.capacity() + mask_.capacity() + working.capacity();
     }
     busy_.store(false, std::memory_order_release);
 
@@ -219,13 +284,67 @@ void SegmentationEngine::Worker() {
             pending_ = false;
             stagedAt = stagedAtMs_;
         }
+        if (modeVersion_.load() != seenVersion && !choose()) {
+            std::lock_guard lock(mu_);
+            status_.state = SegState::Unavailable;
+            break;
+        }
         const double t0 = NowMs();
-        RgbToInput(rgb_.data(), net.Input());
-        const float* p = net.Run();
+        RgbToInput(rgb_.data(), runner->Input());
+        const float* p = runner->Run();
+        if (!p && runner->Backend() == SegBackend::Gpu) {
+            // The GPU failed (driver reset, device removed): the CPU takes over until the mode
+            // is chosen again.
+            gpuNote = "GPU stopped working; using the CPU";
+            autoPhase = Auto::Decided;
+            if (useCpu()) {
+                RgbToInput(rgb_.data(), runner->Input());
+                p = runner->Run();
+            }
+            publish();
+        }
+        if (!p) {
+            std::lock_guard lock(mu_);
+            status_.state = SegState::Unavailable;
+            break;
+        }
+        const double netMs = NowMs() - t0;
         // Refinement and temporal smoothing work on `working`, which holds the previous mask
         // (the refiner forgets it at session start); the lock is held only for the copy.
         refiner.Refine(p, guide_.data(), working.data());
         const double runMs = NowMs() - t0;
+        const bool onGpu = runner->Backend() == SegBackend::Gpu;
+        // Auto (after refinement: p belongs to the runner): a few masks on each, then keep the GPU if it's at least about as fast. The first
+        // GPU run (shader and buffer warm-up) isn't counted.
+        if (autoPhase == Auto::MeasureCpu) {
+            sumMs += netMs;
+            if (++measured >= 6) {
+                cpuAvg = sumMs / measured;
+                measured = 0;
+                sumMs = 0;
+                if (useGpu()) {
+                    autoPhase = Auto::MeasureGpu;
+                    measured = -1;
+                } else {
+                    autoPhase = Auto::Decided;
+                    useCpu();
+                }
+                publish();
+            }
+        } else if (autoPhase == Auto::MeasureGpu) {
+            if (measured++ >= 0) sumMs += netMs;
+            if (measured >= 6) {
+                const double gpuAvg = sumMs / measured;
+                autoPhase = Auto::Decided;
+                if (gpuAvg > cpuAvg * 1.1) {
+                    char note[96];
+                    std::snprintf(note, sizeof note, "GPU slower here (%.1f vs %.1f ms): using the CPU", gpuAvg, cpuAvg);
+                    gpuNote = note;
+                    useCpu();
+                }
+                publish();
+            }
+        }
 
         std::lock_guard lock(mu_);
         std::copy(working.begin(), working.end(), mask_.begin());
@@ -235,6 +354,7 @@ void SegmentationEngine::Worker() {
         ++s.masks;
         s.avgRunMs += (runMs - s.avgRunMs) / static_cast<double>(s.masks);
         s.maxRunMs = std::max(s.maxRunMs, runMs);
+        s.avgNetMs = s.avgNetMs == 0 ? netMs : s.avgNetMs + (netMs - s.avgNetMs) * 0.1;
         const double now = NowMs();
         ++rateWindowCount_;
         if (now - rateWindowStart_ >= 2000) {
@@ -242,8 +362,10 @@ void SegmentationEngine::Worker() {
             rateWindowStart_ = now;
             rateWindowCount_ = 0;
         }
-        // Cadence: the next mask is due once the budget allows, but never faster than ~30/s.
-        const double interval = std::max(33.0, runMs / budget_);
+        // Cadence: the next mask is due once the CPU budget allows, but never faster than ~30/s.
+        // On the GPU the worker mostly waits for the GPU: only the refinement is CPU work.
+        const double cpuMs = onGpu ? runMs - netMs * 0.8 : runMs;
+        const double interval = std::max(33.0, cpuMs / budget_);
         if (interval > 250.0) {
             if (++tooSlowStreak >= 5) {  // 5 consecutive masks slower than 4/s within budget
                 s.state = SegState::TooSlow;

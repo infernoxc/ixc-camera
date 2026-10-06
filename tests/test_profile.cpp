@@ -33,7 +33,7 @@ Profile SampleProfile() {
     p.effects = {{"ixc.blush-tone", 40}, {"ixc.color.warm", 100}};
     p.faceTracking = {true, 2, 6};
     p.tier = PerformanceTier::UltraLow;
-    p.gpu = GpuMode::Off;
+    p.processing = ProcessingMode::Gpu;
     p.smoothMotion = false;
     p.antiFlicker = AntiFlicker::Hz60;
     p.autoFraming = true;
@@ -85,17 +85,25 @@ IXC_TEST(Profile_ClampsOutOfRangeValuesAndReportsThem) {
     IXC_CHECK(HasWarningContaining(r, "zoom"));
 }
 
-IXC_TEST(Profile_GpuModeDefaultsToAutoAndRejectsUnknown) {
+IXC_TEST(Profile_ProcessingModeDefaultsToAutoAndReadsOldGpuSetting) {
     ProfileLoadResult r = ProfileFromJson(R"({"schemaVersion": 1})");  // profile saved before the field existed
     IXC_REQUIRE(r.ok);
-    IXC_CHECK(r.profile.gpu == GpuMode::Auto);
+    IXC_CHECK(r.profile.processing == ProcessingMode::Auto);
     r = ProfileFromJson(R"({"schemaVersion": 1, "gpu": "turbo"})");
     IXC_REQUIRE(r.ok);
-    IXC_CHECK(r.profile.gpu == GpuMode::Auto);
+    IXC_CHECK(r.profile.processing == ProcessingMode::Auto);
     IXC_CHECK(HasWarningContaining(r, "gpu"));
-    r = ProfileFromJson(R"({"schemaVersion": 1, "gpu": "off"})");
+    r = ProfileFromJson(R"({"schemaVersion": 1, "gpu": "off"})");  // 0.11 "GPU off" = CPU only
     IXC_REQUIRE(r.ok);
-    IXC_CHECK(r.profile.gpu == GpuMode::Off);
+    IXC_CHECK(r.profile.processing == ProcessingMode::Cpu);
+    r = ProfileFromJson(R"({"schemaVersion": 1, "processing": "gpu"})");
+    IXC_REQUIRE(r.ok && r.warnings.empty());
+    IXC_CHECK(r.profile.processing == ProcessingMode::Gpu);
+    r = ProfileFromJson(R"({"schemaVersion": 1, "processing": "npu"})");
+    IXC_REQUIRE(r.ok);
+    IXC_CHECK(r.profile.processing == ProcessingMode::Auto);
+    IXC_CHECK(HasWarningContaining(r, "processing"));
+    IXC_CHECK(ProfileToJson(Profile{}).find("\"processing\": \"auto\"") != std::string::npos);
 }
 
 IXC_TEST(Profile_RejectsNewerSchema) {

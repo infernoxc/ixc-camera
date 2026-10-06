@@ -36,7 +36,8 @@ struct PipelineParams {
     // Source rectangle in normalized coordinates (after crop, zoom and aspect fitting).
     double srcX = 0, srcY = 0, srcW = 1, srcH = 1;
     bool geometryIdentity = true;
-    bool gpuAllowed = true;       // profile permits GPU use where it's measured to help
+    bool gpuAllowed = true;       // profile permits GPU use where it's measured to help (Auto)
+    bool gpuForced = false;       // profile asks for the GPU (Processing: GPU)
 };
 
 // The profile as actually applied while Smooth motion brightens the picture by `ev` stops in

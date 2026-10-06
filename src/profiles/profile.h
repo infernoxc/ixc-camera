@@ -24,7 +24,12 @@ enum class PerformanceTier { Auto, UltraLow, Low, Balanced, High };
 
 // GPU use for processing. Auto = only where it's measured to help on this PC (see
 // processing/backend_selector.h); Off = always the CPU path.
-enum class GpuMode { Auto, Off };
+// Where the heavy work runs: the picture pipeline (processing/gpu) and the segmentation network
+// (segmentation/gpu). Auto measures on this PC and picks; Gpu uses the GPU whenever it works
+// (any Direct3D 11 GPU: NVIDIA, AMD or Intel) and falls back to the CPU if it doesn't; Cpu never
+// touches the GPU. Saved as "processing"; profiles from 0.11 used "gpu": "auto" | "off".
+enum class ProcessingMode { Auto, Cpu, Gpu };
+std::string_view ToString(ProcessingMode m);  // "auto", "cpu", "gpu"
 
 std::string_view ToString(PerformanceTier t);
 bool ParsePerformanceTier(std::string_view s, PerformanceTier& out);
@@ -114,7 +119,7 @@ struct Profile {
     BackgroundSettings background;
     FaceTrackingSettings faceTracking;
     PerformanceTier tier = PerformanceTier::Auto;
-    GpuMode gpu = GpuMode::Auto;
+    ProcessingMode processing = ProcessingMode::Auto;
     // Keep the camera at its full frame rate in low light (fixed exposure + brightness
     // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
     bool smoothMotion = true;

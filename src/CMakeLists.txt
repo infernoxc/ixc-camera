@@ -119,8 +119,28 @@ endif()
 add_library(ixc_segmentation STATIC
     segmentation/selfie_net.cpp
     segmentation/mask_refine.cpp
+    segmentation/net_runner.cpp
     segmentation/segmentation_engine.cpp)
 target_link_libraries(ixc_segmentation PUBLIC ixc_processing)
+
+# ixc_segmentation_gpu: the same network as Direct3D 11 compute kernels (any GPU vendor).
+set(IXC_SEG_SHADER_HEADERS)
+foreach(entry CSConv CSDwConv CSDeconv2x CSResize2x CSMean CSBinary CSActivate)
+    set(out ${IXC_SHADER_DIR}/Seg${entry}.h)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${IXC_SHADER_DIR}
+        COMMAND ${IXC_FXC} /nologo /T cs_5_0 /E ${entry} /O3 /WX /Fh ${out} /Vn g_Seg${entry} ${CMAKE_CURRENT_SOURCE_DIR}/segmentation/gpu/selfie_net.hlsl
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/segmentation/gpu/selfie_net.hlsl
+        COMMENT "Compiling shader Seg${entry}"
+        VERBATIM)
+    list(APPEND IXC_SEG_SHADER_HEADERS ${out})
+endforeach()
+add_library(ixc_segmentation_gpu STATIC
+    segmentation/gpu/gpu_selfie_net.cpp
+    ${IXC_SEG_SHADER_HEADERS})
+target_include_directories(ixc_segmentation_gpu PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(ixc_segmentation_gpu PUBLIC ixc_segmentation d3d11 dxgi)
 
 # ixc_effects: built-in IXC effects applied to the processed frame (Phase 8).
 add_library(ixc_effects STATIC

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 #include <new>
 
 namespace ixc::seg {
@@ -192,11 +193,32 @@ void Binary(const Op& op, const float* a, const float* b, float* out, bool mul) 
 
 }  // namespace
 
+ModelInfo Model() {
+    ModelInfo m;
+    m.ops = kOps;
+    m.opCount = std::size(kOps);
+    m.arenaFloats = kArenaFloats;
+    m.weightCount = kWeightCount;
+    m.inputOffset = kInputOffset;
+    m.outputOffset = kOutputOffset;
+    return m;
+}
+
+bool DecodeWeights(std::vector<float>& out) {
+    try {
+        out.resize(kWeightCount);
+    } catch (const std::bad_alloc&) {
+        out = {};
+        return false;
+    }
+    for (std::uint32_t i = 0; i < kWeightCount; ++i) out[i] = HalfToFloat(kWeightsF16[i]);
+    return true;
+}
+
 bool SelfieNet::Init() {
     if (Ready()) return true;
     try {
-        weights_.resize(kWeightCount);
-        for (std::uint32_t i = 0; i < kWeightCount; ++i) weights_[i] = HalfToFloat(kWeightsF16[i]);
+        if (!DecodeWeights(weights_)) throw std::bad_alloc();
         arena_.assign(kArenaFloats, 0.0f);
     } catch (const std::bad_alloc&) {
         weights_ = {};

@@ -2,6 +2,7 @@
 
 #include "face/face_settings.h"
 #include "profiles/active_profile.h"
+#include "segmentation/gpu/gpu_selfie_net.h"
 #include "virtual_camera/source/trace.h"
 
 #include <mferror.h>
@@ -190,12 +191,16 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
 
 void FrameProcessor::UpdateSegmentation() {
     bool want = false;
+    ProcessingMode mode = ProcessingMode::Auto;
     {
         std::lock_guard lock(mu_);
         want = effects_ && effects_->needsSegmentation && nv12_ && type_ != nullptr;
+        mode = profile_.processing;
     }
     {
         std::lock_guard sl(segMu_);
+        seg_.SetGpuFactory(&seg::MakeGpuRunner);
+        seg_.SetMode(mode);  // live: the worker switches between two masks
         if (want == seg_.Running()) return;
     }
     if (!want) {
@@ -212,7 +217,9 @@ void FrameProcessor::StopSegmentation() {
     if (!seg_.Running()) return;
     const seg::SegStatus s = seg_.Status();
     seg_.Stop();
-    IXC_TRACE("Segmentation", TraceLoggingString(seg::ToString(s.state), "state"), TraceLoggingUInt64(s.masks, "masks"),
+    IXC_TRACE("Segmentation", TraceLoggingString(seg::ToString(s.state), "state"), TraceLoggingString(seg::ToString(s.backend), "backend"),
+              TraceLoggingString(s.device.c_str(), "device"), TraceLoggingString(s.gpuNote.c_str(), "gpuNote"),
+              TraceLoggingFloat64(s.avgNetMs, "avgNetMs"), TraceLoggingUInt64(s.masks, "masks"),
               TraceLoggingFloat64(s.avgRunMs, "avgRunMs"), TraceLoggingFloat64(s.maxRunMs, "maxRunMs"),
               TraceLoggingFloat64(s.avgStageMs, "avgStageMs"), TraceLoggingFloat64(s.masksPerSecond, "masksPerSecond"));
 }

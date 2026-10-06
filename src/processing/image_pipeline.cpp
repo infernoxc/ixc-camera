@@ -111,7 +111,8 @@ PipelineParams CompileParams(const Profile& profile, std::uint32_t width, std::u
     p.mirror = profile.mirror;
     FitGeometry(profile, width, height, p);
     p.identity = p.lutIdentity && p.sharpenAmount == 0 && !p.mirror && p.geometryIdentity;
-    p.gpuAllowed = profile.gpu == GpuMode::Auto;
+    p.gpuAllowed = profile.processing != ProcessingMode::Cpu;
+    p.gpuForced = profile.processing == ProcessingMode::Gpu;
     return p;
 }
 

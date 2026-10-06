@@ -26,6 +26,18 @@ struct Op {
     int wOff, bOff;        // weight/bias offsets in the weight table (-1 when unused)
 };
 
+// The compiled-in model, for other runners of the same network (the Direct3D 11 one in
+// segmentation/gpu): the op list, arena layout and the weights decoded to float.
+struct ModelInfo {
+    const Op* ops = nullptr;
+    size_t opCount = 0;
+    size_t arenaFloats = 0;
+    size_t weightCount = 0;
+    std::uint32_t inputOffset = 0, outputOffset = 0;
+};
+ModelInfo Model();
+bool DecodeWeights(std::vector<float>& out);  // false when out of memory
+
 class SelfieNet {
 public:
     static constexpr int kWidth = 256, kHeight = 144;

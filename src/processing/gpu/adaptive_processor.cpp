@@ -69,8 +69,12 @@ void AdaptiveNv12Processor::PollInit() {
 bool AdaptiveNv12Processor::Process(const Nv12Planes& src, const Nv12Frame& dst, const PipelineParams& params, std::uint64_t generation) {
     if (generation != generation_) {
         generation_ = generation;
-        selector_.Reset(params.gpuAllowed && systemAllows_, !params.geometryIdentity,
-                        static_cast<std::uint64_t>(src.width) * static_cast<std::uint64_t>(src.height));
+        // GPU chosen by the user: honoured even on a low-memory PC (the user asked); Auto
+        // considers the GPU only where the memory is there.
+        const BackendSelector::Mode mode = params.gpuForced                       ? BackendSelector::Mode::Gpu
+                                           : params.gpuAllowed && systemAllows_ ? BackendSelector::Mode::Auto
+                                                                                : BackendSelector::Mode::Cpu;
+        selector_.Reset(mode, !params.geometryIdentity, static_cast<std::uint64_t>(src.width) * static_cast<std::uint64_t>(src.height));
     }
     if (initInFlight_) PollInit();
     if (selector_.TakeGpuRequest()) {

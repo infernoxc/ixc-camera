@@ -448,9 +448,9 @@ void MainWindow::RefreshFeatureStates() {
         if (neededBy) face += std::wstring(L" · for ") + neededFor;
     }
     panel_.SetFaceTrackingState(face);
-    panel_.SetGpuState(profile_.gpu == GpuMode::Off ? L"Off: CPU only"
-                                                    : (previewing_ ? L"Zoom only, when faster · now " + preview_.ProcessingBackend()
-                                                                   : std::wstring(L"Zoom only, when measured faster")));
+    panel_.SetGpuState(profile_.processing == ProcessingMode::Cpu ? L"Off: CPU only"
+                                                                  : (previewing_ ? L"Picture: " + preview_.ProcessingBackend()
+                                                                                 : std::wstring(L"Auto: measured on this PC")));
 }
 
 LRESULT MainWindow::ControlColor(HWND control, HDC dc) {
@@ -984,6 +984,7 @@ void MainWindow::UpdatePipeline() {
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
     preview_.SetAutoFraming(profile_.autoFraming);
+    preview_.SetProcessingMode(profile_.processing);
     if (profile_.faceTracking.enabled || profile_.autoFraming || effectsNeedFaces) {
         const face::EngineConfig fc = face::EngineConfigFor(profile_);
         preview_.SetFaceTracking(&fc);

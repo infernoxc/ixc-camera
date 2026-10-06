@@ -25,6 +25,8 @@
 #include "processing/gpu/gpu_pipeline.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
+#include "segmentation/gpu/gpu_selfie_net.h"
+#include "segmentation/selfie_net.h"
 
 #include <windows.h>
 #include <dshow.h>
@@ -57,7 +59,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects, ApplyEffects } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects, BenchSeg, ApplyEffects } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -89,6 +91,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--set-ae-priority") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.aePriority = std::atoi(v); }
         else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
         else if (a == "--bench-effects") o.mode = Options::Mode::BenchEffects;
+        else if (a == "--bench-seg") o.mode = Options::Mode::BenchSeg;
         else if (a == "--apply-effects") { const char* src = next(); const char* dst = next(); if (!src || !dst) return false; o.mode = Options::Mode::ApplyEffects; o.applyIn = src; o.applyOut = dst; }
         else if (a == "--effects") { const char* v = next(); if (!v) return false; o.applyEffects = v; }
         else if (a == "--strength") { const char* v = next(); if (!v) return false; o.applyStrength = std::atof(v); }
@@ -1484,6 +1487,42 @@ int ApplyEffectsToBmp(const Options& o) {
 
 // Per-effect cost on a synthetic textured frame with a face and a person mask (no camera needed),
 // then the segmentation network's own cost (it runs on a worker thread, a few times per second).
+// Segmentation network per mask: CPU (SelfieNet) and GPU (Direct3D 11, the default adapter).
+// Wall time per mask and the process CPU time it costs (the GPU path should cost little CPU).
+int BenchSeg() {
+    using namespace ixc::seg;
+    constexpr int kRuns = 60;
+    auto measure = [&](NetRunner& r, const char* label) {
+        float* in = r.Input();
+        for (int i = 0; i < kNetW * kNetH * 3; ++i) in[i] = static_cast<float>((i * 37) % 255) / 255.0f;
+        r.Run();  // warm-up (first GPU run uploads and compiles pipelines)
+        FILETIME c0, e0, k0, u0, c1, e1, k1, u1;
+        GetThreadTimes(GetCurrentThread(), &c0, &e0, &k0, &u0);
+        LARGE_INTEGER f, t0, t1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&t0);
+        for (int i = 0; i < kRuns; ++i) {
+            if (!r.Run()) {
+                std::printf("%-6s failed during the run\n", label);
+                return;
+            }
+        }
+        QueryPerformanceCounter(&t1);
+        GetThreadTimes(GetCurrentThread(), &c1, &e1, &k1, &u1);
+        auto u64 = [](FILETIME t) { return (static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+        const double wall = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f.QuadPart) / kRuns;
+        const double cpu = static_cast<double>((u64(k1) - u64(k0)) + (u64(u1) - u64(u0))) / 10000.0 / kRuns;
+        std::printf("%-6s %-44s %8.2f ms/mask wall %8.2f ms/mask CPU (this thread)  %6.1f MB\n", label, r.Device().c_str(), wall, cpu,
+                    static_cast<double>(r.MemoryBytes()) / 1048576.0);
+    };
+    std::printf("Segmentation network (256x144), %d masks each:\n", kRuns);
+    if (auto cpu = MakeCpuRunner()) measure(*cpu, "CPU");
+    std::string err;
+    if (auto gpu = MakeGpuRunner(err)) measure(*gpu, "GPU");
+    else std::printf("GPU    not used: %s\n", err.c_str());
+    return 0;
+}
+
 int BenchEffects() {
     std::printf("%-16s %10s %10s %10s\n", "effect", "720p ms", "1080p ms", "scratch KB");
     const face::FaceSnapshot snap = [] {
@@ -1803,6 +1842,7 @@ int main(int argc, char** argv) {
                 case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
                 case Options::Mode::BenchFace: rc = BenchFace(o); break;
                 case Options::Mode::BenchEffects: rc = BenchEffects(); break;
+                case Options::Mode::BenchSeg: rc = BenchSeg(); break;
                 case Options::Mode::ApplyEffects: rc = ApplyEffectsToBmp(o); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;

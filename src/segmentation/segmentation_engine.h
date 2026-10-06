@@ -16,13 +16,21 @@
 //   * The worker runs below normal priority within a CPU budget (fraction of one core). On a CPU
 //     too slow to produce at least 4 masks per second inside the budget, it parks itself (state
 //     TooSlow) and the background effects fall back to their no-mask behaviour.
+//   * The network runs on the CPU or the GPU (segmentation/net_runner.h) per the processing mode:
+//     Cpu: always the CPU. Gpu: the GPU when it works, else the CPU (the reason is reported).
+//     Auto: measures the CPU, then the GPU, and keeps the GPU if it's at least about as fast
+//     (it takes the work off the CPU). SetMode() switches live, between two masks; the runner
+//     that's no longer used is destroyed (its memory, including video memory, is freed).
 
 #include "processing/color.h"
+#include "profiles/profile.h"
+#include "segmentation/net_runner.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -42,6 +50,10 @@ struct SegStatus {
     double masksPerSecond = 0;
     std::uint64_t masks = 0;
     size_t memoryBytes = 0;
+    SegBackend backend = SegBackend::None;  // where the network runs now
+    std::string device;                     // "CPU" or the GPU adapter
+    double avgNetMs = 0;                    // network only (recent average)
+    std::string gpuNote;                    // why the GPU isn't used (fallback/measurement), "" if it is or wasn't wanted
 };
 
 // A mask in source-normalized coordinates (the camera frame before crop/zoom/mirror).
@@ -60,6 +72,9 @@ public:
 
     // cpuBudget: fraction of one core the worker may use (clamped to 0.05..0.6).
     bool Start(double cpuBudget = 0.25);
+    // Where the network runs (live). factory: how to make a GPU runner; null = CPU only.
+    void SetMode(ProcessingMode mode);
+    void SetGpuFactory(GpuRunnerFactory factory);
     void Stop();  // joins the worker and frees everything; idempotent
     bool Running() const { return running_.load(); }
 
@@ -90,6 +105,9 @@ private:
     std::atomic<bool> busy_{false};          // worker owns rgb_ while true
     std::atomic<double> nextDueMs_{0};
     double budget_ = 0.25;
+    std::atomic<int> mode_{static_cast<int>(ProcessingMode::Auto)};
+    std::atomic<unsigned> modeVersion_{0};
+    std::atomic<GpuRunnerFactory> gpuFactory_{nullptr};
 
     mutable std::mutex mu_;
     std::condition_variable cv_;

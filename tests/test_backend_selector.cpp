@@ -92,3 +92,44 @@ IXC_TEST(Selector_RuntimeFailureFallsBackToCpu) {
     IXC_CHECK(s.Current() == Backend::Cpu);
     IXC_CHECK(s.ShouldReleaseGpu());
 }
+
+IXC_TEST(Selector_GpuModeUsesGpuForAnyWorkAndKeepsIt) {
+    BackendSelector s;
+    s.Reset(BackendSelector::Mode::Gpu, /*geometry*/ false, 640ull * 360);  // colour only, small: still the GPU
+    IXC_CHECK(s.TakeGpuRequest());
+    IXC_CHECK(s.Current() == Backend::Cpu);  // until the GPU is ready
+    s.OnGpuReady(true);
+    IXC_CHECK(s.Current() == Backend::Gpu);
+    for (int i = 0; i < 40; ++i) s.OnGpuFrame(9.0);  // slower than a typical CPU: kept anyway
+    IXC_CHECK(s.state() == BackendSelector::State::Gpu);
+    IXC_CHECK(s.Current() == Backend::Gpu);
+    IXC_CHECK(s.GpuAvgMs() > 8.0);
+}
+
+IXC_TEST(Selector_GpuModeFallsBackAndRetriesOnlyWhenModeChanges) {
+    BackendSelector s;
+    s.Reset(BackendSelector::Mode::Gpu, true, 1920ull * 1080);
+    IXC_CHECK(s.TakeGpuRequest());
+    s.OnGpuReady(false);  // no usable GPU
+    IXC_CHECK(s.Current() == Backend::Cpu && s.GpuFailed());
+    s.Reset(BackendSelector::Mode::Gpu, true, 1920ull * 1080);  // new settings, same mode: no retry storm
+    IXC_CHECK(!s.TakeGpuRequest());
+    IXC_CHECK(s.Current() == Backend::Cpu);
+    s.Reset(BackendSelector::Mode::Cpu, true, 1920ull * 1080);
+    IXC_CHECK(!s.TakeGpuRequest());
+    s.Reset(BackendSelector::Mode::Gpu, true, 1920ull * 1080);  // chosen again: a new attempt
+    IXC_CHECK(s.TakeGpuRequest());
+    s.OnGpuReady(true);
+    s.OnGpuFailure();  // device removed mid-stream
+    IXC_CHECK(s.Current() == Backend::Cpu && s.state() == BackendSelector::State::CpuFinal);
+}
+
+IXC_TEST(Selector_CpuModeNeverTouchesGpu) {
+    BackendSelector s;
+    s.Reset(BackendSelector::Mode::Cpu, true, 3840ull * 2160);
+    for (int i = 0; i < 200; ++i) s.OnCpuFrame(40.0);  // very slow CPU: still CPU
+    IXC_CHECK(!s.TakeGpuRequest());
+    IXC_CHECK(s.Current() == Backend::Cpu);
+    IXC_CHECK(s.ShouldReleaseGpu());
+    IXC_CHECK(s.CpuAvgMs() > 30.0);
+}

@@ -13,6 +13,9 @@
 //   2. The CPU path is measured first; the GPU is tried only if the CPU is genuinely slow.
 //   3. The GPU is kept only if it's measurably faster; otherwise it's released for the session.
 //   4. Any GPU failure falls back to the CPU for the rest of the session.
+// That is the Auto processing mode. The user can also choose GPU (the GPU is brought up at once,
+// for any work and size, and kept even where it isn't faster; a failure still falls back to the
+// CPU) or CPU (the GPU is never touched). A failure is remembered until the mode changes.
 
 #include <cstdint>
 
@@ -30,12 +33,14 @@ public:
     };
 
     enum class State { Cpu, MeasuringCpu, GpuRequested, MeasuringGpu, Gpu, CpuFinal };
+    enum class Mode { Auto, Cpu, Gpu };
 
     BackendSelector() : BackendSelector(Config{}) {}
     explicit BackendSelector(Config c) : cfg_(c) {}
 
-    // New settings or a new session. eligible = GPU allowed && geometry work && size >= minPixels.
-    void Reset(bool gpuAllowed, bool geometryWork, std::uint64_t pixels);
+    // New settings or a new session. In Auto, eligible = geometry work && size >= minPixels.
+    void Reset(Mode mode, bool geometryWork, std::uint64_t pixels);
+    void Reset(bool gpuAllowed, bool geometryWork, std::uint64_t pixels) { Reset(gpuAllowed ? Mode::Auto : Mode::Cpu, geometryWork, pixels); }
 
     // Backend to use for the next frame.
     Backend Current() const { return state_ == State::MeasuringGpu || state_ == State::Gpu ? Backend::Gpu : Backend::Cpu; }
@@ -54,12 +59,14 @@ public:
     double CpuAvgMs() const { return cpuAvg_; }
     double GpuAvgMs() const { return gpuAvg_; }
     bool GpuFailed() const { return gpuFailed_; }
+    Mode mode() const { return mode_; }
 
 private:
     Config cfg_;
     State state_ = State::Cpu;
     bool requestPending_ = false;
-    bool gpuFailed_ = false;  // sticky for the session
+    bool gpuFailed_ = false;  // sticky until the mode changes
+    Mode mode_ = Mode::Auto;
     int count_ = 0;
     double sum_ = 0;
     double cpuAvg_ = 0, gpuAvg_ = 0;

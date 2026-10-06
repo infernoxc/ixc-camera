@@ -283,7 +283,7 @@ void SettingsPanel::Refresh() {
     if (!profile_) return;
     for (auto& s : sliders_) SendMessageW(s.wnd, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(s.get(*profile_) / s.scale)));
     SendMessageW(mirror_, BM_SETCHECK, profile_->mirror ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(gpu_, BM_SETCHECK, profile_->gpu == GpuMode::Auto ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(gpu_, BM_SETCHECK, profile_->processing != ProcessingMode::Cpu ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(smooth_, BM_SETCHECK, profile_->smoothMotion ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(autoFraming_, BM_SETCHECK, profile_->autoFraming ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -361,7 +361,7 @@ bool SettingsPanel::OnCommand(HWND control, int code) {
     const int id = GetDlgCtrlID(control);
     switch (id) {
         case kIdMirror: profile_->mirror = checked(mirror_); break;
-        case kIdGpu: profile_->gpu = checked(gpu_) ? GpuMode::Auto : GpuMode::Off; break;
+        case kIdGpu: profile_->processing = checked(gpu_) ? ProcessingMode::Auto : ProcessingMode::Cpu; break;
         case kIdSmoothMotion: profile_->smoothMotion = checked(smooth_); break;
         case kIdAutoFraming: profile_->autoFraming = checked(autoFraming_); break;
         case kIdFaceTracking: profile_->faceTracking.enabled = checked(face_); break;
