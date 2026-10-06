@@ -1,6 +1,7 @@
 #include "app/perf_monitor.h"
 
 #include <pdh.h>
+#include <pdhmsg.h>
 #include <psapi.h>
 
 #include <algorithm>
