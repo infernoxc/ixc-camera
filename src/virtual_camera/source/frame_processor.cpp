@@ -2,6 +2,7 @@
 
 #include "face/face_settings.h"
 #include "profiles/active_profile.h"
+#include "segmentation/gpu/gpu_selfie_net.h"
 #include "virtual_camera/source/trace.h"
 
 #include <mferror.h>
@@ -88,6 +89,9 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
         std::lock_guard lock(smoothMu_);
         std::lock_guard l2(mu_);
         smoothEnabled_ = profile_.smoothMotion;
+        // Anti-flicker first: the camera's auto exposure (which Smooth motion observes) follows it.
+        // The app publishes Auto already resolved for the user's region; Auto here = leave as is.
+        powerLine_.Apply(ks_.Get(), profile_.antiFlicker);
         smooth_.Begin(ks_.Get(), smoothEnabled_ && nv12_, nominalFps_);
     }
     UpdateFaceTracking();
@@ -127,6 +131,7 @@ void FrameProcessor::EndSession() {
         smoothEv = smooth_.CompensationEv();
         smoothReasserts = smooth_.Reasserts();
         smoothRestore = smooth_.End();  // gives the camera its automatic exposure back
+        powerLine_.Apply(nullptr, AntiFlicker::Auto);  // and its own power-line setting
     }
     ks_.Reset();
     if (change_ != INVALID_HANDLE_VALUE) {
@@ -170,6 +175,7 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
         // Smooth motion switched on/off mid-session: restart it (turning it off restores auto exposure).
         std::lock_guard lock(self->smoothMu_);
         std::lock_guard l2(self->mu_);
+        if (self->profile_.antiFlicker != self->powerLine_.applied()) self->powerLine_.Apply(self->ks_.Get(), self->profile_.antiFlicker);
         if (self->smoothSettingChanged_) {
             self->smoothSettingChanged_ = false;
             self->smooth_.End();
@@ -185,12 +191,16 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
 
 void FrameProcessor::UpdateSegmentation() {
     bool want = false;
+    ProcessingMode mode = ProcessingMode::Auto;
     {
         std::lock_guard lock(mu_);
         want = effects_ && effects_->needsSegmentation && nv12_ && type_ != nullptr;
+        mode = profile_.processing;
     }
     {
         std::lock_guard sl(segMu_);
+        seg_.SetGpuFactory(&seg::MakeGpuRunner);
+        seg_.SetMode(mode);  // live: the worker switches between two masks
         if (want == seg_.Running()) return;
     }
     if (!want) {
@@ -207,7 +217,9 @@ void FrameProcessor::StopSegmentation() {
     if (!seg_.Running()) return;
     const seg::SegStatus s = seg_.Status();
     seg_.Stop();
-    IXC_TRACE("Segmentation", TraceLoggingString(seg::ToString(s.state), "state"), TraceLoggingUInt64(s.masks, "masks"),
+    IXC_TRACE("Segmentation", TraceLoggingString(seg::ToString(s.state), "state"), TraceLoggingString(seg::ToString(s.backend), "backend"),
+              TraceLoggingString(s.device.c_str(), "device"), TraceLoggingString(s.gpuNote.c_str(), "gpuNote"),
+              TraceLoggingFloat64(s.avgNetMs, "avgNetMs"), TraceLoggingUInt64(s.masks, "masks"),
               TraceLoggingFloat64(s.avgRunMs, "avgRunMs"), TraceLoggingFloat64(s.maxRunMs, "maxRunMs"),
               TraceLoggingFloat64(s.avgStageMs, "avgStageMs"), TraceLoggingFloat64(s.masksPerSecond, "masksPerSecond"));
 }
@@ -255,9 +267,12 @@ void FrameProcessor::ReloadSettings() {
     // Parsing (a few KB of strictly validated JSON) happens here, never on the frame path.
     bool missing = false;
     ProfileLoadResult r = LoadActiveProfile(&missing);
+    // The background picture is read from disk here (settings thread), outside the frame lock.
+    std::shared_ptr<const effects::BackgroundImage> picture;
+    if (r.ok) picture = bgSource_.Resolve(r.profile.background, BackgroundsDirectory());
     std::lock_guard lock(mu_);
     // Unchanged profile (the folder also changes for temp files): keep the compiled params.
-    if (r.ok && profileValid_ && r.profile == profile_) return;
+    if (r.ok && profileValid_ && r.profile == profile_ && picture == bgPicture_) return;
     if (!r.ok && !missing && params_) {
         // Present but unreadable/invalid (e.g. caught mid-write, or a bad hand edit): keep the
         // last good settings instead of flickering to neutral.
@@ -266,6 +281,7 @@ void FrameProcessor::ReloadSettings() {
     }
     profileValid_ = r.ok;
     profile_ = r.ok ? r.profile : Profile{};
+    bgPicture_ = std::move(picture);
     if (!r.ok) {
         // No usable settings at all: pass the camera through unchanged rather than guess.
         profile_.image.sharpness = 0;
@@ -286,11 +302,11 @@ void FrameProcessor::Recompile() {
         params_ = std::move(identity);
         return;
     }
-    // Smooth motion's software brightness compensation rides on the exposure tone step.
-    Profile effective = profile_;
-    effective.image.exposureEv += compensationEv_;
+    // Smooth motion's software brightness compensation rides on the exposure tone step (and
+    // raises temporal denoise to match).
+    const Profile effective = processing::WithSmoothMotionGain(profile_, compensationEv_);
     params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
-    effects_ = effects::CompileEffects(profile_, fullRange_);
+    effects_ = effects::CompileEffects(effective, fullRange_, bgPicture_);
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases
@@ -456,6 +472,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         ++counters_.passedThrough;
         return ComPtr<IMFSample>(input);
     };
+    if (!fx) renderer_.ReleaseBackground();  // no effects: hold no background buffers
     if (!input || !params || (params->identity && !fx) || !nv12 || !type) return passThrough();
 
     ComPtr<IMFVideoSampleAllocatorEx> allocator;

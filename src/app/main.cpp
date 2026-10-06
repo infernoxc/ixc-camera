@@ -7,16 +7,19 @@
 //   * Frames are painted only when they arrive. There is no render loop.
 //   * The 1 s status timer runs only while previewing.
 
+#include "app/perf_monitor.h"
 #include "app/settings_panel.h"
 #include "app/widgets.h"
 #include "app/preview_window.h"
 #include "camera/capture_session.h"
 #include "camera/device_enum.h"
 #include "camera/format_select.h"
+#include "camera/power_line.h"
 #include "common/fileio.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "face/face_settings.h"
 #include "ixc/version.h"
@@ -52,6 +55,14 @@ using namespace ixc::camera;
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"IXCCameraMainWindow";
+
+// What the IXC Camera source receives: Auto anti-flicker resolved for this user's region (the
+// camera service runs under a service account and can't know it; there Auto = leave as is).
+Profile ForPublishing(const Profile& p) {
+    Profile out = p;
+    out.antiFlicker = ResolveAntiFlicker(p.antiFlicker, UserRegion());
+    return out;
+}
 constexpr wchar_t kSingleInstanceMutex[] = L"Local\\IXCCamera.UI.SingleInstance";
 
 enum ControlId : int {
@@ -62,6 +73,7 @@ enum ControlId : int {
     kIdStatus = 106,
     kIdHint = 107,
     kIdPrivacy = 108,
+    kIdPerf = 109,
     // Settings column controls: app::PanelId (settings_panel.h), 200 and up.
 };
 using app::kIdProfileCombo;
@@ -78,6 +90,7 @@ constexpr UINT kAutoStartMessage = WM_APP + 13;  // start the preview once the w
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
 constexpr UINT_PTR kPublishTimer = 3;       // saves/publishes settings shortly after the last slider move
+constexpr UINT_PTR kPerfTimer = 4;          // live CPU/RAM readout (always on, 1 s)
 
 std::filesystem::path LocalAppDataDir() {
     PWSTR raw = nullptr;
@@ -155,7 +168,9 @@ private:
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
     HWND camera_ = nullptr, format_ = nullptr, startStop_ = nullptr;
-    HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr;
+    HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr, perf_ = nullptr;
+    app::PerfMonitor perfMonitor_;
+    void UpdatePerf();
     // Owned by the settings panel (see settings_panel.h); handled here.
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr, profileCombo_ = nullptr, profileDelete_ = nullptr, hotkeys_ = nullptr;
     app::theme::Fonts fonts_;
@@ -167,6 +182,7 @@ private:
     std::string stem_ = "default";  // active profile file
     bool hotkeysRegistered_ = false;
     std::string cycledLens_;  // the effect the lens hotkeys added last ("" = none); only it is replaced
+    effects::BackgroundSource bgSource_;  // the preview's background picture (one cached)
     vcam::Status vcam_;
     HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
     HANDLE vcamWait_ = nullptr;
@@ -237,7 +253,7 @@ bool MainWindow::Create(int showCmd) {
     // Make sure IXC Camera applies this user's current settings (write only when they differ).
     if (vcam_.comRegistered && profileLoaded_) {
         const ProfileLoadResult published = LoadActiveProfile();
-        Profile current = profile_;
+        Profile current = ForPublishing(profile_);
         Validate(current);
         if (!published.ok || !(published.profile == current)) SaveAndPublish();
     }
@@ -269,6 +285,7 @@ void MainWindow::CreateControls() {
     preview_.Create(hwnd_, instance_, kIdPreview);
     status_ = label(kIdStatus, WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS);
     hint_ = label(kIdHint, SS_LEFT);  // shown only while it has something to say
+    perf_ = label(kIdPerf, WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE);
     privacy_ = CreateButton(hwnd_, kIdPrivacy, L"Open camera privacy settings", ButtonStyle::Secondary, &fonts_, theme::kBg);
     ShowWindow(privacy_, SW_HIDE);
     preview_.Clear(L"Choose a camera and select Start preview.");
@@ -283,7 +300,7 @@ void MainWindow::CreateControls() {
 void MainWindow::ApplyFont() {
     fonts_.Create(dpi_);
     for (HWND h : {camera_, format_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
-    for (HWND h : {status_, hint_, vcamStatus_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.caption), TRUE);
+    for (HWND h : {status_, hint_, vcamStatus_, perf_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.caption), TRUE);
     SendMessageW(profileCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
     if (iconHeader_) DestroyIcon(iconHeader_);
     iconHeader_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, Scale(28), Scale(28), LR_DEFAULTCOLOR));
@@ -344,7 +361,9 @@ void MainWindow::Layout() {
     place(preview_.hwnd(), left + 1, y + 1, right - left - 2, previewBottom - y - 2);
     int fy = previewBottom + Scale(6);
     statusDot_ = {left + Scale(4), fy + Scale(10), left + Scale(12), fy + Scale(18)};
-    place(status_, left + Scale(20), fy, right - left - Scale(20), Scale(28));
+    const int perfW = Scale(230);  // live CPU/RAM, right-aligned on the status row
+    place(status_, left + Scale(20), fy, std::max(Scale(80), right - left - Scale(20) - perfW), Scale(28));
+    place(perf_, right - perfW, fy, perfW, Scale(28));
     fy += Scale(28);
     if (hintH) {
         place(hint_, left + Scale(12), fy + Scale(7), right - left - Scale(24), hintH - Scale(14));
@@ -429,9 +448,6 @@ void MainWindow::RefreshFeatureStates() {
         if (neededBy) face += std::wstring(L" · for ") + neededFor;
     }
     panel_.SetFaceTrackingState(face);
-    panel_.SetGpuState(profile_.gpu == GpuMode::Off ? L"Off: CPU only"
-                                                    : (previewing_ ? L"Zoom only, when faster · now " + preview_.ProcessingBackend()
-                                                                   : std::wstring(L"Zoom only, when measured faster")));
 }
 
 LRESULT MainWindow::ControlColor(HWND control, HDC dc) {
@@ -851,7 +867,7 @@ void MainWindow::OnCameraSelected() {
     formats_ = NormalizeFormats(raw);
 
     const auto autoPick = SelectFormat(formats_, RequestForTier(profile_.tier));
-    std::wstring autoLabel = L"Auto (recommended)";
+    std::wstring autoLabel = L"Auto (best for this camera)";
     if (autoPick) autoLabel += L": " + W(Describe(formats_[*autoPick]));
     SendMessageW(format_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(autoLabel.c_str()));
     for (const auto& f : formats_) {
@@ -895,6 +911,7 @@ void MainWindow::StartPreview() {
     cfg.format = formats_[*idx];
     cfg.output = OutputFormat::Nv12;  // pipeline format; the preview converts only displayed pixels
     cfg.smoothMotion = profile_.smoothMotion;
+    session_->SetAntiFlicker(ResolveAntiFlicker(profile_.antiFlicker, UserRegion()));
 
     SetWindowTextW(status_, (L"Opening " + W(cam.name) + L"…").c_str());
     const Error err = session_->Start(cfg);
@@ -934,7 +951,10 @@ void MainWindow::StartPreview() {
 // ---- picture settings -------------------------------------------------------------------------------
 
 void MainWindow::OnPictureChanged() {
-    if (session_) session_->SetSmoothMotion(profile_.smoothMotion);
+    if (session_) {
+        session_->SetSmoothMotion(profile_.smoothMotion);
+        session_->SetAntiFlicker(ResolveAntiFlicker(profile_.antiFlicker, UserRegion()));
+    }
     UpdatePipeline();                            // preview reflects the change immediately
     if (panel_.FaceOverlay() != app_.showFaceMarkers) {  // app-level preference (not part of a profile)
         app_.showFaceMarkers = panel_.FaceOverlay();
@@ -944,6 +964,56 @@ void MainWindow::OnPictureChanged() {
     SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
 }
 
+// Once a second: the status-bar readout, and the diagnostics view when it's open.
+void MainWindow::UpdatePerf() {
+    const bool diag = panel_.Diagnostics();
+    perfMonitor_.EnableGpuCounters(diag);
+    const app::PerfSample s = perfMonitor_.Sample();
+    SetWindowTextW(perf_, app::PerfMonitor::Format(s).c_str());
+    if (!diag) return;
+    std::wstring t;
+    wchar_t b[256];
+    if (previewing_ && session_) {
+        const FrameStatsSnapshot fs = session_->Stats();
+        const FrameLayout l = session_->Layout();
+        swprintf_s(b, L"Preview: %ux%u · %.1f FPS (camera mode %.0f) · %llu dropped\n", l.width, l.height, fs.fps, fs.nominalFps,
+                   static_cast<unsigned long long>(session_->DroppedFrames()));
+        t += b;
+    } else {
+        t += L"Preview: stopped\n";
+    }
+    swprintf_s(b, L"App: CPU %.1f%% · RAM %.0f MB", s.cpuPercent, s.ramMB);
+    t += b;
+    if (s.gpuPercent >= 0) {
+        swprintf_s(b, L" · GPU %.0f%%", s.gpuPercent);
+        t += b;
+    }
+    if (s.vramMB >= 0) {
+        swprintf_s(b, L" · VRAM %.0f MB", s.vramMB);
+        t += b;
+    }
+    t += L"\n";
+    const auto ps = preview_.PipelineStats();
+    const wchar_t* mode = profile_.processing == ProcessingMode::Gpu ? L"GPU" : profile_.processing == ProcessingMode::Cpu ? L"CPU" : L"Auto";
+    swprintf_s(b, L"Processing %s · picture on %s (CPU %.1f ms, GPU %.1f ms)%s%s\n", mode, ps.backend == processing::Backend::Gpu ? L"GPU" : L"CPU",
+               ps.cpuAvgMs, ps.gpuAvgMs, ps.adapter.empty() ? L"" : L" · ", ps.adapter.c_str());
+    t += b;
+    const seg::SegStatus ss = preview_.SegmentationStatus();
+    if (ss.state == seg::SegState::Off) {
+        t += L"Segmentation: off (no background effect)";
+    } else {
+        swprintf_s(b, L"Segmentation: %hs on %hs (%s) · %.1f ms network · %.1f masks/s · %.1f MB", seg::ToString(ss.state), seg::ToString(ss.backend),
+                   Utf8ToWide(ss.device).c_str(), ss.avgNetMs, ss.masksPerSecond, static_cast<double>(ss.memoryBytes) / 1048576.0);
+        t += b;
+        if (!ss.gpuNote.empty()) t += L"\n  " + Utf8ToWide(ss.gpuNote);
+    }
+    static const wchar_t* const kModes[] = {L"Original", L"Blur", L"Replace", L"Colour", L"Custom"};
+    swprintf_s(b, L"\nBackground: %s · face tracking: %hs", kModes[static_cast<int>(profile_.background.mode)], face::ToString(preview_.FaceStatus().state));
+    t += b;
+    t += L"\nIXC Camera in other apps runs inside the Windows camera service (see scripts/trace-vcam.ps1).";
+    panel_.SetDiagnosticsText(t);
+}
+
 void MainWindow::UpdatePipeline() {
     if (!previewing_ || !session_) {
         preview_.SetPipeline(nullptr);
@@ -951,16 +1021,17 @@ void MainWindow::UpdatePipeline() {
     }
     const FrameLayout l = session_->Layout();
     const bool fullRange = l.nominalRange == MFNominalRange_0_255;
-    // Same as the IXC Camera source: Smooth motion's brightness gain adds to the user's exposure.
+    // Same as the IXC Camera source: Smooth motion's brightness gain adds to the user's exposure
+    // (and raises temporal denoise to match).
     smoothEv_ = session_->SmoothCompensationEv();
-    Profile effective = profile_;
-    effective.image.exposureEv += smoothEv_;
+    const Profile effective = processing::WithSmoothMotionGain(profile_, smoothEv_);
     preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
-    auto fx = effects::CompileEffects(profile_, fullRange);
+    auto fx = effects::CompileEffects(effective, fullRange, bgSource_.Resolve(profile_.background, BackgroundsDirectory()));
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
     preview_.SetAutoFraming(profile_.autoFraming);
+    preview_.SetProcessingMode(profile_.processing);
     if (profile_.faceTracking.enabled || profile_.autoFraming || effectsNeedFaces) {
         const face::EngineConfig fc = face::EngineConfigFor(profile_);
         preview_.SetFaceTracking(&fc);
@@ -976,7 +1047,7 @@ void MainWindow::SaveAndPublish() {
     // Publish for the IXC Camera source (inside the Windows camera service). Apps using IXC
     // Camera pick the change up on their next frame.
     if (!vcam_.comRegistered) return;
-    const HRESULT hr = PublishActiveProfile(profile_);
+    const HRESULT hr = PublishActiveProfile(ForPublishing(profile_));
     if (FAILED(hr) && !publishWarned_) {
         publishWarned_ = true;
         const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
@@ -1090,6 +1161,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CREATE:
             dpi_ = GetDpiForWindow(hwnd_);
             CreateControls();
+            SetTimer(hwnd_, kPerfTimer, 1000, nullptr);  // live CPU/RAM readout at the bottom
             ApplyFont();
             return 0;
 
@@ -1143,6 +1215,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             ApplyFont();
             SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
             Layout();
+            panel_.Relayout();  // new font metrics even if the panel's rectangle didn't change
             return 0;
         }
 
@@ -1236,6 +1309,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_TIMER:
             if (wp == kStatusTimer) UpdateStatus();
+            if (wp == kPerfTimer) UpdatePerf();
             else if (wp == kPublishTimer) SaveAndPublish();
             else if (wp == kDeviceRefreshTimer) {
                 KillTimer(hwnd_, kDeviceRefreshTimer);
@@ -1263,6 +1337,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             KillTimer(hwnd_, kStatusTimer);
+            KillTimer(hwnd_, kPerfTimer);
             UnregisterHotkeys();
             if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // don't lose the last slider move
             if (session_) {

@@ -95,14 +95,18 @@ $WM_SETTEXT = 0x000C; $WM_HOTKEY = 0x0312
 $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 106; $IdHint = 107
 $IdProfile = 200; $IdProfileSave = 201; $IdHotkeys = 205; $IdReset = 206; $IdMirror = 207; $IdSlider0 = 210
 $IdMaster = 230; $IdAllOff = 231; $IdEffect0 = 240; $IdStrength0 = 260
-$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdVcamStatus = 290; $IdVcamUse = 291
-$effectIds = 'blush.tone', 'beauty.basic', 'background.blur', 'background.studio', 'sticker.shades', 'sticker.hearts', 'sticker.crown',
-             'sticker.puppy', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
+$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdFlicker = 285; $IdDiag = 286; $IdBgMode = 300; $IdBgBlur = 301; $IdBgBuiltin = 302; $IdBgColor = 306; $IdBgFit = 307; $IdVcamStatus = 290; $IdVcamUse = 291
+$effectIds = 'blush.tone', 'beauty.basic', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
 $IdxMono = [array]::IndexOf($effectIds, 'color.mono'); $IdxVivid = [array]::IndexOf($effectIds, 'color.vivid')
 
 $failures = @()
 function Check([bool]$ok, [string]$what) { if ($ok) { "  PASS  $what" } else { "  FAIL  $what"; $script:failures += $what } }
 function Click($h) { [Ui]::SendMessageW($h, $BM_CLICK, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+function Choose([int]$id, [int]$index) {   # pick an entry of a settings drop-down, like the user does
+    $h = P $id
+    [Ui]::SendMessageW($h, 0x014E, [IntPtr]$index, [IntPtr]::Zero) | Out-Null                  # CB_SETCURSEL
+    [Ui]::SendMessageW($script:content, 0x0111, [IntPtr](($id -band 0xFFFF) -bor (1 -shl 16)), $h) | Out-Null  # WM_COMMAND, CBN_SELCHANGE
+}
 function Checked($h) { [int][Ui]::SendMessageW($h, $BM_GETCHECK, [IntPtr]::Zero, [IntPtr]::Zero) -eq 1 }
 function SetSlider($h, [int]$pos) {
     [Ui]::SendMessageW($h, $TBM_SETPOS, [IntPtr]1, [IntPtr]$pos) | Out-Null
@@ -167,7 +171,8 @@ try {
     if (-not (Checked (P $IdMarkers))) { Click (P $IdMarkers) }
     if (Checked (P $IdFace)) { Click (P $IdFace) }
     if (-not (Checked (P $IdSmooth))) { Click (P $IdSmooth) }
-    if (-not (Checked (P $IdGpu))) { Click (P $IdGpu) }
+    Choose $IdGpu 0   # Processing: Auto
+    Choose $IdBgMode 0  # Background: Original
     if (-not (Checked (P $IdHotkeys))) { Click (P $IdHotkeys) }
     Start-Sleep -Milliseconds 800
 
@@ -187,7 +192,7 @@ try {
         @('brightness', 40, '"brightness": 40'), @('contrast', 40, '"contrast": 40'), @('saturation', 40, '"saturation": 40'),
         @('warmth', 40, '"temperature": 40'), @('tint', 40, '"tint": 40'), @('exposure', 10, '"exposureEv": 1'),
         @('highlights', 40, '"highlights": 40'), @('shadows', 40, '"shadows": 40'), @('low-light', 40, '"lowLight": 40'),
-        @('gamma', 150, '"gamma": 1.5'), @('sharpness', 40, '"sharpness": 40'), @('zoom', 150, '"zoom": 1.5'))
+        @('noise reduction', 40, '"denoise": 40'), @('gamma', 150, '"gamma": 1.5'), @('sharpness', 40, '"sharpness": 40'), @('zoom', 150, '"zoom": 1.5'))
     $before = [Ui]::PreviewStats($preview)[2]
     for ($i = 0; $i -lt $sliders.Count; $i++) {
         $s = P ($IdSlider0 + $i)
@@ -221,10 +226,6 @@ try {
             Start-Sleep -Milliseconds 2200
             Check ([Ui]::Text($status) -match 'face: (searching|tracking)') 'a face effect starts face tracking automatically'
         }
-        if ($effectIds[$i] -eq 'background.blur') {
-            Start-Sleep -Milliseconds 2200
-            Check ([Ui]::Text($status) -match 'background: (\d+/s|off \(CPU too slow\))') 'a background effect starts person segmentation automatically'
-        }
         Click $t
         $pub = Published
         Check (-not (Checked $t) -and -not $pub.Contains('"' + $effectIds[$i] + '"') -and -not [Ui]::IsWindowVisible($s)) "$($effectIds[$i]): switch off removes it"
@@ -242,8 +243,20 @@ try {
     Check (Checked (P $IdSmooth)) 'Smooth motion is on by default'
     Click (P $IdSmooth); Check ((Published) -match '"smoothMotion": false') 'Smooth motion off is published'
     Click (P $IdSmooth); Check ((Published) -match '"smoothMotion": true') 'Smooth motion back on is published'
-    Click (P $IdGpu); Check ((Published) -match '"gpu": "off"') 'GPU acceleration off is published (CPU only)'
-    Click (P $IdGpu); Check ((Published) -match '"gpu": "auto"') 'GPU acceleration back on is published'
+    Choose $IdGpu 2; Check ((Published) -match '"processing": "cpu"') 'Processing CPU is published'
+    Choose $IdGpu 1; Check ((Published) -match '"processing": "gpu"') 'Processing GPU is published'
+    Choose $IdGpu 0; Check ((Published) -match '"processing": "auto"') 'Processing Auto is published'
+    Choose $IdFlicker 1; Check ((Published) -match '"antiFlicker": "50hz"') 'Anti-flicker 50 Hz is published'
+    Choose $IdFlicker 0; Check ((Published) -match '"antiFlicker": "(50hz|60hz|auto)"') 'Anti-flicker Auto is published (resolved for the region)'
+    # Background: each mode, its own rows, and the preview keeps running.
+    Choose $IdBgMode 1; Check ((Published) -match '"mode": "blur"' -and [Ui]::IsWindowVisible((P $IdBgBlur)) -and -not [Ui]::IsWindowVisible((P $IdBgBuiltin))) 'Background Blur: published, blur strength shown'
+    Choose $IdBgBlur 2; Check ((Published) -match '"blur": "high"') 'Blur High is published'
+    Choose $IdBgMode 2; Check ((Published) -match '"mode": "replace"' -and [Ui]::IsWindowVisible((P $IdBgBuiltin)) -and [Ui]::IsWindowVisible((P $IdBgFit))) 'Background Replace: published, scene and fit shown'
+    Choose $IdBgBuiltin 0; Check ((Published) -match '"builtin": "[a-z-]+"') 'Built-in scene is published'
+    Choose $IdBgMode 3; Check ((Published) -match '"mode": "color"' -and [Ui]::IsWindowVisible((P $IdBgColor))) 'Background Colour: published, colour button shown'
+    Choose $IdBgMode 0; Check ((Published) -match '"mode": "original"' -and -not [Ui]::IsWindowVisible((P $IdBgBlur))) 'Background Original: published, extra rows hidden'
+    Click (P $IdDiag); Check ([Ui]::IsWindowVisible((P $IdDiag))) 'Diagnostics switch works'
+    Click (P $IdDiag)
     Check (-not (Checked (P $IdAutoFrame))) 'Auto-framing is off by default'
     Click (P $IdAutoFrame); Check ((Published) -match '"autoFraming": true') 'Auto-framing on is published'
     Click (P $IdAutoFrame); Check ((Published) -match '"autoFraming": false') 'Auto-framing back off is published'

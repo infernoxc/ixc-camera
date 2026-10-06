@@ -43,6 +43,7 @@ public:
         double fps = 0;
         int exposure = 0;
         double compensationEv = 0;
+        bool flicker = false;  // fixed exposure caused mains-light bands at this rate: don't fix it
     };
 
     enum class State { Observing, SwitchRequested, Verifying, Refining, Locked, Disabled };
@@ -52,7 +53,8 @@ public:
     explicit ExposureGovernor(Config c) : cfg_(c) {}
 
     // New session. enabled = user setting; nominalFps = negotiated rate; hint = last good decision.
-    void Reset(bool enabled, double nominalFps, const Hint& hint = {});
+    void Reset(bool enabled, double nominalFps, const Hint& hint);
+    void Reset(bool enabled, double nominalFps) { Reset(enabled, nominalFps, Hint{}); }
     // The decision to remember for the next session (valid only when Locked).
     Hint CurrentHint() const;
 
@@ -61,6 +63,11 @@ public:
     Action OnFrame(double intervalMs, double meanLuma);
     // Result of applying SetManualExposure (false = the camera refused: give up).
     void OnExposureApplied(bool ok);
+    // The fixed exposure produces mains-light bands (camera/flicker_detector.h): bands are worse
+    // than a lower frame rate. Returns RestoreAutoExposure when the exposure must be given back;
+    // the governor then stays disabled, and CurrentHint() remembers why.
+    Action AbortForFlicker();
+    bool FlickerAborted() const { return flicker_; }
 
     int RequestedExposure() const { return exposure_; }  // log2 seconds, valid with SetManualExposure
     double CompensationEv() const { return compensationEv_; }
@@ -89,6 +96,7 @@ private:
     double compensationEv_ = 0;
     bool changed_ = false;
     bool fromHint_ = false;  // current attempt started from a remembered decision
+    bool flicker_ = false;   // gave up because of mains-light bands
 };
 
 }  // namespace ixc::camera

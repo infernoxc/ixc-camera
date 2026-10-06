@@ -34,7 +34,7 @@ enum PanelId : int {
     kIdHotkeys,
     kIdPictureReset,
     kIdMirror,
-    kIdPictureSlider0 = 210,  // 12 sliders: 210..221 (order in settings_panel.cpp)
+    kIdPictureSlider0 = 210,  // 13 sliders: 210..222 (order in settings_panel.cpp)
     kIdEffectsMaster = 230,
     kIdEffectsAllOff,
     kIdEffectToggle0 = 240,   // one per effects::Catalog() entry: 240..
@@ -42,10 +42,21 @@ enum PanelId : int {
     kIdSmoothMotion = 280,
     kIdFaceTracking,
     kIdFaceMarkers,
-    kIdGpu,
+    kIdGpu,                   // the Processing drop-down (Auto / GPU / CPU)
     kIdAutoFraming,
+    kIdAntiFlicker,
+    kIdDiagnostics,
     kIdVcamStatus = 290,
     kIdVcamUse,
+    kIdBgMode = 300,
+    kIdBgBlur,
+    kIdBgBuiltin,
+    kIdBgCustom,
+    kIdBgBrowse,
+    kIdBgRemove,
+    kIdBgColor,
+    kIdBgFit,
+    kIdBgSlider0 = 310,  // zoom, horizontal, vertical: 310..312
 };
 
 class SettingsPanel {
@@ -65,7 +76,9 @@ public:
     void SetFaceOverlay(bool on);
     // Live state texts (second line of the switches).
     void SetFaceTrackingState(const std::wstring& text);
-    void SetGpuState(const std::wstring& text);
+    // Optional diagnostics (switch in Camera features): live text, refreshed once a second.
+    bool Diagnostics() const { return diagnosticsOn_; }
+    void SetDiagnosticsText(const std::wstring& text);
 
     HWND profileCombo() const { return profileCombo_; }
     HWND profileDelete() const { return profileDelete_; }
@@ -83,6 +96,9 @@ private:
         std::function<void(Profile&, double)> set;
         HWND wnd = nullptr;
     };
+    struct Choice {  // label + drop-down list
+        HWND label = nullptr, combo = nullptr;
+    };
     struct Card {
         RECT rc;
         std::wstring title;
@@ -94,6 +110,10 @@ private:
     void ScrollTo(int pos);
     void PaintContent(HDC dc, const RECT& rc);
     void ShowEffectSliders();
+    void UpdateBackgroundRows();
+    bool OnChoice(int id, int sel);
+    bool BrowseBackground();
+    void PickColor();
     int EffectIndex(HWND control, int firstId) const;
     void Changed();
 
@@ -108,10 +128,19 @@ private:
     HWND effectsMaster_ = nullptr, effectsAllOff_ = nullptr;
     std::vector<HWND> effectToggles_, effectSliders_;
     std::vector<int> effectStrength_;  // last strength per effect (restored when switched back on)
-    HWND smooth_ = nullptr, face_ = nullptr, faceMarkers_ = nullptr, gpu_ = nullptr, autoFraming_ = nullptr;
+    HWND smooth_ = nullptr, face_ = nullptr, faceMarkers_ = nullptr, autoFraming_ = nullptr;
+    Choice processing_, antiFlicker_;
+    HWND diagnostics_ = nullptr, diagText_ = nullptr;
+    bool diagnosticsOn_ = false;
+    // Background
+    Choice bgMode_, bgBlur_, bgBuiltin_, bgCustom_, bgFit_;
+    HWND bgColorLabel_ = nullptr, bgColor_ = nullptr, bgBrowse_ = nullptr, bgRemove_ = nullptr;
+    std::vector<Slider> bgSliders_;
+    std::vector<std::string> recent_;  // custom pictures shown in bgCustom_
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
     bool faceOverlay_ = true;
     int contentHeight_ = 0, scroll_ = 0, width_ = 0;
+    RECT bounds_{};  // last SetBounds rectangle (unchanged bounds: no relayout)
 };
 
 }  // namespace ixc::app

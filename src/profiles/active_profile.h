@@ -22,6 +22,8 @@ inline constexpr size_t kMaxActiveProfileBytes = 64 * 1024;
 
 std::filesystem::path ActiveProfileDirectory();  // %ProgramData%\IXC Camera
 std::filesystem::path ActiveProfilePath();       // ...\active-profile.json
+// Prepared background pictures (.ixbg, see effects/background_image.h), written by the app.
+std::filesystem::path BackgroundsDirectory();    // ...\backgrounds
 
 // Writes the profile atomically. Fails with ACCESS_DENIED when IXC Camera isn't installed
 // (the folder's permissions come from the installer).

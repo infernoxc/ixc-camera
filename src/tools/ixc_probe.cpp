@@ -17,6 +17,7 @@
 #include "camera/format_select.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "face/downscale.h"
 #include "face/face_engine.h"
@@ -24,6 +25,8 @@
 #include "processing/gpu/gpu_pipeline.h"
 #include "processing/image_pipeline.h"
 #include "profiles/active_profile.h"
+#include "segmentation/gpu/gpu_selfie_net.h"
+#include "segmentation/selfie_net.h"
 
 #include <windows.h>
 #include <dshow.h>
@@ -56,7 +59,7 @@ namespace {
 constexpr int kExitSkip = 77;
 
 struct Options {
-    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects, ApplyEffects } mode = Mode::None;
+    enum class Mode { None, List, ListDirectShow, DirectShowCapture, Capture, Cycles, SourceTest, SourceEffectTest, BenchPipeline, BenchGpu, BenchGpuMemory, CameraControls, BenchFace, BenchEffects, BenchSeg, ApplyEffects } mode = Mode::None;
     int seconds = 10;
     int cycles = 20;
     std::string camera;
@@ -88,6 +91,7 @@ bool ParseArgs(int argc, char** argv, Options& o) {
         else if (a == "--set-ae-priority") { const char* v = next(); if (!v) return false; o.mode = Options::Mode::CameraControls; o.aePriority = std::atoi(v); }
         else if (a == "--bench-gpu-memory") o.mode = Options::Mode::BenchGpuMemory;
         else if (a == "--bench-effects") o.mode = Options::Mode::BenchEffects;
+        else if (a == "--bench-seg") o.mode = Options::Mode::BenchSeg;
         else if (a == "--apply-effects") { const char* src = next(); const char* dst = next(); if (!src || !dst) return false; o.mode = Options::Mode::ApplyEffects; o.applyIn = src; o.applyOut = dst; }
         else if (a == "--effects") { const char* v = next(); if (!v) return false; o.applyEffects = v; }
         else if (a == "--strength") { const char* v = next(); if (!v) return false; o.applyStrength = std::atof(v); }
@@ -1483,6 +1487,42 @@ int ApplyEffectsToBmp(const Options& o) {
 
 // Per-effect cost on a synthetic textured frame with a face and a person mask (no camera needed),
 // then the segmentation network's own cost (it runs on a worker thread, a few times per second).
+// Segmentation network per mask: CPU (SelfieNet) and GPU (Direct3D 11, the default adapter).
+// Wall time per mask and the process CPU time it costs (the GPU path should cost little CPU).
+int BenchSeg() {
+    using namespace ixc::seg;
+    constexpr int kRuns = 60;
+    auto measure = [&](NetRunner& r, const char* label) {
+        float* in = r.Input();
+        for (int i = 0; i < kNetW * kNetH * 3; ++i) in[i] = static_cast<float>((i * 37) % 255) / 255.0f;
+        r.Run();  // warm-up (first GPU run uploads and compiles pipelines)
+        FILETIME c0, e0, k0, u0, c1, e1, k1, u1;
+        GetThreadTimes(GetCurrentThread(), &c0, &e0, &k0, &u0);
+        LARGE_INTEGER f, t0, t1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&t0);
+        for (int i = 0; i < kRuns; ++i) {
+            if (!r.Run()) {
+                std::printf("%-6s failed during the run\n", label);
+                return;
+            }
+        }
+        QueryPerformanceCounter(&t1);
+        GetThreadTimes(GetCurrentThread(), &c1, &e1, &k1, &u1);
+        auto u64 = [](FILETIME t) { return (static_cast<std::uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+        const double wall = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f.QuadPart) / kRuns;
+        const double cpu = static_cast<double>((u64(k1) - u64(k0)) + (u64(u1) - u64(u0))) / 10000.0 / kRuns;
+        std::printf("%-6s %-44s %8.2f ms/mask wall %8.2f ms/mask CPU (this thread)  %6.1f MB\n", label, r.Device().c_str(), wall, cpu,
+                    static_cast<double>(r.MemoryBytes()) / 1048576.0);
+    };
+    std::printf("Segmentation network (256x144), %d masks each:\n", kRuns);
+    if (auto cpu = MakeCpuRunner()) measure(*cpu, "CPU");
+    std::string err;
+    if (auto gpu = MakeGpuRunner(err)) measure(*gpu, "GPU");
+    else std::printf("GPU    not used: %s\n", err.c_str());
+    return 0;
+}
+
 int BenchEffects() {
     std::printf("%-16s %10s %10s %10s\n", "effect", "720p ms", "1080p ms", "scratch KB");
     const face::FaceSnapshot snap = [] {
@@ -1492,6 +1532,7 @@ int BenchEffects() {
         f.box = {0.42f, 0.25f, 0.16f, 0.28f};
         f.lm = {{0.47f, 0.35f}, {0.53f, 0.35f}, {0.5f, 0.41f}, {0.475f, 0.46f}, {0.525f, 0.46f}};
         f.landmarksValid = true;
+        f.confidence = 0.9f;
         return s;
     }();
     seg::SegMask mask;  // person: the centre third of the frame
@@ -1534,6 +1575,48 @@ int BenchEffects() {
         }
         std::printf("%-16s %10.2f %10.2f %10.1f\n", id.c_str(), ms[0], ms[1], scratch / 1024.0);
     }
+    // Background modes (per frame, with a person mask and a tracked face for the face guard).
+    struct BgCase {
+        const char* name;
+        BackgroundMode mode;
+        BlurLevel blur;
+    };
+    const BgCase bgCases[] = {{"bg blur low", BackgroundMode::Blur, BlurLevel::Low},
+                              {"bg blur medium", BackgroundMode::Blur, BlurLevel::Medium},
+                              {"bg blur high", BackgroundMode::Blur, BlurLevel::High},
+                              {"bg replace", BackgroundMode::Replace, BlurLevel::Medium},
+                              {"bg color", BackgroundMode::Color, BlurLevel::Medium}};
+    for (const BgCase& bc : bgCases) {
+        Profile prof;
+        prof.background.mode = bc.mode;
+        prof.background.blur = bc.blur;
+        prof.background.builtin = "office";
+        effects::BackgroundSource source;
+        const auto cfg = effects::CompileEffects(prof, false, source.Resolve(prof.background, {}));
+        double ms[2] = {0, 0};
+        size_t scratch = 0;
+        const int sizes[2][2] = {{1280, 720}, {1920, 1080}};
+        for (int s = 0; s < 2; ++s) {
+            const int w = sizes[s][0], h = sizes[s][1];
+            std::vector<std::uint8_t> buf(static_cast<size_t>(w) * h * 3 / 2);
+            for (size_t i = 0; i < buf.size(); ++i) buf[i] = static_cast<std::uint8_t>(i < static_cast<size_t>(w) * h ? 60 + (i * 2654435761u >> 26) % 120 : 110 + i % 30);
+            const processing::Nv12Frame fr{buf.data(), buf.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            effects::EffectRenderer r;
+            effects::FrameContext ctx;
+            ctx.faces = &snap;
+            ctx.mask = &mask;
+            for (int i = 0; i < 10; ++i) r.Apply(fr, *cfg, ctx);  // fade-in, picture plate built once
+            LARGE_INTEGER f0, t0, t1;
+            QueryPerformanceFrequency(&f0);
+            QueryPerformanceCounter(&t0);
+            constexpr int kIters = 40;
+            for (int i = 0; i < kIters; ++i) r.Apply(fr, *cfg, ctx);
+            QueryPerformanceCounter(&t1);
+            ms[s] = 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f0.QuadPart) / kIters;
+            scratch = r.ScratchBytes();
+        }
+        std::printf("%-16s %10.2f %10.2f %10.1f\n", bc.name, ms[0], ms[1], static_cast<double>(scratch) / 1024.0);
+    }
     // Segmentation network (worker thread, not per frame): median of 15 runs on a 720p frame.
     std::vector<std::uint8_t> frame(1280 * 720 * 3 / 2, 128);
     for (size_t i = 0; i < 1280 * 720; ++i) frame[i] = static_cast<std::uint8_t>(60 + (i * 2654435761u >> 26) % 120);
@@ -1549,7 +1632,7 @@ int BenchEffects() {
         runs.push_back(ms);
     }
     std::sort(runs.begin(), runs.end());
-    std::printf("segmentation network: median %.1f ms, max %.1f ms per mask (worker thread; at a 25%% CPU budget: %.0f masks/s)\n",
+    std::printf("segmentation (network + edge refinement): median %.1f ms, max %.1f ms per mask (worker thread; at a 25%% CPU budget: %.0f masks/s)\n",
                 runs[runs.size() / 2], runs.back(), std::min(30.0, 250.0 / runs[runs.size() / 2]));
     return 0;
 }
@@ -1759,6 +1842,7 @@ int main(int argc, char** argv) {
                 case Options::Mode::BenchGpuMemory: rc = BenchGpuMemory(); break;
                 case Options::Mode::BenchFace: rc = BenchFace(o); break;
                 case Options::Mode::BenchEffects: rc = BenchEffects(); break;
+                case Options::Mode::BenchSeg: rc = BenchSeg(); break;
                 case Options::Mode::ApplyEffects: rc = ApplyEffectsToBmp(o); break;
                 case Options::Mode::Capture: rc = Capture(o); break;
                 case Options::Mode::Cycles: rc = Cycles(o); break;

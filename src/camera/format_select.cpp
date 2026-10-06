@@ -56,8 +56,11 @@ FormatRequest RequestForTier(PerformanceTier tier) {
             return {1280, 720, 30};
         case PerformanceTier::Auto:
         case PerformanceTier::Balanced:
-        case PerformanceTier::High:
-            return {1920, 1080, 30};
+        case PerformanceTier::High: {
+            FormatRequest r;
+            r.best = true;
+            return r;
+        }
     }
     return {1920, 1080, 30};
 }
@@ -80,8 +83,37 @@ std::vector<CaptureFormat> NormalizeFormats(std::vector<CaptureFormat> formats) 
     return out;
 }
 
+namespace {
+
+// FormatRequest::best: largest smooth resolution, then its highest frame rate, then the cheapest
+// pixel format. A camera with no smooth mode at all gets its fastest mode.
+std::optional<size_t> SelectBest(const std::vector<CaptureFormat>& formats) {
+    constexpr double kSmoothFps = 23.5;  // 24/25/30/60 count as smooth; 15 doesn't
+    auto area = [](const CaptureFormat& f) { return static_cast<std::uint64_t>(f.width) * f.height; };
+    const bool anySmooth = std::any_of(formats.begin(), formats.end(), [&](const CaptureFormat& f) { return f.Fps() >= kSmoothFps; });
+    std::optional<size_t> best;
+    for (size_t i = 0; i < formats.size(); ++i) {
+        const CaptureFormat& f = formats[i];
+        if (anySmooth && f.Fps() < kSmoothFps) continue;
+        if (!best) {
+            best = i;
+            continue;
+        }
+        const CaptureFormat& b = formats[*best];
+        const bool better = anySmooth ? (area(f) != area(b) ? area(f) > area(b)
+                                         : f.Fps() != b.Fps() ? f.Fps() > b.Fps()
+                                                              : SubtypeRank(f.subtype) < SubtypeRank(b.subtype))
+                                      : (f.Fps() != b.Fps() ? f.Fps() > b.Fps() : area(f) > area(b));
+        if (better) best = i;
+    }
+    return best;
+}
+
+}  // namespace
+
 std::optional<size_t> SelectFormat(const std::vector<CaptureFormat>& formats, const FormatRequest& req) {
     if (formats.empty()) return std::nullopt;
+    if (req.best) return SelectBest(formats);
 
     // 1. Resolution: exact match if possible; otherwise the largest mode not exceeding the
     //    request; otherwise the smallest mode above it.

@@ -201,3 +201,14 @@ The full results are in [face-tracking-design.md](face-tracking-design.md) ("Fin
 - Ultra Low (2 cores / 2–4 GB) and Low (dual-core / 4 GB) targets: NOT TESTED — REQUIRES USER ENVIRONMENT.
 - 30-minute burn-in: done in Phase 10 (CHANGELOG, `tests/soak.ps1`): no drift.
 - GPU utilization: no GPU work exists yet (Phase 6).
+
+## 0.12 — new stages (measured in the Linux development container, not on Windows)
+Single thread, g++ -O2, same source (portable parts only). These numbers show cost relative to each other. They are not the user's PC: run `ixc_probe --bench-seg` / `--bench-effects` there.
+
+| Stage | Result |
+|---|---|
+| Temporal denoise, 1080p NV12, strength 50 | 3.7–4.3 ms/frame; noise 3.0 → 1.7, 6.0 → 3.8, 10.0 → 6.7 RMS (static scene); 5.9 MB while on, 0 when off |
+| Segmentation network + refinement (CPU) | ~17–26 ms per mask |
+| GPU segmentation kernels (Slang CPU emulation of the HLSL, correctness only) | identical output to the CPU network (max difference 0) |
+
+GPU timings for the segmentation network on real graphics cards: **NOT TESTED — REQUIRES USER ENVIRONMENT** (`ixc_probe --bench-seg`).

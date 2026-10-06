@@ -16,6 +16,7 @@
 #include "processing/color.h"
 #include "processing/gpu/adaptive_processor.h"
 #include "processing/image_pipeline.h"
+#include "segmentation/gpu/gpu_selfie_net.h"
 
 #include <memory>
 
@@ -57,10 +58,21 @@ public:
     face::EngineStatus FaceStatus() const { return face_.Status(); }
     // Person segmentation, running while a background effect is on (state for the status line).
     seg::SegStatus SegmentationStatus() const { return seg_.Status(); }
+    // Processing mode (Auto/GPU/CPU) for the segmentation network; the picture pipeline takes it
+    // from the pipeline parameters. Applied live.
+    void SetProcessingMode(ProcessingMode mode) {
+        seg_.SetGpuFactory(&seg::MakeGpuRunner);
+        seg_.SetMode(mode);
+    }
+    processing::AdaptiveNv12Processor::Stats PipelineStats() const { return processor_.GetStats(); }
     // "GPU" while the picture pipeline runs on the graphics card, otherwise "CPU".
     std::wstring ProcessingBackend() const { return processor_.GetStats().backend == processing::Backend::Gpu ? L"GPU" : L"CPU"; }
     // IXC effects applied after the pipeline (nullptr = none).
-    void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) { effects_ = std::move(cfg); dirty_ = sample_ != nullptr; }
+    void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) {
+        effects_ = std::move(cfg);
+        if (!effects_) renderer_.ReleaseBackground();
+        dirty_ = sample_ != nullptr;
+    }
 
     static constexpr UINT kFrameMessage = WM_APP + 10;
 

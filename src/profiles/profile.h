@@ -24,7 +24,12 @@ enum class PerformanceTier { Auto, UltraLow, Low, Balanced, High };
 
 // GPU use for processing. Auto = only where it's measured to help on this PC (see
 // processing/backend_selector.h); Off = always the CPU path.
-enum class GpuMode { Auto, Off };
+// Where the heavy work runs: the picture pipeline (processing/gpu) and the segmentation network
+// (segmentation/gpu). Auto measures on this PC and picks; Gpu uses the GPU whenever it works
+// (any Direct3D 11 GPU: NVIDIA, AMD or Intel) and falls back to the CPU if it doesn't; Cpu never
+// touches the GPU. Saved as "processing"; profiles from 0.11 used "gpu": "auto" | "off".
+enum class ProcessingMode { Auto, Cpu, Gpu };
+std::string_view ToString(ProcessingMode m);  // "auto", "cpu", "gpu"
 
 std::string_view ToString(PerformanceTier t);
 bool ParsePerformanceTier(std::string_view s, PerformanceTier& out);
@@ -59,6 +64,32 @@ struct EffectEntry {
     bool operator==(const EffectEntry&) const = default;
 };
 
+// Background behind the person (needs person segmentation, see segmentation/).
+enum class BackgroundMode { Original, Blur, Replace, Color, Custom };
+enum class BlurLevel { Low, Medium, High };
+enum class BackgroundFit { Fill, Fit };  // Fill: cover the frame (crop); Fit: whole image, edges extended
+
+struct BackgroundSettings {
+    BackgroundMode mode = BackgroundMode::Original;
+    BlurLevel blur = BlurLevel::Medium;
+    std::string builtin = "studio-light";  // built-in background id ([a-z0-9-], see effects/backgrounds.h)
+    std::uint32_t color = 0x3A4A5C;        // Color mode, 0xRRGGBB
+    std::string image;                     // Custom mode: name of a prepared image in the backgrounds folder; never a path
+    BackgroundFit fit = BackgroundFit::Fill;
+    double posX = 0.5, posY = 0.5;         // 0..1: which part of the image stays visible when cropped
+    double scale = 1.0;                    // 1..3: extra zoom into the image
+    bool operator==(const BackgroundSettings&) const = default;
+};
+
+// Power-line frequency of the room's lighting, for the camera's anti-flicker control.
+enum class AntiFlicker { Auto, Hz50, Hz60, Off };
+std::string_view ToString(AntiFlicker a);  // "auto", "50hz", "60hz", "off"
+
+inline constexpr size_t kMaxBackgroundNameChars = 64;
+bool IsValidBackgroundName(std::string_view name);  // [a-z0-9-], 1..64
+std::string_view ToString(BackgroundMode m);
+std::string_view ToString(BlurLevel b);
+
 struct FaceTrackingSettings {
     bool enabled = false;
     int maxFaces = 1;             // 1..kMaxTrackedFaces
@@ -85,12 +116,16 @@ struct Profile {
     CropRect crop;
     ImageSettings image;
     std::vector<EffectEntry> effects;
+    BackgroundSettings background;
     FaceTrackingSettings faceTracking;
     PerformanceTier tier = PerformanceTier::Auto;
-    GpuMode gpu = GpuMode::Auto;
+    ProcessingMode processing = ProcessingMode::Auto;
     // Keep the camera at its full frame rate in low light (fixed exposure + brightness
     // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
     bool smoothMotion = true;
+    // Mains-light flicker (the camera's power-line frequency control). Auto = the frequency of the
+    // user's region (left as the camera has it where the region doesn't say). See camera/power_line.h.
+    AntiFlicker antiFlicker = AntiFlicker::Auto;
     // Keep the tracked face framed: zoom and pan smoothly inside the crop/zoom rectangle (uses
     // face tracking). See face/auto_framer.h.
     bool autoFraming = false;

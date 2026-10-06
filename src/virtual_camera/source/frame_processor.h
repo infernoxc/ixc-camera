@@ -12,7 +12,9 @@
 // Settings changes apply to the next frame. Parsing happens on the watcher thread, and the
 // frame path only swaps in the compiled result.
 
+#include "camera/power_line.h"
 #include "camera/smooth_motion.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "face/auto_framer.h"
 #include "face/face_engine.h"
@@ -85,6 +87,7 @@ private:
     // Smooth motion (fixed exposure in low light). Lock order: smoothMu_ before mu_.
     std::mutex smoothMu_;
     camera::SmoothMotion smooth_;
+    camera::PowerLineControl powerLine_;  // anti-flicker (under smoothMu_)
     Microsoft::WRL::ComPtr<IKsControl> ks_;
     double nominalFps_ = 0;       // under mu_
     double compensationEv_ = 0;   // under mu_: added to the profile's exposure
@@ -114,6 +117,9 @@ private:
     // Effects (Phase 8): compiled config swapped under mu_; the renderer is frame-thread only.
     std::shared_ptr<const effects::EffectConfig> effects_;
     effects::EffectRenderer renderer_;
+    // Background picture (Replace/Custom): resolved on the settings thread, never per frame.
+    effects::BackgroundSource bgSource_;                     // settings thread only
+    std::shared_ptr<const effects::BackgroundImage> bgPicture_;  // under mu_
 };
 
 }  // namespace ixc::vcam

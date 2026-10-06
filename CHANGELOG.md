@@ -1,6 +1,47 @@
 # Changelog
 
-## 0.11.0 — Background blur and backdrop, face stickers, auto-framing, lens hotkeys (unreleased)
+## 0.12.0 — Professional backgrounds, low-light denoise, anti-flicker, real GPU/CPU mode
+
+### Added
+- **Background card** (independent of the Effects switch):
+  - Modes: Original, Blur (Low / Medium / High), Replace with 9 built-in scenes, Solid colour (colour picker), Custom picture.
+  - Built-in scenes: office, modern office, gaming room, studio light/dark, minimal room, nature, abstract, gradient. They are drawn in code, with no image files.
+  - Custom pictures: JPG, PNG, WEBP and BMP are decoded by the app (WIC), downscaled to at most 1920×1080 and stored prepared. The camera service never decodes image files.
+  - Picture controls: Browse, a recent list of 12, Remove, Fill/Fit, zoom and position.
+- **Better segmentation:**
+  - The mask is upsampled with a guided filter that follows image edges (hair, ears, shoulders, hands).
+  - Motion-adaptive temporal smoothing reduces flicker without lag on movement.
+  - A face guard keeps the head, ears and nose even when the network is unsure.
+  - Dark frames are brightened before the network.
+- **Depth-like blur:** the blur grows with the distance from the person, and the person's colours don't bleed into the background, so there's no halo.
+- **Noise reduction** (Picture card): motion-adaptive temporal denoise.
+  - The threshold follows the measured camera noise, and moving areas are not averaged, so there is no ghosting.
+  - It costs about 4 ms per 1080p frame on one core (SSE2).
+  - Smooth motion raises it automatically when it brightens a dark picture.
+- **Anti-flicker** (Auto by region / 50 Hz / 60 Hz / Off): sets the camera's power-line frequency control, and restores it at session end.
+- **Smooth motion no longer causes dark bands.** A flicker detector watches the picture while the exposure is fixed. If mains-light bands appear, the camera gets its automatic exposure back, and that's remembered for 20 minutes.
+- **Processing: Auto / GPU / CPU**, a real switch for both the picture pipeline and the segmentation network:
+  - The network has a Direct3D 11 compute version that works on any GPU vendor. It is checked against the CPU before use.
+  - GPU mode uses the GPU and falls back to the CPU with a reason if the GPU is unavailable or fails mid-stream.
+  - CPU mode never touches the GPU.
+  - Auto measures both and keeps the faster one.
+  - Switching is live, with no camera restart.
+- **Diagnostics view** (Camera features): preview FPS; the app's CPU, RAM, GPU % and VRAM; which backend runs the picture and the segmentation, with timings; and GPU fallback reasons.
+- `ixc_probe --bench-seg`: segmentation network per mask on the CPU and the GPU (wall time and CPU time).
+
+### Changed
+- The face stickers (Shades, Heart Eyes, Crown, Puppy) and the old Background Blur / Studio Backdrop effects are retired. Old profiles migrate with a warning: blur becomes Background Blur at a matching level, and the backdrop becomes the Studio Light scene.
+- Profiles save `"processing": "auto" | "gpu" | "cpu"`. The 0.11 setting `"gpu": "off"` reads as CPU.
+
+### Fixed
+- App buttons and switches that sometimes ignored clicks. Layout changes between press and release moved the control, and the click was dropped.
+- The app shows its own CPU and RAM use at the bottom of the window.
+- The camera now opens at its best mode by default: the largest resolution that runs at least 24 FPS, at that resolution's highest frame rate. It's still selectable in the format list.
+
+### Tests
+- New tests: `test_background.cpp`, `test_denoise.cpp` (noise reduction, no ghosting, no drift, SSE2 identical to the scalar reference, memory released), `test_flicker.cpp` (moving and standing bands, no false alarms from motion, governor hand-back), segmentation mode switching and GPU fallback (fake GPU runners), and `test_gpu_segmentation.cpp` (Direct3D network against the CPU, on WARP in CI and on the hardware adapter when present). The UI smoke test drives the new drop-downs.
+
+## 0.11.0 — Background blur and backdrop, face stickers, auto-framing, lens hotkeys
 
 ### Added
 - **Background Blur** and **Studio Backdrop** effects, driven by real person segmentation (not an ellipse):

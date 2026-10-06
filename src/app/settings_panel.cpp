@@ -1,9 +1,13 @@
 #include "app/settings_panel.h"
 
+#include "app/background_import.h"
+#include "common/strings.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "ixc/version.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +31,6 @@ LRESULT CALLBACK ComboWheel(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
 
 const wchar_t* CategoryText(const effects::EffectInfo& e) {
     if (e.needsFace) return L"Face effect · uses face tracking";
-    if (e.needsSegmentation) return L"Background · finds you in the picture";
     if (std::string_view(e.category) == "lighting") return L"Lighting look";
     return L"Colour look";
 }
@@ -90,6 +93,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
         {L"Highlights", -100, 100, 1.0, L"%+.0f", IXC_IMAGE_FIELD(highlights)},
         {L"Shadows", -100, 100, 1.0, L"%+.0f", IXC_IMAGE_FIELD(shadows)},
         {L"Low-light boost", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(lowLight)},
+        {L"Noise reduction", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(denoise)},
         {L"Gamma", 20, 300, 0.01, L"%.2f", IXC_IMAGE_FIELD(gamma)},
         {L"Sharpness", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(sharpness)},
         {L"Digital zoom", 100, 400, 0.01, L"%.2f×", [](const Profile& p) { return p.zoom; }, [](Profile& p, double v) { p.zoom = v; }},
@@ -126,7 +130,55 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     autoFraming_ = toggle(kIdAutoFraming, L"Auto-framing", L"Zooms and pans to keep you in the picture");
     face_ = toggle(kIdFaceTracking, L"Face tracking", L"Off");
     faceMarkers_ = toggle(kIdFaceMarkers, L"Show face markers", L"Preview only, never sent to apps");
-    gpu_ = toggle(kIdGpu, L"GPU acceleration", L"Zoom only, when measured faster");
+    auto choice = [&](int id, const wchar_t* label, std::initializer_list<const wchar_t*> items) {
+        Choice ch;
+        ch.label = CreateWindowExW(0, WC_STATICW, label, WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_CENTERIMAGE | SS_ENDELLIPSIS, 0, 0, 0, 0,
+                                   content_, nullptr, instance, nullptr);
+        SendMessageW(ch.label, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->body), FALSE);
+        ch.combo = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 0, 0, 0, content_,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+        SendMessageW(ch.combo, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->body), FALSE);
+        theme::ApplyDarkControl(ch.combo, true);
+        SetWindowSubclass(ch.combo, ComboWheel, 1, 0);
+        for (const wchar_t* t : items) SendMessageW(ch.combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(t));
+        return ch;
+    };
+    processing_ = choice(kIdGpu, L"Processing", {L"Auto (best for this PC)", L"GPU", L"CPU"});
+    antiFlicker_ = choice(kIdAntiFlicker, L"Anti-flicker", {L"Auto (your region)", L"50 Hz", L"60 Hz", L"Off"});
+    diagnostics_ = toggle(kIdDiagnostics, L"Diagnostics", L"FPS, CPU/GPU use, memory, backends");
+    diagText_ = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, content_, nullptr, instance, nullptr);
+    SendMessageW(diagText_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->caption), FALSE);
+
+    // Background
+    bgMode_ = choice(kIdBgMode, L"Background", {L"Original", L"Blur", L"Replace (built-in scene)", L"Solid colour", L"Custom picture"});
+    bgBlur_ = choice(kIdBgBlur, L"Blur strength", {L"Low", L"Medium", L"High"});
+    bgBuiltin_ = choice(kIdBgBuiltin, L"Scene", {});
+    for (const auto& b : effects::BuiltinBackgrounds()) SendMessageW(bgBuiltin_.combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(b.name));
+    bgCustom_ = choice(kIdBgCustom, L"Picture", {});
+    bgFit_ = choice(kIdBgFit, L"Fit", {L"Fill (crop to the frame)", L"Fit (whole picture)"});
+    bgColorLabel_ = CreateWindowExW(0, WC_STATICW, L"Colour", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | SS_CENTERIMAGE, 0, 0, 0, 0, content_,
+                                    nullptr, instance, nullptr);
+    SendMessageW(bgColorLabel_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->body), FALSE);
+    bgColor_ = button(kIdBgColor, L"Pick colour…", ButtonStyle::Secondary);
+    bgBrowse_ = button(kIdBgBrowse, L"Browse…", ButtonStyle::Secondary);
+    bgRemove_ = button(kIdBgRemove, L"Remove", ButtonStyle::Danger);
+    bgSliders_ = {
+        {L"Picture zoom", 100, 300, 0.01, L"%.2f×", [](const Profile& p) { return p.background.scale; }, [](Profile& p, double v) { p.background.scale = v; }},
+        {L"Horizontal position", 0, 100, 0.01, L"%.2f", [](const Profile& p) { return p.background.posX; }, [](Profile& p, double v) { p.background.posX = v; }},
+        {L"Vertical position", 0, 100, 0.01, L"%.2f", [](const Profile& p) { return p.background.posY; }, [](Profile& p, double v) { p.background.posY = v; }},
+    };
+    for (size_t i = 0; i < bgSliders_.size(); ++i) {
+        Slider& s = bgSliders_[i];
+        const bool zoom = i == 0;
+        s.wnd = CreateSlider(content_, kIdBgSlider0 + static_cast<int>(i), s.label, s.min, s.max, zoom ? 100 : 50,
+                             [zoom](int p) {
+                                 wchar_t b[32];
+                                 if (zoom) swprintf_s(b, L"%.2f×", p / 100.0);
+                                 else swprintf_s(b, L"%d%%", p);
+                                 return std::wstring(b);
+                             },
+                             fonts_, card);
+    }
 
     // IXC Camera (system camera)
     vcamStatus_ = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, content_,
@@ -139,6 +191,11 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
 }
 
 void SettingsPanel::SetBounds(const RECT& r) {
+    // The main window lays out often (status hints come and go). Moving and re-laying out every
+    // control when nothing changed made the panel flicker and could move a control while it was
+    // being clicked, so only real changes are applied.
+    if (EqualRect(&r, &bounds_)) return;
+    bounds_ = r;
     MoveWindow(host_, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     Relayout();
 }
@@ -208,13 +265,56 @@ void SettingsPanel::LayoutContent(int width) {
     }
     endCard();
 
+    const int labelW = std::min(Scale(130), w * 2 / 5);
+    auto choiceRow = [&](const Choice& ch) {
+        if (!(GetWindowLongPtrW(ch.combo, GWL_STYLE) & WS_VISIBLE)) return;
+        place(ch.label, x, y, labelW - gap, Scale(30));
+        place(ch.combo, x + labelW, y, w - labelW, Scale(300));  // height includes the drop-down list
+        y += Scale(30) + gap;
+    };
+    auto visible = [](HWND hwnd) { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0; };
+    beginCard(L"BACKGROUND", nullptr);
+    choiceRow(bgMode_);
+    choiceRow(bgBlur_);
+    choiceRow(bgBuiltin_);
+    if (visible(bgColor_)) {
+        place(bgColorLabel_, x, y, labelW - gap, Scale(30));
+        place(bgColor_, x + labelW, y, w - labelW, Scale(30));
+        y += Scale(30) + gap;
+    }
+    choiceRow(bgCustom_);
+    if (visible(bgBrowse_)) {
+        const int half = (w - labelW - gap) / 2;
+        place(bgBrowse_, x + labelW, y, half, Scale(30));
+        place(bgRemove_, x + labelW + half + gap, y, w - labelW - half - gap, Scale(30));
+        y += Scale(30) + gap;
+    }
+    choiceRow(bgFit_);
+    for (auto& s : bgSliders_)
+        if (visible(s.wnd)) row(s.wnd);
+    endCard();
+
     beginCard(L"CAMERA FEATURES", nullptr);
     row(smooth_);
     row(autoFraming_);
     row(face_);
     place(faceMarkers_, x + Scale(14), y, w - Scale(14), WidgetHeight(faceMarkers_));
     y += WidgetHeight(faceMarkers_) + gap;
-    row(gpu_);
+    choiceRow(processing_);
+    choiceRow(antiFlicker_);
+    row(diagnostics_);
+    if (diagnosticsOn_) {
+        wchar_t text[1024];
+        GetWindowTextW(diagText_, text, 1024);
+        HDC dc = GetDC(content_);
+        HGDIOBJ old = SelectObject(dc, fonts_->caption);
+        RECT calc{0, 0, w, 0};
+        DrawTextW(dc, text[0] ? text : L"X", -1, &calc, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        SelectObject(dc, old);
+        ReleaseDC(content_, dc);
+        place(diagText_, x, y, w, calc.bottom);
+        y += calc.bottom + gap;
+    }
     endCard();
 
     beginCard(L"IXC CAMERA", nullptr);
@@ -278,7 +378,28 @@ void SettingsPanel::Refresh() {
     if (!profile_) return;
     for (auto& s : sliders_) SendMessageW(s.wnd, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(s.get(*profile_) / s.scale)));
     SendMessageW(mirror_, BM_SETCHECK, profile_->mirror ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(gpu_, BM_SETCHECK, profile_->gpu == GpuMode::Auto ? BST_CHECKED : BST_UNCHECKED, 0);
+    for (auto& s : bgSliders_) SendMessageW(s.wnd, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(s.get(*profile_) / s.scale)));
+    const int procSel = profile_->processing == ProcessingMode::Gpu ? 1 : profile_->processing == ProcessingMode::Cpu ? 2 : 0;
+    SendMessageW(processing_.combo, CB_SETCURSEL, static_cast<WPARAM>(procSel), 0);
+    SendMessageW(antiFlicker_.combo, CB_SETCURSEL, static_cast<WPARAM>(profile_->antiFlicker), 0);
+    SendMessageW(diagnostics_, BM_SETCHECK, diagnosticsOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    const BackgroundSettings& bg = profile_->background;
+    SendMessageW(bgMode_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.mode), 0);
+    SendMessageW(bgBlur_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.blur), 0);
+    SendMessageW(bgFit_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.fit), 0);
+    const auto& builtins = effects::BuiltinBackgrounds();
+    for (size_t i = 0; i < builtins.size(); ++i)
+        if (bg.builtin == builtins[i].id) SendMessageW(bgBuiltin_.combo, CB_SETCURSEL, i, 0);
+    recent_ = RecentBackgrounds();
+    if (!bg.image.empty() && std::find(recent_.begin(), recent_.end(), bg.image) == recent_.end()) recent_.insert(recent_.begin(), bg.image);
+    SendMessageW(bgCustom_.combo, CB_RESETCONTENT, 0, 0);
+    for (const auto& n : recent_) SendMessageW(bgCustom_.combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(Utf8ToWide(n).c_str()));
+    for (size_t i = 0; i < recent_.size(); ++i)
+        if (recent_[i] == bg.image) SendMessageW(bgCustom_.combo, CB_SETCURSEL, i, 0);
+    wchar_t hex[48];
+    swprintf_s(hex, L"Colour  #%06X", static_cast<unsigned>(bg.color & 0xFFFFFF));
+    SetWindowTextW(bgColorLabel_, hex);
+    UpdateBackgroundRows();
     SendMessageW(smooth_, BM_SETCHECK, profile_->smoothMotion ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(autoFraming_, BM_SETCHECK, profile_->autoFraming ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -324,6 +445,15 @@ void SettingsPanel::Changed() {
 }
 
 bool SettingsPanel::OnScroll(HWND control) {
+    for (auto& s : bgSliders_) {
+        if (s.wnd != control) continue;
+        const double v = static_cast<double>(SendMessageW(s.wnd, TBM_GETPOS, 0, 0)) * s.scale;
+        if (v != s.get(*profile_)) {
+            s.set(*profile_, v);
+            Changed();
+        }
+        return true;
+    }
     for (auto& s : sliders_) {
         if (s.wnd != control) continue;
         const double v = static_cast<double>(SendMessageW(s.wnd, TBM_GETPOS, 0, 0)) * s.scale;
@@ -351,12 +481,37 @@ bool SettingsPanel::OnScroll(HWND control) {
 }
 
 bool SettingsPanel::OnCommand(HWND control, int code) {
-    if (code != BN_CLICKED || GetParent(control) != content_) return false;
+    if (GetParent(control) != content_) return false;
+    if (code == CBN_SELCHANGE) {
+        const LRESULT sel = SendMessageW(control, CB_GETCURSEL, 0, 0);
+        return sel != CB_ERR && OnChoice(GetDlgCtrlID(control), static_cast<int>(sel));
+    }
+    if (code != BN_CLICKED) return false;
     const auto checked = [&](HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED; };
     const int id = GetDlgCtrlID(control);
     switch (id) {
         case kIdMirror: profile_->mirror = checked(mirror_); break;
-        case kIdGpu: profile_->gpu = checked(gpu_) ? GpuMode::Auto : GpuMode::Off; break;
+        case kIdDiagnostics:
+            diagnosticsOn_ = checked(diagnostics_);
+            ShowWindow(diagText_, diagnosticsOn_ ? SW_SHOWNA : SW_HIDE);
+            Relayout();
+            return true;  // app-only view: nothing to save
+        case kIdBgBrowse:
+            if (!BrowseBackground()) return true;
+            break;
+        case kIdBgRemove: {
+            BackgroundSettings& bg = profile_->background;
+            if (!bg.image.empty()) RemoveBackground(bg.image);
+            bg.image.clear();
+            const auto left = RecentBackgrounds();
+            if (!left.empty()) bg.image = left.front();
+            else bg.mode = BackgroundMode::Blur;  // no picture left: never a silent reset to Original
+            Refresh();
+            break;
+        }
+        case kIdBgColor:
+            PickColor();
+            return true;
         case kIdSmoothMotion: profile_->smoothMotion = checked(smooth_); break;
         case kIdAutoFraming: profile_->autoFraming = checked(autoFraming_); break;
         case kIdFaceTracking: profile_->faceTracking.enabled = checked(face_); break;
@@ -394,13 +549,130 @@ bool SettingsPanel::OnCommand(HWND control, int code) {
     return true;
 }
 
+// Drop-down lists. False for ids this panel doesn't own (the profile list is the owner's).
+bool SettingsPanel::OnChoice(int id, int sel) {
+    BackgroundSettings& bg = profile_->background;
+    switch (id) {
+        case kIdGpu: profile_->processing = sel == 1 ? ProcessingMode::Gpu : sel == 2 ? ProcessingMode::Cpu : ProcessingMode::Auto; break;
+        case kIdAntiFlicker: profile_->antiFlicker = static_cast<AntiFlicker>(std::clamp(sel, 0, 3)); break;
+        case kIdBgMode: {
+            const auto mode = static_cast<BackgroundMode>(std::clamp(sel, 0, 4));
+            if (mode == BackgroundMode::Custom && bg.image.empty()) {
+                if (!recent_.empty()) bg.image = recent_.front();
+                else if (!BrowseBackground()) {  // cancelled: stay on the current mode
+                    Refresh();
+                    return true;
+                }
+            }
+            bg.mode = mode;
+            break;
+        }
+        case kIdBgBlur: bg.blur = static_cast<BlurLevel>(std::clamp(sel, 0, 2)); break;
+        case kIdBgFit: bg.fit = sel == 1 ? BackgroundFit::Fit : BackgroundFit::Fill; break;
+        case kIdBgBuiltin: {
+            const auto& list = effects::BuiltinBackgrounds();
+            if (sel >= static_cast<int>(list.size())) return true;
+            bg.builtin = list[static_cast<size_t>(sel)].id;
+            break;
+        }
+        case kIdBgCustom:
+            if (sel >= static_cast<int>(recent_.size())) return true;
+            bg.image = recent_[static_cast<size_t>(sel)];
+            TouchBackground(bg.image);
+            break;
+        default: return false;
+    }
+    UpdateBackgroundRows();
+    Changed();
+    return true;
+}
+
+// Browse… : imports a picture and selects it (Custom mode). False when cancelled or failed.
+bool SettingsPanel::BrowseBackground() {
+    wchar_t file[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{sizeof(ofn)};
+    ofn.hwndOwner = owner_;
+    ofn.lpstrFilter = L"Pictures (JPG, PNG, WEBP, BMP)\0*.jpg;*.jpeg;*.png;*.webp;*.bmp\0All files\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = L"Choose a background picture";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return false;
+    HCURSOR old = SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+    std::wstring error;
+    const std::string name = ImportBackground(file, error);
+    SetCursor(old);
+    if (name.empty()) {
+        MessageBoxW(owner_, error.c_str(), L"IXC Camera", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    profile_->background.image = name;
+    profile_->background.mode = BackgroundMode::Custom;
+    Refresh();
+    return true;
+}
+
+void SettingsPanel::PickColor() {
+    static COLORREF custom[16] = {};
+    const std::uint32_t rgb = profile_->background.color;
+    CHOOSECOLORW cc{sizeof(cc)};
+    cc.hwndOwner = owner_;
+    cc.rgbResult = RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+    cc.lpCustColors = custom;
+    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+    if (!ChooseColorW(&cc)) return;
+    profile_->background.color = (static_cast<std::uint32_t>(GetRValue(cc.rgbResult)) << 16) | (static_cast<std::uint32_t>(GetGValue(cc.rgbResult)) << 8) |
+                                 GetBValue(cc.rgbResult);
+    profile_->background.mode = BackgroundMode::Color;
+    Refresh();
+    Changed();
+}
+
+// Shows only the rows the current background mode uses.
+void SettingsPanel::UpdateBackgroundRows() {
+    const BackgroundMode m = profile_->background.mode;
+    const bool picture = m == BackgroundMode::Replace || m == BackgroundMode::Custom;
+    bool changed = false;
+    auto show = [&](HWND hwnd, bool on) {
+        const bool now = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0;
+        if (now != on) {
+            ShowWindow(hwnd, on ? SW_SHOWNA : SW_HIDE);
+            changed = true;
+        }
+    };
+    auto showChoice = [&](const Choice& ch, bool on) {
+        show(ch.label, on);
+        show(ch.combo, on);
+    };
+    showChoice(bgBlur_, m == BackgroundMode::Blur);
+    showChoice(bgBuiltin_, m == BackgroundMode::Replace);
+    show(bgColorLabel_, m == BackgroundMode::Color);
+    show(bgColor_, m == BackgroundMode::Color);
+    showChoice(bgCustom_, m == BackgroundMode::Custom);
+    show(bgBrowse_, m == BackgroundMode::Custom);
+    show(bgRemove_, m == BackgroundMode::Custom);
+    showChoice(bgFit_, picture);
+    for (auto& s : bgSliders_) show(s.wnd, picture);
+    if (changed) Relayout();
+}
+
+void SettingsPanel::SetDiagnosticsText(const std::wstring& text) {
+    wchar_t old[1024];
+    GetWindowTextW(diagText_, old, 1024);
+    if (text == old) return;
+    const auto lines = [](const std::wstring& s) { return std::count(s.begin(), s.end(), L'\n'); };
+    const bool relayout = lines(text) != lines(old);
+    SetWindowTextW(diagText_, text.c_str());
+    if (relayout) Relayout();
+}
+
 void SettingsPanel::SetFaceOverlay(bool on) {
     faceOverlay_ = on;
     SendMessageW(faceMarkers_, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 void SettingsPanel::SetFaceTrackingState(const std::wstring& text) { SetWidgetSubtext(face_, text); }
-void SettingsPanel::SetGpuState(const std::wstring& text) { SetWidgetSubtext(gpu_, text); }
+
 
 // ---- window procedures -----------------------------------------------------------------------------
 
