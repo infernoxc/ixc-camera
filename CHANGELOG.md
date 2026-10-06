@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 — Background blur and backdrop, face stickers, auto-framing, lens hotkeys (unreleased)
 
 ### Added
 - **Background Blur** and **Studio Backdrop** effects, driven by real person segmentation (not an ellipse):
