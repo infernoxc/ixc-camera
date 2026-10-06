@@ -3,6 +3,7 @@
 #include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "ixc_test.h"
+#include "processing/image_pipeline.h"
 #include "profiles/profile.h"
 #include "segmentation/mask_refine.h"
 
@@ -492,4 +493,134 @@ IXC_TEST(Background_BlurControlsInProfile) {
     // The compiled config carries the controls.
     const auto cfg = CompileEffects(p, false);
     IXC_CHECK(cfg->background.bokeh && std::abs(cfg->background.feather - 0.2f) < 1e-6f && std::abs(cfg->background.strength - 0.65f) < 1e-6f);
+}
+
+IXC_TEST(Background_MaskEasesWithoutGhostsAndSurvivesDropouts) {
+    const Frame src = Textured(320, 180);
+    seg::SegMask mask = ColumnMask();
+    BackgroundContext ctx;
+    ctx.mask = &mask;
+    BackgroundRenderer r;
+    BackgroundConfig c = Mode(BackgroundMode::Color);
+    c.feather = 1.0f;  // soft: mid values pass through the curve
+    Render(r, src, c, ctx);
+    const size_t inside = static_cast<size_t>(140) * seg::kMaskW + seg::kMaskW / 2;
+    const size_t outside = static_cast<size_t>(140) * seg::kMaskW + 20;
+    IXC_CHECK(r.EffectiveMask()[inside] > 240 && r.EffectiveMask()[outside] < 15);
+    // Large change (the person moved away): taken at once, no trail.
+    seg::SegMask moved = ColumnMask(0.0f, 0.1f);
+    moved.generation = 2;
+    ctx.mask = &moved;
+    Frame f = src;
+    r.Apply(f.View(), c, ctx);
+    IXC_CHECK(r.EffectiveMask()[inside] < 15);
+    // Small change (edge noise): eased over a few frames instead of popping.
+    seg::SegMask noisy = moved;
+    noisy.generation = 3;
+    for (int y = 0; y < seg::kMaskH; ++y)
+        for (int x = 200; x < 300; ++x) noisy.value[static_cast<size_t>(y) * seg::kMaskW + x] = 100;  // feathered to ~80: a small change
+    ctx.mask = &noisy;
+    const size_t mid = static_cast<size_t>(140) * seg::kMaskW + 250;
+    const int before = r.EffectiveMask()[mid];
+    f = src;
+    r.Apply(f.View(), c, ctx);
+    const int after1 = r.EffectiveMask()[mid];
+    for (int i = 0; i < 10; ++i) {
+        f = src;
+        r.Apply(f.View(), c, ctx);
+    }
+    const int settled = r.EffectiveMask()[mid];
+    IXC_CHECK(settled > before + 10);
+    IXC_CHECK(after1 > before && after1 < settled);  // partway after one frame
+    // Masks stop arriving: the effect keeps working on the last mask and fades out, no instant cut.
+    ctx.mask = nullptr;
+    f = src;
+    r.Apply(f.View(), c, ctx);
+    IXC_CHECK(f.buf != src.buf);
+    for (int i = 0; i < 30; ++i) {
+        f = src;
+        r.Apply(f.View(), c, ctx);
+    }
+    IXC_CHECK(f.buf == src.buf);
+}
+
+IXC_TEST(Background_FeatherIsContinuousAndMaxBlurKeepsForeground) {
+    const Frame src = Textured(320, 180);
+    seg::SegMask ramp = ColumnMask();
+    for (int y = 0; y < seg::kMaskH; ++y)
+        for (int x = 0; x < seg::kMaskW; ++x) ramp.value[static_cast<size_t>(y) * seg::kMaskW + x] = static_cast<std::uint8_t>(std::clamp((x - 128) * 2, 0, 255));
+    BackgroundContext ctx;
+    ctx.mask = &ramp;
+    for (float feather : {0.0f, 0.35f, 1.0f}) {
+        BackgroundRenderer r;
+        BackgroundConfig c = Mode(BackgroundMode::Color);
+        c.feather = feather;
+        Render(r, src, c, ctx);
+        const auto& m = r.EffectiveMask();
+        int worstStep = 0;
+        for (int x = 1; x < seg::kMaskW; ++x) {
+            const int a = m[static_cast<size_t>(100) * seg::kMaskW + x - 1], b = m[static_cast<size_t>(100) * seg::kMaskW + x];
+            IXC_CHECK(b >= a);  // monotonic: no dark/bright ring
+            worstStep = std::max(worstStep, b - a);
+        }
+        IXC_CHECK(worstStep < 128);  // a transition, not a cut (even the crisp setting spans pixels)
+    }
+    // Maximum blur leaves the person exactly as it was.
+    seg::SegMask mask = ColumnMask();
+    ctx.mask = &mask;
+    BackgroundRenderer r;
+    BackgroundConfig c = Mode(BackgroundMode::Blur);
+    c.strength = 1.0f;
+    c.bokeh = true;
+    Frame out = Render(r, src, c, ctx);
+    Frame s = src;
+    for (int y = 20; y < 160; y += 10) IXC_CHECK_EQ(out.Y(160, y), s.Y(160, y));
+}
+
+// The preview compiles the app's profile; IXC Camera compiles the same profile after it went
+// through active-profile.json. Both must produce the same pipeline and effects (no drift from
+// the JSON round trip, nothing reset to defaults).
+IXC_TEST(Sync_PreviewAndVirtualCameraCompileTheSameSettings) {
+    Profile p;
+    p.mirror = true;
+    p.zoom = 1.37;
+    p.image.brightness = 12.3;
+    p.image.contrast = -7.7;
+    p.image.saturation = 21.1;
+    p.image.gamma = 1.13;
+    p.image.sharpness = 63;
+    p.image.temperature = 17.9;
+    p.image.highlights = -33.3;
+    p.image.shadows = 41.7;
+    p.image.denoise = 37;
+    p.background.mode = BackgroundMode::Blur;
+    p.background.style = BlurStyle::Bokeh;
+    p.background.preset = BlurPreset::Custom;
+    p.background.strength = 71.3;
+    p.background.feather = 22.2;
+    p.background.falloff = 64.4;
+    p.background.edgeProtection = 81;
+    p.effectsEnabled = true;
+    Validate(p);
+    const ProfileLoadResult published = ProfileFromJson(ProfileToJson(p));
+    IXC_CHECK(published.ok);
+    if (!published.ok) return;
+    Profile vcam = published.profile;
+    Validate(vcam);
+    IXC_CHECK(vcam == p);
+
+    const auto a = processing::CompileParams(p, 1280, 720, false);
+    const auto b = processing::CompileParams(vcam, 1280, 720, false);
+    IXC_CHECK(a.yLut == b.yLut && a.uLut == b.uLut && a.vLut == b.vLut);
+    IXC_CHECK(a.identity == b.identity && a.sharpenAmount == b.sharpenAmount && a.sharpenThreshold == b.sharpenThreshold);
+    IXC_CHECK(a.mirror == b.mirror && a.srcX == b.srcX && a.srcY == b.srcY && a.srcW == b.srcW && a.srcH == b.srcH);
+    IXC_CHECK(!a.identity && a.mirror);
+
+    const auto ea = CompileEffects(p, false), eb = CompileEffects(vcam, false);
+    IXC_CHECK(ea->denoise == eb->denoise && ea->grade == eb->grade && ea->yLut == eb->yLut);
+    const BackgroundConfig& ba = ea->background;
+    const BackgroundConfig& bb = eb->background;
+    IXC_CHECK(ba.mode == bb.mode && ba.strength == bb.strength && ba.bokeh == bb.bokeh && ba.falloff == bb.falloff &&
+              ba.feather == bb.feather && ba.protection == bb.protection);
+    IXC_CHECK(ba.mode == BackgroundMode::Blur && ba.bokeh && std::abs(ba.strength - 0.713f) < 1e-4f);
 }

@@ -17,7 +17,8 @@ add_executable(ixc_unit_tests
     test_background.cpp
     test_denoise.cpp
     test_flicker.cpp
-    test_gpu_segmentation.cpp)
+    test_gpu_segmentation.cpp
+    test_update.cpp)
 target_link_libraries(ixc_unit_tests PRIVATE ixc_camera ixc_processing ixc_processing_gpu ixc_face ixc_effects ixc_segmentation ixc_segmentation_gpu)
 
 add_test(NAME unit COMMAND ixc_unit_tests)

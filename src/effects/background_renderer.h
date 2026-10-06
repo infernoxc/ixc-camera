@@ -69,12 +69,14 @@ public:
 
 private:
     void BuildMask(const BackgroundContext& ctx, const BackgroundConfig& cfg);
+    void ApplyFaceGuard(const BackgroundContext& ctx, const BackgroundConfig& cfg);
     void BuildBlurSource(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx);
     void BuildPlate(const processing::Nv12Frame& f, const BackgroundConfig& cfg, bool fullRange);
     void Composite(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx, float mix);
 
     float presence_ = 0;                       // 0..1 fade-in after the first mask
-    std::vector<std::uint8_t> mask_;           // effective mask
+    std::vector<std::uint8_t> mask_;           // effective mask (shown; eases toward target_)
+    std::vector<std::uint8_t> target_, smooth_;  // newest feathered+smoothed+guarded mask, scratch
     // Blur: 1/8-scale frame planes and the blurred result.
     int lw_ = 0, lh_ = 0;
     int cell_ = 8;                             // blur source scale: 1/cell_ (4 for light blur, 8 for strong)

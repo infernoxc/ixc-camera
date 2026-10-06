@@ -12,6 +12,8 @@
 ## Upgrades
 - If the Windows camera service still has the previous IXC DLL loaded during an upgrade or uninstall, the old file is renamed `*.old-*` and deleted at the next reboot. Until the service unloads it (it stops by itself when idle, or on reboot), apps may still get the old version.
 
+- **In-app updates** (0.14+) start the regular installer, so the usual UAC prompt appears. Releases before 0.14 have no updater: update them by downloading the installer once. The installer isn't code-signed yet, so SmartScreen may warn.
+
 ## Picture processing
 - **Processing: Auto / GPU / CPU.**
   - What moves to the GPU: the picture pipeline (colour, sharpen, crop/zoom) and the segmentation network.

@@ -9,6 +9,7 @@
 
 #include "app/perf_monitor.h"
 #include "app/settings_panel.h"
+#include "app/updater.h"
 #include "app/widgets.h"
 #include "app/preview_window.h"
 #include "camera/capture_session.h"
@@ -27,6 +28,7 @@
 #include "profiles/active_profile.h"
 #include "profiles/app_settings.h"
 #include "profiles/profile_store.h"
+#include "profiles/settings_sync.h"
 #include "virtual_camera/registration.h"
 
 #include <windows.h>
@@ -40,6 +42,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 #include <commdlg.h>
 
 #include <filesystem>
@@ -74,6 +77,10 @@ enum ControlId : int {
     kIdHint = 107,
     kIdPrivacy = 108,
     kIdPerf = 109,
+    kIdRefresh = 110,
+    kIdUpdatePill = 111,   // header "Update available" (opens the Updates section)
+    kIdNav0 = 120,         // navigation rail: one per app::PanelSection, 120..125
+    kIdQuick0 = 130,       // bottom bar: background None/Blur/Image/Colour 130..133, effects 134
     // Settings column controls: app::PanelId (settings_panel.h), 200 and up.
 };
 using app::kIdProfileCombo;
@@ -83,14 +90,24 @@ using app::kIdProfileImport;
 using app::kIdProfileExport;
 using app::kIdHotkeys;
 using app::kIdVcamUse;
+using app::PanelSection;
+
+// Navigation rail entries, in app::PanelSection order.
+constexpr const wchar_t* kNavLabels[app::kPanelSections] = {L"Camera", L"Effects", L"Background", L"Profiles", L"Settings", L"Updates"};
+// Bottom quick bar: background shortcuts (modes the renderer supports) and the effects switch.
+constexpr BackgroundMode kQuickModes[] = {BackgroundMode::Original, BackgroundMode::Blur, BackgroundMode::Replace, BackgroundMode::Color};
+constexpr const wchar_t* kQuickLabels[] = {L"None", L"Blur", L"Image", L"Colour"};
+constexpr int kQuickCount = 4;
+constexpr double kUpdateCheckInterval = 24.0 * 3600.0;  // automatic check at most once a day
 
 constexpr UINT kStateMessage = WM_APP + 11;
 constexpr UINT kVcamDoneMessage = WM_APP + 12;  // wParam = ixc_vcam.exe exit code
 constexpr UINT kAutoStartMessage = WM_APP + 13;  // start the preview once the window is shown
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
-constexpr UINT_PTR kPublishTimer = 3;       // saves/publishes settings shortly after the last slider move
+constexpr UINT_PTR kPublishTimer = 3;       // sends settings to IXC Camera (coalesced, see profiles/settings_sync.h)
 constexpr UINT_PTR kPerfTimer = 4;          // live CPU/RAM readout (always on, 1 s)
+constexpr UINT_PTR kSaveTimer = 5;          // writes the user's profile after the last change
 
 std::filesystem::path LocalAppDataDir() {
     PWSTR raw = nullptr;
@@ -133,6 +150,7 @@ private:
     void RefreshFeatureStates();
     LRESULT ControlColor(HWND control, HDC dc);
     int Scale(int v) const { return MulDiv(v, dpi_, 96); }
+    int VcamPillWidth() const;
 
     void LoadProfile();
     void SaveProfile();
@@ -150,6 +168,22 @@ private:
     void OnPictureChanged();
     void UpdatePipeline();
     void SaveAndPublish();
+    void PublishNow();
+    SettingsSync sync_;
+    // Navigation, quick bar, updates (0.14).
+    void SelectSection(PanelSection s);
+    void RefreshQuickBar();
+    void OnQuick(int index);
+    void OnUpdateChecked(const app::UpdateCheckResult& r);
+    void OnUpdateDownloaded(const app::UpdateDownloadResult& r);
+    void InstallUpdate();
+    void SkipUpdate();
+    HWND nav_[app::kPanelSections] = {};
+    HWND quick_[kQuickCount + 1] = {};
+    HWND refresh_ = nullptr, updatePill_ = nullptr;
+    RECT rail_{}, quickBar_{};
+    app::Updater updater_;
+    ReleaseInfo update_;  // newest release found (update_.ok), offered to the user
     // Profiles and hotkeys (Phase 9).
     void RefreshProfileList();
     void SwitchProfile(const std::string& stem);
@@ -261,6 +295,10 @@ bool MainWindow::Create(int showCmd) {
     ShowWindow(hwnd_, showCmd);
     // The control panel opens straight to the live preview.
     if (!cameras_.empty()) PostMessageW(hwnd_, kAutoStartMessage, 0, 0);
+    // Background update check, at most once a day (offline = silently nothing).
+    const double now = static_cast<double>(std::time(nullptr));
+    if (now - app_.lastUpdateCheck >= kUpdateCheckInterval || app_.lastUpdateCheck > now) updater_.Check(hwnd_, false);
+    RefreshQuickBar();
     SetFocus(startStop_);  // not the profile box (its text would show selected)
     return true;
 }
@@ -282,6 +320,13 @@ void MainWindow::CreateControls() {
     camera_ = combo(kIdCamera);
     format_ = combo(kIdFormat);
     startStop_ = CreateButton(hwnd_, kIdStartStop, L"Start preview", ButtonStyle::Primary, &fonts_, theme::kBg);
+    refresh_ = CreateButton(hwnd_, kIdRefresh, L"Refresh", ButtonStyle::Secondary, &fonts_, theme::kBg);
+    updatePill_ = CreateButton(hwnd_, kIdUpdatePill, L"Update available", ButtonStyle::Primary, &fonts_, theme::kBg);
+    ShowWindow(updatePill_, SW_HIDE);
+    for (int i = 0; i < kPanelSections; ++i)
+        nav_[i] = CreateButton(hwnd_, kIdNav0 + i, kNavLabels[i], i == 0 ? ButtonStyle::NavSelected : ButtonStyle::Nav, &fonts_, theme::kBg);
+    for (int i = 0; i <= kQuickCount; ++i)
+        quick_[i] = CreateButton(hwnd_, kIdQuick0 + i, i < kQuickCount ? kQuickLabels[i] : L"Effects", ButtonStyle::Secondary, &fonts_, theme::kBg);
     preview_.Create(hwnd_, instance_, kIdPreview);
     status_ = label(kIdStatus, WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS);
     hint_ = label(kIdHint, SS_LEFT);  // shown only while it has something to say
@@ -317,29 +362,39 @@ void MainWindow::Layout() {
     const int pad = Scale(16), gap = Scale(10), rowH = Scale(34), headerH = Scale(56);
     header_ = {0, 0, w, headerH};
 
-    const int panelW = std::clamp(w * 32 / 100, Scale(330), Scale(420));
+    const int panelW = std::clamp(w * 30 / 100, Scale(320), Scale(420));
     panel_.SetBounds({w - panelW, headerH, w, h});
 
-    const int left = pad, right = w - panelW - Scale(4);
-    int y = headerH + Scale(8);
-    // Toolbar: camera, format, start/stop.
-    const int buttonW = Scale(150);
-    const int comboSpace = std::max(Scale(200), right - left - buttonW - 2 * gap);
-    const int cameraW = comboSpace * 55 / 100;
-    HDWP dwp = BeginDeferWindowPos(10);
+    // Navigation rail on the left (its version line is painted under the entries).
+    const int railW = std::clamp(w * 12 / 100, Scale(128), Scale(176));
+    rail_ = {0, headerH, railW, h};
+    HDWP dwp = BeginDeferWindowPos(24);
     auto place = [&](HWND hw, int x, int yy, int ww, int hh) {
         if (dwp) dwp = DeferWindowPos(dwp, hw, nullptr, x, yy, std::max(0, ww), std::max(0, hh), SWP_NOZORDER | SWP_NOACTIVATE);
     };
+    for (int i = 0; i < app::kPanelSections; ++i) place(nav_[i], Scale(10), headerH + Scale(12) + i * Scale(42), railW - Scale(20), Scale(38));
+
+    // Header: the update notice sits left of the IXC Camera status pill (painted).
+    if (IsWindowVisible(updatePill_)) place(updatePill_, w - Scale(18) - VcamPillWidth() - Scale(10) - Scale(150), (headerH - Scale(30)) / 2, Scale(150), Scale(30));
+
+    const int left = railW + pad, right = w - panelW - Scale(4);
+    int y = headerH + Scale(8);
+    // Toolbar: camera, format, refresh, start/stop.
+    const int buttonW = Scale(150), refreshW = Scale(84);
+    const int comboSpace = std::max(Scale(200), right - left - buttonW - refreshW - 3 * gap);
+    const int cameraW = comboSpace * 55 / 100;
     RECT cr{};
     GetWindowRect(camera_, &cr);  // a combo box sizes its own edit height; centre it on the row
     const int comboTop = y + std::max(0, (rowH - static_cast<int>(cr.bottom - cr.top)) / 2);
     place(camera_, left, comboTop, cameraW, Scale(400));
     place(format_, left + cameraW + gap, comboTop, comboSpace - cameraW - gap, Scale(400));
+    place(refresh_, right - buttonW - gap - refreshW, y, refreshW, rowH);
     place(startStop_, right - buttonW, y, buttonW, rowH);
     y += rowH + gap;
 
     // Footer: status line, then (only when needed) the hint and the privacy button.
-    int footer = Scale(28);
+    const int quickH = Scale(34);
+    int footer = Scale(28) + quickH + Scale(10);
     wchar_t hintText[512] = L"";
     GetWindowTextW(hint_, hintText, 512);
     int hintH = 0;
@@ -359,7 +414,13 @@ void MainWindow::Layout() {
     const int previewBottom = std::max(y + Scale(120), h - pad - footer);
     previewFrame_ = {left, y, right, previewBottom};
     place(preview_.hwnd(), left + 1, y + 1, right - left - 2, previewBottom - y - 2);
-    int fy = previewBottom + Scale(6);
+    // Quick bar under the preview: background shortcuts, then the effects switch.
+    int fy = previewBottom + Scale(8);
+    quickBar_ = {left, fy, right, fy + quickH};
+    const int quickLabelW = Scale(92), quickW = std::clamp((right - left - quickLabelW - Scale(110) - 5 * Scale(6)) / kQuickCount, Scale(56), Scale(110));
+    for (int i = 0; i < kQuickCount; ++i) place(quick_[i], left + quickLabelW + i * (quickW + Scale(6)), fy, quickW, quickH);
+    place(quick_[kQuickCount], right - Scale(110), fy, Scale(110), quickH);
+    fy += quickH + Scale(4);
     statusDot_ = {left + Scale(4), fy + Scale(10), left + Scale(12), fy + Scale(18)};
     const int perfW = Scale(230);  // live CPU/RAM, right-aligned on the status row
     place(status_, left + Scale(20), fy, std::max(Scale(80), right - left - Scale(20) - perfW), Scale(28));
@@ -375,6 +436,16 @@ void MainWindow::Layout() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+int MainWindow::VcamPillWidth() const {
+    HDC dc = GetDC(hwnd_);
+    HGDIOBJ old = SelectObject(dc, fonts_.caption);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, vcamPill_.c_str(), static_cast<int>(vcamPill_.size()), &sz);
+    SelectObject(dc, old);
+    ReleaseDC(hwnd_, dc);
+    return sz.cx + Scale(34);
+}
+
 void MainWindow::Paint(HDC dc, const RECT& rc) {
     using namespace app::theme;
     FillRect(dc, &rc, Brush(kBg));
@@ -386,6 +457,21 @@ void MainWindow::Paint(HDC dc, const RECT& rc) {
     if (iconHeader_) DrawIconEx(dc, x, (hdr.top + hdr.bottom - Scale(28)) / 2, iconHeader_, Scale(28), Scale(28), 0, nullptr, DI_NORMAL);
     RECT title{x + Scale(38), hdr.top, x + Scale(300), hdr.bottom};
     DrawTextIn(dc, L"IXC Camera", title, fonts_.title, kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    {
+        // LIVE badge: the camera is streaming into the preview (and so into the shared pipeline).
+        HGDIOBJ of = SelectObject(dc, fonts_.title);
+        SIZE ts{};
+        GetTextExtentPoint32W(dc, L"IXC Camera", 10, &ts);
+        SelectObject(dc, of);
+        const bool live = previewing_ && session_ && session_->State() == CaptureState::Streaming;
+        const int bx = title.left + ts.cx + Scale(14), bh = Scale(22), by = (hdr.top + hdr.bottom - bh) / 2;
+        RECT badge{bx, by, bx + Scale(62), by + bh};
+        FillRound(dc, badge, bh / 2, live ? Mix(kBg, kBad, 70) : kSurface, live ? kBad : kBorder);
+        const int dy = (badge.top + badge.bottom) / 2;
+        FillRound(dc, RECT{badge.left + Scale(9), dy - Scale(3), badge.left + Scale(15), dy + Scale(3)}, Scale(3), live ? kBad : kTextFaint, CLR_INVALID);
+        RECT bt{badge.left + Scale(19), badge.top, badge.right - Scale(4), badge.bottom};
+        DrawTextIn(dc, live ? L"LIVE" : L"OFF", bt, fonts_.caption, live ? kText : kTextFaint, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
     // IXC Camera (system camera) status pill, right-aligned.
     HGDIOBJ old = SelectObject(dc, fonts_.caption);
     SIZE sz{};
@@ -399,6 +485,15 @@ void MainWindow::Paint(HDC dc, const RECT& rc) {
     FillRound(dc, RECT{pill.left + Scale(12), cy - Scale(4), pill.left + Scale(20), cy + Scale(4)}, Scale(4), dot, CLR_INVALID);
     RECT pt{pill.left + Scale(26), pill.top, pill.right - Scale(8), pill.bottom};
     DrawTextIn(dc, vcamPill_, pt, fonts_.caption, kText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // Navigation rail: separator and the version under the entries.
+    RECT sep{rail_.right - 1, rail_.top, rail_.right, rail_.bottom};
+    FillRect(dc, &sep, Brush(kBorder));
+    RECT ver{rail_.left + Scale(12), rail_.bottom - Scale(54), rail_.right - Scale(8), rail_.bottom - Scale(12)};
+    DrawTextIn(dc, L"Version " IXC_VERSION_STRING L"\nLocal processing only", ver, fonts_.caption, kTextFaint, DT_LEFT | DT_BOTTOM | DT_WORDBREAK);
+    // Quick bar label.
+    RECT ql{quickBar_.left, quickBar_.top, quickBar_.left + Scale(88), quickBar_.bottom};
+    DrawTextIn(dc, L"Background", ql, fonts_.caption, kTextDim, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Preview frame and status dot.
     FillRound(dc, previewFrame_, Scale(6), RGB(0, 0, 0), kBorder);
@@ -491,6 +586,7 @@ void MainWindow::RefreshVcamStatus() {
     }
     panel_.Relayout();  // the status text may wrap differently
     InvalidateRect(hwnd_, &header_, FALSE);
+    if (updatePill_ && IsWindowVisible(updatePill_)) Layout();  // it sits next to the status pill
     UpdateVcamControls();
 }
 
@@ -641,7 +737,7 @@ void MainWindow::SwitchProfile(const std::string& stem) {
         return;
     }
     cycledLens_.clear();  // a different effect list: the lens hotkeys start afresh
-    if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // keep the old profile's last change
+    if (sync_.PublishArmed() || sync_.SavePending()) SaveAndPublish();  // keep the old profile's last change
     // The camera and format in use stay as they are; everything else comes from the profile.
     Profile next = r.profile;
     next.sourceCameraId = profile_.sourceCameraId;
@@ -654,6 +750,7 @@ void MainWindow::SwitchProfile(const std::string& stem) {
     SaveAppSettings();
     panel_.Refresh();
     UpdatePipeline();
+    RefreshQuickBar();
     SaveAndPublish();
     RefreshProfileList();
     SetHint((L"Profile: " + W(stem_)).c_str());
@@ -961,7 +1058,26 @@ void MainWindow::OnPictureChanged() {
         SaveAppSettings();
     }
     RefreshFeatureStates();
-    SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
+    RefreshQuickBar();
+    // IXC Camera follows the change live (coalesced to ~25 updates/s while dragging); the profile
+    // file is written once the control settles.
+    if (sync_.OnChange()) SetTimer(hwnd_, kPublishTimer, SettingsSync::kPublishMs, nullptr);
+    SetTimer(hwnd_, kSaveTimer, SettingsSync::kSaveMs, nullptr);
+}
+
+void MainWindow::PublishNow() {
+    KillTimer(hwnd_, kPublishTimer);
+    sync_.OnPublished();
+    // Publish for the IXC Camera source (inside the Windows camera service). Apps using IXC
+    // Camera pick the change up on their next frame.
+    if (!vcam_.comRegistered) return;
+    const HRESULT hr = PublishActiveProfile(ForPublishing(profile_));
+    if (FAILED(hr) && !publishWarned_) {
+        publishWarned_ = true;
+        const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
+        log::Error("profiles", e.Describe());
+        SetVcamText((W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
+    }
 }
 
 // Once a second: the status-bar readout, and the diagnostics view when it's open.
@@ -1043,18 +1159,10 @@ void MainWindow::UpdatePipeline() {
 }
 
 void MainWindow::SaveAndPublish() {
-    KillTimer(hwnd_, kPublishTimer);
+    KillTimer(hwnd_, kSaveTimer);
+    sync_.OnSaved();
     SaveProfile();
-    // Publish for the IXC Camera source (inside the Windows camera service). Apps using IXC
-    // Camera pick the change up on their next frame.
-    if (!vcam_.comRegistered) return;
-    const HRESULT hr = PublishActiveProfile(ForPublishing(profile_));
-    if (FAILED(hr) && !publishWarned_) {
-        publishWarned_ = true;
-        const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
-        log::Error("profiles", e.Describe());
-        SetVcamText((W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
-    }
+    PublishNow();
 }
 
 void MainWindow::StopPreview(const wchar_t* placeholder) {
@@ -1071,6 +1179,7 @@ void MainWindow::StopPreview(const wchar_t* placeholder) {
 void MainWindow::UpdateStatus() {
     RefreshFeatureStates();
     InvalidateRect(hwnd_, &statusDot_, FALSE);
+    InvalidateRect(hwnd_, &header_, FALSE);  // LIVE badge
     if (!previewing_) return;
     const auto st = session_->Stats();
     const auto fmt = session_->ActiveFormat();
@@ -1147,6 +1256,109 @@ void MainWindow::ShowPrivacyHelp(bool show) {
 
 // ---- window procedure -----------------------------------------------------------------------------
 
+// ---- Navigation, quick bar ------------------------------------------------------------------------
+
+void MainWindow::SelectSection(PanelSection s) {
+    for (int i = 0; i < app::kPanelSections; ++i)
+        app::SetButtonStyle(nav_[i], i == static_cast<int>(s) ? app::ButtonStyle::NavSelected : app::ButtonStyle::Nav);
+    panel_.SetSection(s);
+}
+
+void MainWindow::RefreshQuickBar() {
+    for (int i = 0; i < kQuickCount; ++i)
+        app::SetButtonStyle(quick_[i], profile_.background.mode == kQuickModes[i] ? app::ButtonStyle::Primary : app::ButtonStyle::Secondary);
+    app::SetButtonStyle(quick_[kQuickCount], profile_.effectsEnabled ? app::ButtonStyle::Primary : app::ButtonStyle::Secondary);
+    SetWindowTextW(quick_[kQuickCount], profile_.effectsEnabled ? L"Effects on" : L"Effects off");
+}
+
+// The quick bar edits the same profile as the inspector (and so the preview and IXC Camera).
+void MainWindow::OnQuick(int index) {
+    if (index == kQuickCount) {
+        profile_.effectsEnabled = !profile_.effectsEnabled;
+    } else {
+        const BackgroundMode mode = kQuickModes[index];
+        if (mode == BackgroundMode::Replace && profile_.background.builtin.empty()) {
+            const auto& builtins = effects::BuiltinBackgrounds();
+            if (!builtins.empty()) profile_.background.builtin = builtins.front().id;
+        }
+        profile_.background.mode = mode;
+    }
+    panel_.Refresh();
+    OnPictureChanged();
+}
+
+// ---- Updates ---------------------------------------------------------------------------------------
+
+void MainWindow::OnUpdateChecked(const app::UpdateCheckResult& r) {
+    if (!r.reached) {
+        // Offline, blocked or rate-limited: an automatic check stays silent.
+        panel_.SetUpdateState(r.manual ? L"Couldn't reach GitHub: " + r.error : std::wstring(L"IXC Camera " IXC_VERSION_STRING), update_.ok,
+                              update_.ok, false);
+        return;
+    }
+    app_.lastUpdateCheck = static_cast<double>(std::time(nullptr));
+    SaveAppSettings();
+    const SemVer current = ParseSemVer(IXC_VERSION_STRING);
+    if (!r.release.ok) {
+        log::Warn("update", "release information rejected: " + r.release.error);
+        if (r.manual) panel_.SetUpdateState(L"The latest release couldn't be used: " + W(r.release.error), false, false, false);
+        return;
+    }
+    if (CompareSemVer(ParseSemVer(r.release.version), current) <= 0) {
+        update_ = {};
+        ShowWindow(updatePill_, SW_HIDE);
+        panel_.SetUpdateState(L"IXC Camera " IXC_VERSION_STRING L" is up to date.", false, false, false);
+        return;
+    }
+    update_ = r.release;
+    const bool skipped = !r.manual && r.release.version == app_.skippedVersion;
+    std::wstring text = L"IXC Camera " + W(update_.version) + L" is available (you have " IXC_VERSION_STRING L").";
+    if (!update_.notes.empty()) text += L"\n\n" + W(update_.notes);
+    panel_.SetUpdateState(text, true, true, false);
+    ShowWindow(updatePill_, skipped ? SW_HIDE : SW_SHOWNA);
+    Layout();
+}
+
+void MainWindow::InstallUpdate() {
+    if (!update_.ok || updater_.Busy()) return;
+    const std::wstring ask = L"Download IXC Camera " + W(update_.version) +
+                             L" from the official GitHub release and install it?\n\nThe installer is checked against the release's "
+                             L"SHA-256 checksum before it runs. IXC Camera closes while the installer runs.";
+    if (MessageBoxW(hwnd_, ask.c_str(), L"Update IXC Camera", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    panel_.SetUpdateState(L"Downloading IXC Camera " + W(update_.version) + L"…", false, false, true);
+    updater_.Download(hwnd_, update_);
+}
+
+void MainWindow::OnUpdateDownloaded(const app::UpdateDownloadResult& r) {
+    if (!r.ok) {
+        log::Warn("update", "download failed: " + WideToUtf8(r.error));
+        panel_.SetUpdateState(L"The update couldn't be downloaded: " + r.error, update_.ok, update_.ok, false);
+        return;
+    }
+    // Hash it once more right before starting it (nothing may have changed the file since).
+    if (!app::Updater::VerifyFile(r.installer, r.sha256)) {
+        panel_.SetUpdateState(L"The downloaded installer failed verification and was not started.", update_.ok, update_.ok, false);
+        return;
+    }
+    log::Info("update", "starting verified installer for " + r.version);
+    if (sync_.PublishArmed() || sync_.SavePending()) SaveAndPublish();
+    const auto rc = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd_, L"open", r.installer.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    if (rc <= 32) {
+        panel_.SetUpdateState(L"The installer couldn't be started (cancelled?).", update_.ok, update_.ok, false);
+        return;
+    }
+    PostMessageW(hwnd_, WM_CLOSE, 0, 0);  // the installer replaces the app; it starts again afterwards
+}
+
+void MainWindow::SkipUpdate() {
+    if (!update_.ok) return;
+    app_.skippedVersion = update_.version;
+    SaveAppSettings();
+    ShowWindow(updatePill_, SW_HIDE);
+    panel_.SetUpdateState(L"Version " + W(update_.version) + L" skipped. Check again to see it.", false, false, false);
+    Layout();
+}
+
 LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_NCCREATE) {
         auto* self = static_cast<MainWindow*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
@@ -1222,7 +1434,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-            mmi->ptMinTrackSize = {Scale(860), Scale(560)};  // preview + settings column; the column scrolls
+            mmi->ptMinTrackSize = {Scale(1000), Scale(600)};  // preview + settings column; the column scrolls
             return 0;
         }
 
@@ -1279,7 +1491,30 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case kIdPrivacy:
                     ShellExecuteW(hwnd_, L"open", L"ms-settings:privacy-webcam", nullptr, nullptr, SW_SHOWNORMAL);
                     return 0;
+                case kIdRefresh:
+                    RefreshCameras();
+                    RefreshVcamStatus();
+                    return 0;
+                case kIdUpdatePill:
+                    SelectSection(PanelSection::Updates);
+                    return 0;
+                case app::kIdUpdateCheck:
+                    if (!updater_.Busy()) {
+                        panel_.SetUpdateState(L"Checking GitHub for a newer release…", false, false, true);
+                        updater_.Check(hwnd_, true);
+                    }
+                    return 0;
+                case app::kIdUpdateInstall: InstallUpdate(); return 0;
+                case app::kIdUpdateSkip: SkipUpdate(); return 0;
                 default:
+                    if (LOWORD(wp) >= kIdNav0 && LOWORD(wp) < kIdNav0 + app::kPanelSections) {
+                        SelectSection(static_cast<PanelSection>(LOWORD(wp) - kIdNav0));
+                        return 0;
+                    }
+                    if (LOWORD(wp) >= kIdQuick0 && LOWORD(wp) <= kIdQuick0 + kQuickCount) {
+                        OnQuick(LOWORD(wp) - kIdQuick0);
+                        return 0;
+                    }
                     break;
             }
             break;
@@ -1304,6 +1539,17 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             OnVcamDone(static_cast<DWORD>(wp));
             return 0;
 
+        case app::Updater::kCheckedMessage: {
+            std::unique_ptr<app::UpdateCheckResult> r(reinterpret_cast<app::UpdateCheckResult*>(lp));
+            if (r) OnUpdateChecked(*r);
+            return 0;
+        }
+        case app::Updater::kDownloadedMessage: {
+            std::unique_ptr<app::UpdateDownloadResult> r(reinterpret_cast<app::UpdateDownloadResult*>(lp));
+            if (r) OnUpdateDownloaded(*r);
+            return 0;
+        }
+
         case kStateMessage:
             OnCaptureState(static_cast<CaptureState>(wp));
             return 0;
@@ -1311,7 +1557,12 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == kStatusTimer) UpdateStatus();
             if (wp == kPerfTimer) UpdatePerf();
-            else if (wp == kPublishTimer) SaveAndPublish();
+            else if (wp == kPublishTimer) PublishNow();
+            else if (wp == kSaveTimer) {
+                KillTimer(hwnd_, kSaveTimer);
+                sync_.OnSaved();
+                SaveProfile();
+            }
             else if (wp == kDeviceRefreshTimer) {
                 KillTimer(hwnd_, kDeviceRefreshTimer);
                 RefreshCameras();
@@ -1340,7 +1591,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(hwnd_, kStatusTimer);
             KillTimer(hwnd_, kPerfTimer);
             UnregisterHotkeys();
-            if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // don't lose the last slider move
+            if (sync_.PublishArmed() || sync_.SavePending()) SaveAndPublish();  // don't lose the last slider move
             if (session_) {
                 session_->Close();
                 session_.Reset();

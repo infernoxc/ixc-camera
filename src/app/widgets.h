@@ -52,7 +52,7 @@ void ApplyDarkWindow(HWND top);
 void ApplyDarkControl(HWND control, bool comboBox);
 }  // namespace theme
 
-enum class ButtonStyle { Primary, Secondary, Ghost, Danger };
+enum class ButtonStyle { Primary, Secondary, Ghost, Danger, Nav, NavSelected };
 
 HWND CreateToggle(HWND parent, int id, const wchar_t* label, const theme::Fonts* fonts, COLORREF background);
 HWND CreateSlider(HWND parent, int id, const wchar_t* label, int min, int max, int defaultPos, std::function<std::wstring(int)> format,
@@ -61,8 +61,14 @@ HWND CreateButton(HWND parent, int id, const wchar_t* text, ButtonStyle style, c
 
 // Second, dimmer line under a toggle's label (e.g. its live state). Empty = one line.
 void SetWidgetSubtext(HWND widget, const std::wstring& text);
+// Restyles a button (e.g. the selected entry of the navigation rail).
+void SetButtonStyle(HWND button, ButtonStyle style);
 // Preferred height of a widget at the window's DPI.
 int WidgetHeight(HWND widget);
+
+// The scrolling panel calls this whenever it scrolls: sliders under the pointer then leave the
+// wheel to the panel for a moment (see WheelAdjustsSlider in profiles/settings_sync.h).
+void NotePanelScrolled();
 
 bool RegisterWidgetClass(HINSTANCE instance);
 

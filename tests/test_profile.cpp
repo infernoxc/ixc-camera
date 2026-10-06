@@ -255,6 +255,8 @@ IXC_TEST(AppSettings_RoundTripAndLenientParsing) {
     s.activeProfile = "evening-call";
     s.hotkeysEnabled = false;
     s.showFaceMarkers = false;
+    s.lastUpdateCheck = 1790000000;
+    s.skippedVersion = "0.15.0";
     IXC_CHECK(ixc::AppSettingsFromJson(ixc::AppSettingsToJson(s)) == s);
     IXC_CHECK(ixc::AppSettingsFromJson("not json") == ixc::AppSettings{});                         // damaged: defaults
     IXC_CHECK(ixc::AppSettingsFromJson(R"({"activeProfile": "..\evil"})").activeProfile == "default");  // never a path

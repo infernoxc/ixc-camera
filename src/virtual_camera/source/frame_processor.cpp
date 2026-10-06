@@ -268,31 +268,59 @@ void FrameProcessor::StopFaceTracking() {
 }
 
 void FrameProcessor::ReloadSettings() {
+    // One reload at a time: a write-then-rename produces several change notifications, and their
+    // callbacks may overlap on the thread pool. Each reload reads the whole, final file.
+    std::lock_guard reload(reloadMu_);
     // Parsing (a few KB of strictly validated JSON) happens here, never on the frame path.
     bool missing = false;
     ProfileLoadResult r = LoadActiveProfile(&missing);
     // The background picture is read from disk here (settings thread), outside the frame lock.
     std::shared_ptr<const effects::BackgroundImage> picture;
     if (r.ok) picture = bgSource_.Resolve(r.profile.background, BackgroundsDirectory());
+    Profile next = r.ok ? r.profile : Profile{};
+    if (!r.ok) next.image.sharpness = 0;  // no usable settings at all: pass the camera through unchanged
+    // What compilation depends on, read under the lock; then compile outside it, so a frame never
+    // waits for the LUTs and effect tables to be built.
+    bool nv12 = false, full = false;
+    UINT32 w = 0, h = 0;
+    double ev = 0;
+    {
+        std::lock_guard lock(mu_);
+        // Unchanged profile (the folder also changes for temp files): keep the compiled params.
+        if (r.ok && profileValid_ && r.profile == profile_ && picture == bgPicture_) return;
+        if (!r.ok && !missing && params_) {
+            // Present but unreadable/invalid (e.g. caught mid-write, or a bad hand edit): keep the
+            // last good settings instead of flickering to neutral.
+            IXC_TRACE("SettingsRejectedKeptPrevious");
+            return;
+        }
+        nv12 = nv12_;
+        w = width_;
+        h = height_;
+        full = fullRange_;
+        ev = compensationEv_;
+    }
+    std::shared_ptr<const processing::PipelineParams> params;
+    std::shared_ptr<const effects::EffectConfig> fx;
+    if (nv12 && w && h) {
+        const Profile effective = processing::WithSmoothMotionGain(next, ev);
+        params = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, w, h, full));
+        fx = effects::CompileEffects(effective, full, picture);
+    }
     std::lock_guard lock(mu_);
-    // Unchanged profile (the folder also changes for temp files): keep the compiled params.
-    if (r.ok && profileValid_ && r.profile == profile_ && picture == bgPicture_) return;
-    if (!r.ok && !missing && params_) {
-        // Present but unreadable/invalid (e.g. caught mid-write, or a bad hand edit): keep the
-        // last good settings instead of flickering to neutral.
-        IXC_TRACE("SettingsRejectedKeptPrevious");
-        return;
-    }
     profileValid_ = r.ok;
-    profile_ = r.ok ? r.profile : Profile{};
+    profile_ = std::move(next);
     bgPicture_ = std::move(picture);
-    if (!r.ok) {
-        // No usable settings at all: pass the camera through unchanged rather than guess.
-        profile_.image.sharpness = 0;
-    }
     ++counters_.settingsReloads;
     smoothSettingChanged_ = profile_.smoothMotion != smoothEnabled_;
-    Recompile();
+    if (params && nv12_ == nv12 && width_ == w && height_ == h && fullRange_ == full && compensationEv_ == ev) {
+        // The compiled snapshot is swapped in whole: a frame uses either the old or the new one.
+        ++generation_;
+        params_ = std::move(params);
+        effects_ = std::move(fx);
+    } else {
+        Recompile();  // the session changed meanwhile (rare): compile for the current one
+    }
     IXC_TRACE("SettingsLoaded", TraceLoggingBoolean(r.ok, "valid"), TraceLoggingBoolean(missing, "missing"),
               TraceLoggingBoolean(params_ && params_->identity, "identity"),
               TraceLoggingUInt32(static_cast<UINT32>(r.warnings.size()), "warnings"));

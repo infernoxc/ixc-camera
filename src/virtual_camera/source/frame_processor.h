@@ -93,6 +93,7 @@ private:
     double compensationEv_ = 0;   // under mu_: added to the profile's exposure
     bool smoothEnabled_ = false;  // under mu_
     bool smoothSettingChanged_ = false;  // under mu_
+    std::mutex reloadMu_;                // serializes ReloadSettings (overlapping change notifications)
 
     // Face tracking (off unless the profile enables it: then no thread, no memory).
     // faceMu_ is taken alone (never while holding mu_/smoothMu_).

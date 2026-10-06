@@ -55,9 +55,15 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     }
     host_ = CreateWindowExW(WS_EX_CONTROLPARENT, kHostClass, L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN, 0, 0, 0, 0,
                             owner, nullptr, instance, this);
-    content_ = CreateWindowExW(WS_EX_CONTROLPARENT, kContentClass, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 0, 0, host_,
-                               nullptr, instance, this);
-    if (!host_ || !content_) return false;
+    // One scrolling page per section; only the selected one is shown. Hiding a page hides its
+    // controls without touching their own visibility (rows that come and go keep working).
+    for (int i = 0; i < kPanelSections; ++i) {
+        contents_[i] = CreateWindowExW(WS_EX_CONTROLPARENT, kContentClass, L"", WS_CHILD | WS_CLIPCHILDREN | (i == 0 ? WS_VISIBLE : 0), 0, 0, 0, 0,
+                                       host_, nullptr, instance, this);
+        if (!contents_[i]) return false;
+    }
+    if (!host_) return false;
+    auto page = [&](PanelSection s) { content_ = contents_[static_cast<int>(s)]; };
     theme::ApplyDarkControl(host_, false);  // dark scroll bar
 
     const COLORREF card = theme::kSurface;
@@ -69,6 +75,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     };
 
     // Profile
+    page(PanelSection::Profiles);
     profileCombo_ = CreateWindowExW(0, WC_COMBOBOXW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL, 0,
                                     0, 0, 0, content_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdProfileCombo)), instance, nullptr);
     SendMessageW(profileCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->body), FALSE);
@@ -82,6 +89,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     hotkeys_ = toggle(kIdHotkeys, L"Global hotkeys", L"Ctrl+Alt+F6/F7 lens · F8 effects · F9/F10 profile · F11 mirror");
 
     // Picture
+    page(PanelSection::Adjust);
     reset_ = button(kIdPictureReset, L"Reset", ButtonStyle::Ghost);
     sliders_ = {
         {L"Brightness", -100, 100, 1.0, L"%+.0f", IXC_IMAGE_FIELD(brightness)},
@@ -115,6 +123,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     mirror_ = toggle(kIdMirror, L"Mirror", L"Flip left-right");
 
     // Effects
+    page(PanelSection::Effects);
     effectsAllOff_ = button(kIdEffectsAllOff, L"All off", ButtonStyle::Ghost);
     effectsMaster_ = toggle(kIdEffectsMaster, L"Effects", L"Ctrl+Alt+F8 switches all effects");
     const auto& catalog = effects::Catalog();
@@ -126,6 +135,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     }
 
     // Camera features
+    page(PanelSection::Settings);
     smooth_ = toggle(kIdSmoothMotion, L"Smooth motion", L"Keeps the full frame rate in low light");
     autoFraming_ = toggle(kIdAutoFraming, L"Auto-framing", L"Zooms and pans to keep you in the picture");
     face_ = toggle(kIdFaceTracking, L"Face tracking", L"Off");
@@ -150,6 +160,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     SendMessageW(diagText_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->caption), FALSE);
 
     // Background
+    page(PanelSection::Background);
     bgMode_ = choice(kIdBgMode, L"Background", {L"Original", L"Blur", L"Replace (built-in scene)", L"Solid colour", L"Custom picture"});
     bgBlur_ = choice(kIdBgBlur, L"Style", {L"Soft Blur", L"Standard Blur", L"DSLR Bokeh", L"Strong Bokeh", L"Custom"});
     bgAdvanced_ = toggle(kIdBgAdvanced, L"Advanced blur settings", L"Focus falloff, edges, stability, hair");
@@ -190,13 +201,51 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     }
 
     // IXC Camera (system camera)
+    page(PanelSection::Settings);
     vcamStatus_ = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, content_,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdVcamStatus)), instance, nullptr);
     SendMessageW(vcamStatus_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->caption), FALSE);
     vcamUse_ = button(kIdVcamUse, L"Use this webcam for IXC Camera", ButtonStyle::Secondary);
 
+    // Updates
+    page(PanelSection::Updates);
+    updateText_ = CreateWindowExW(0, WC_STATICW, L"IXC Camera " IXC_VERSION_STRING, WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0,
+                                  content_, nullptr, instance, nullptr);
+    SendMessageW(updateText_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->caption), FALSE);
+    updateCheck_ = button(kIdUpdateCheck, L"Check for updates", ButtonStyle::Secondary);
+    updateInstall_ = button(kIdUpdateInstall, L"Update now", ButtonStyle::Primary);
+    updateSkip_ = button(kIdUpdateSkip, L"Skip this version", ButtonStyle::Ghost);
+    ShowWindow(updateInstall_, SW_HIDE);
+    ShowWindow(updateSkip_, SW_HIDE);
+
+    content_ = contents_[0];
     Refresh();
     return true;
+}
+
+bool SettingsPanel::IsContent(HWND h) const {
+    for (HWND c : contents_)
+        if (c && c == h) return true;
+    return false;
+}
+
+void SettingsPanel::SetSection(PanelSection s) {
+    if (s == section_) return;
+    ShowWindow(content_, SW_HIDE);
+    section_ = s;
+    content_ = contents_[static_cast<int>(s)];
+    scroll_ = 0;
+    Relayout();
+    ShowWindow(content_, SW_SHOW);
+}
+
+void SettingsPanel::SetUpdateState(const std::wstring& text, bool canInstall, bool canSkip, bool checking) {
+    SetWindowTextW(updateText_, text.c_str());
+    ShowWindow(updateInstall_, canInstall ? SW_SHOWNA : SW_HIDE);
+    ShowWindow(updateSkip_, canSkip ? SW_SHOWNA : SW_HIDE);
+    EnableWindow(updateCheck_, !checking);
+    EnableWindow(updateInstall_, !checking);
+    Relayout();
 }
 
 void SettingsPanel::SetBounds(const RECT& r) {
@@ -222,9 +271,11 @@ void SettingsPanel::LayoutContent(int width) {
     width_ = width;
     const int pad = Scale(12), inner = Scale(14), gap = Scale(6), titleH = Scale(30), cardGap = Scale(12);
     const int x = pad + inner, w = std::max(Scale(120), width - 2 * (pad + inner));
-    int y = pad;
+    int ys[kPanelSections];
+    for (int& v : ys) v = pad;
+    int y = pad, cur = 0;
     cards_.clear();
-    HDWP dwp = BeginDeferWindowPos(80);
+    HDWP dwp = BeginDeferWindowPos(120);
     auto place = [&](HWND h, int px, int py, int pw, int ph) {
         if (dwp) dwp = DeferWindowPos(dwp, h, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
     };
@@ -233,8 +284,10 @@ void SettingsPanel::LayoutContent(int width) {
         place(h, x, y, w, hh);
         y += hh + gap;
     };
-    auto beginCard = [&](const wchar_t* title, HWND headerButton) {
-        cards_.push_back({RECT{pad, y, width - pad, y}, title});
+    auto beginCard = [&](const wchar_t* title, HWND headerButton, PanelSection section) {
+        cur = static_cast<int>(section);
+        y = ys[cur];  // each section's page is laid out on its own
+        cards_.push_back({RECT{pad, y, width - pad, y}, title, cur});
         if (headerButton) place(headerButton, x + w - Scale(76), y + Scale(5), Scale(76), Scale(26));
         y += titleH + Scale(4);
     };
@@ -242,9 +295,10 @@ void SettingsPanel::LayoutContent(int width) {
         y += inner - gap;
         cards_.back().rc.bottom = y;
         y += cardGap;
+        ys[cur] = y;
     };
 
-    beginCard(L"PROFILE", nullptr);
+    beginCard(L"PROFILE", nullptr, PanelSection::Profiles);
     const int saveW = Scale(72);
     place(profileCombo_, x, y, w - saveW - gap, Scale(300));  // height includes the drop-down list
     place(profileSave_, x + w - saveW, y, saveW, Scale(30));
@@ -257,12 +311,12 @@ void SettingsPanel::LayoutContent(int width) {
     row(hotkeys_);
     endCard();
 
-    beginCard(L"PICTURE", reset_);
+    beginCard(L"PICTURE", reset_, PanelSection::Adjust);
     for (auto& s : sliders_) row(s.wnd);
     row(mirror_);
     endCard();
 
-    beginCard(L"EFFECTS", effectsAllOff_);
+    beginCard(L"EFFECTS", effectsAllOff_, PanelSection::Effects);
     row(effectsMaster_);
     for (size_t i = 0; i < effectToggles_.size(); ++i) {
         row(effectToggles_[i]);
@@ -282,7 +336,7 @@ void SettingsPanel::LayoutContent(int width) {
         y += Scale(30) + gap;
     };
     auto visible = [](HWND hwnd) { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0; };
-    beginCard(L"BACKGROUND", nullptr);
+    beginCard(L"BACKGROUND", nullptr, PanelSection::Background);
     choiceRow(bgMode_);
     choiceRow(bgBlur_);
     if (visible(bgAdvanced_)) {
@@ -310,7 +364,7 @@ void SettingsPanel::LayoutContent(int width) {
         if (bgGroup_[i] == 0 && visible(bgSliders_[i].wnd)) row(bgSliders_[i].wnd);
     endCard();
 
-    beginCard(L"CAMERA FEATURES", nullptr);
+    beginCard(L"CAMERA FEATURES", nullptr, PanelSection::Settings);
     row(smooth_);
     row(autoFraming_);
     row(face_);
@@ -333,7 +387,7 @@ void SettingsPanel::LayoutContent(int width) {
     }
     endCard();
 
-    beginCard(L"IXC CAMERA", nullptr);
+    beginCard(L"IXC CAMERA", nullptr, PanelSection::Settings);
     {
         // Height of the wrapped status text at this width.
         wchar_t text[512];
@@ -351,9 +405,34 @@ void SettingsPanel::LayoutContent(int width) {
     y += Scale(32) + gap;
     endCard();
 
-    y += Scale(18);  // room for the "about" line painted at the bottom
-    contentHeight_ = y + pad;
+    beginCard(L"UPDATES", nullptr, PanelSection::Updates);
+    {
+        wchar_t text[2048];
+        GetWindowTextW(updateText_, text, 2048);
+        HDC dc = GetDC(content_);
+        HGDIOBJ old = SelectObject(dc, fonts_->caption);
+        RECT calc{0, 0, w, 0};
+        DrawTextW(dc, text[0] ? text : L"X", -1, &calc, DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+        SelectObject(dc, old);
+        ReleaseDC(content_, dc);
+        place(updateText_, x, y, w, calc.bottom);
+        y += calc.bottom + gap + Scale(2);
+    }
+    for (HWND b : {updateInstall_, updateCheck_, updateSkip_}) {
+        if (!(GetWindowLongPtrW(b, GWL_STYLE) & WS_VISIBLE)) continue;
+        place(b, x, y, w, Scale(32));
+        y += Scale(32) + gap;
+    }
+    endCard();
+
+    for (int i = 0; i < kPanelSections; ++i) heights_[i] = ys[i] + Scale(18) + pad;  // room for the "about" line at the bottom
+    contentHeight_ = heights_[static_cast<int>(section_)];
     if (dwp) EndDeferWindowPos(dwp);
+    for (int i = 0; i < kPanelSections; ++i) {
+        RECT hostRc;
+        GetClientRect(host_, &hostRc);
+        if (contents_[i] != content_) SetWindowPos(contents_[i], nullptr, 0, 0, width_, std::max(heights_[i], static_cast<int>(hostRc.bottom)), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 
     RECT host;
     GetClientRect(host_, &host);
@@ -377,15 +456,20 @@ void SettingsPanel::ScrollTo(int pos) {
     SetWindowPos(content_, nullptr, 0, -scroll_, width_, std::max(contentHeight_, static_cast<int>(host.bottom)), SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-void SettingsPanel::PaintContent(HDC dc, const RECT& rc) {
+void SettingsPanel::PaintContent(HWND content, HDC dc, const RECT& rc) {
     using namespace theme;
     FillRect(dc, &rc, Brush(kBg));
+    int section = 0;
+    for (int i = 0; i < kPanelSections; ++i)
+        if (contents_[i] == content) section = i;
+    const int pageHeight = heights_[section];
     for (const Card& c : cards_) {
+        if (c.section != section) continue;
         FillRound(dc, c.rc, Scale(10), kSurface, kBorder);
         RECT t{c.rc.left + Scale(14), c.rc.top + Scale(4), c.rc.right - Scale(90), c.rc.top + Scale(34)};
         DrawTextIn(dc, c.title, t, fonts_->section, kTextDim, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
-    RECT about{Scale(12), contentHeight_ - Scale(36), rc.right - Scale(12), contentHeight_ - Scale(12)};
+    RECT about{Scale(12), pageHeight - Scale(36), rc.right - Scale(12), pageHeight - Scale(12)};
     DrawTextIn(dc, L"IXC Camera " IXC_VERSION_STRING L" · all processing stays on this PC", about, fonts_->caption, kTextFaint,
                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
@@ -485,7 +569,7 @@ bool SettingsPanel::OnScroll(HWND control) {
         }
         return true;
     }
-    if (GetParent(control) == content_) {
+    if (IsContent(GetParent(control))) {
         const int i = EffectIndex(control, kIdEffectSlider0);
         if (i < 0) return false;
         const int pos = static_cast<int>(SendMessageW(control, TBM_GETPOS, 0, 0));
@@ -503,7 +587,7 @@ bool SettingsPanel::OnScroll(HWND control) {
 }
 
 bool SettingsPanel::OnCommand(HWND control, int code) {
-    if (GetParent(control) != content_) return false;
+    if (!IsContent(GetParent(control))) return false;
     if (code == CBN_SELCHANGE) {
         const LRESULT sel = SendMessageW(control, CB_GETCURSEL, 0, 0);
         return sel != CB_ERR && OnChoice(GetDlgCtrlID(control), static_cast<int>(sel));
@@ -719,6 +803,7 @@ LRESULT CALLBACK SettingsPanel::HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (self->content_) self->Relayout();
             return 0;
         case WM_MOUSEWHEEL:
+            NotePanelScrolled();  // sliders under the pointer don't grab the wheel mid-scroll
             self->ScrollTo(self->scroll_ - GET_WHEEL_DELTA_WPARAM(wp) * self->Scale(60) / WHEEL_DELTA);
             return 0;
         case WM_VSCROLL: {
@@ -764,7 +849,7 @@ LRESULT CALLBACK SettingsPanel::ContentProc(HWND h, UINT msg, WPARAM wp, LPARAM 
             HBITMAP bmp = CreateCompatibleBitmap(dc, bw, bh);
             HGDIOBJ old = SelectObject(mem, bmp);
             SetViewportOrgEx(mem, -u.left, -u.top, nullptr);
-            self->PaintContent(mem, rc);
+            self->PaintContent(h, mem, rc);
             SetViewportOrgEx(mem, 0, 0, nullptr);
             BitBlt(dc, u.left, u.top, bw, bh, mem, 0, 0, SRCCOPY);
             SelectObject(mem, old);
