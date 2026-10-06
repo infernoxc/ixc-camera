@@ -9,7 +9,7 @@ Re-run with `scripts/audit-release.ps1 -BuildDir build/release` (exit 0 = pass).
 | ASLR, high-entropy ASLR, DEP | PASS (all four) |
 | Control Flow Guard (instrumented) | PASS |
 | CET shadow-stack compatible | PASS |
-| Imports only Windows system DLLs | PASS (5–14 each) |
+| Imports only Windows system DLLs | PASS (5–16 each; 0.12 adds pdh (GPU/CPU readout) and windowscodecs (background pictures), both part of Windows) |
 | Static CRT: no VC++ redistributable | PASS |
 | No network APIs imported (winhttp, wininet, ws2_32, urlmon, webio): no downloads, no telemetry | PASS |
 
