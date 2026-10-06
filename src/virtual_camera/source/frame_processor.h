@@ -13,6 +13,7 @@
 // frame path only swaps in the compiled result.
 
 #include "camera/smooth_motion.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "face/auto_framer.h"
 #include "face/face_engine.h"
@@ -114,6 +115,9 @@ private:
     // Effects (Phase 8): compiled config swapped under mu_; the renderer is frame-thread only.
     std::shared_ptr<const effects::EffectConfig> effects_;
     effects::EffectRenderer renderer_;
+    // Background picture (Replace/Custom): resolved on the settings thread, never per frame.
+    effects::BackgroundSource bgSource_;                     // settings thread only
+    std::shared_ptr<const effects::BackgroundImage> bgPicture_;  // under mu_
 };
 
 }  // namespace ixc::vcam

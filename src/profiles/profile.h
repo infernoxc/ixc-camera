@@ -59,6 +59,28 @@ struct EffectEntry {
     bool operator==(const EffectEntry&) const = default;
 };
 
+// Background behind the person (needs person segmentation, see segmentation/).
+enum class BackgroundMode { Original, Blur, Replace, Color, Custom };
+enum class BlurLevel { Low, Medium, High };
+enum class BackgroundFit { Fill, Fit };  // Fill: cover the frame (crop); Fit: whole image, edges extended
+
+struct BackgroundSettings {
+    BackgroundMode mode = BackgroundMode::Original;
+    BlurLevel blur = BlurLevel::Medium;
+    std::string builtin = "studio-light";  // built-in background id ([a-z0-9-], see effects/backgrounds.h)
+    std::uint32_t color = 0x3A4A5C;        // Color mode, 0xRRGGBB
+    std::string image;                     // Custom mode: name of a prepared image in the backgrounds folder; never a path
+    BackgroundFit fit = BackgroundFit::Fill;
+    double posX = 0.5, posY = 0.5;         // 0..1: which part of the image stays visible when cropped
+    double scale = 1.0;                    // 1..3: extra zoom into the image
+    bool operator==(const BackgroundSettings&) const = default;
+};
+
+inline constexpr size_t kMaxBackgroundNameChars = 64;
+bool IsValidBackgroundName(std::string_view name);  // [a-z0-9-], 1..64
+std::string_view ToString(BackgroundMode m);
+std::string_view ToString(BlurLevel b);
+
 struct FaceTrackingSettings {
     bool enabled = false;
     int maxFaces = 1;             // 1..kMaxTrackedFaces
@@ -85,6 +107,7 @@ struct Profile {
     CropRect crop;
     ImageSettings image;
     std::vector<EffectEntry> effects;
+    BackgroundSettings background;
     FaceTrackingSettings faceTracking;
     PerformanceTier tier = PerformanceTier::Auto;
     GpuMode gpu = GpuMode::Auto;

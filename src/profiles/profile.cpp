@@ -128,6 +128,65 @@ void ReadImage(const json::Value& o, ImageSettings& im, std::vector<std::string>
     r.Num("lowLight", im.lowLight);
 }
 
+// Accepts one of `names` (index = enum value); anything else keeps the default with a warning.
+template <typename E, size_t N>
+void ReadEnum(Reader& r, const char* key, E& out, const char* const (&names)[N]) {
+    const json::Value* v = r.Get(key);
+    if (!v) return;
+    if (v->IsString()) {
+        for (size_t i = 0; i < N; ++i) {
+            if (v->AsString() == names[i]) { out = static_cast<E>(i); return; }
+        }
+    }
+    r.TypeWarning(key, "one of the documented values");
+}
+
+void ReadBackground(const json::Value& o, BackgroundSettings& b, std::vector<std::string>& w) {
+    Reader r(o, "background", w);
+    static constexpr const char* kModes[] = {"original", "blur", "replace", "color", "custom"};
+    static constexpr const char* kLevels[] = {"low", "medium", "high"};
+    static constexpr const char* kFits[] = {"fill", "fit"};
+    ReadEnum(r, "mode", b.mode, kModes);
+    ReadEnum(r, "blur", b.blur, kLevels);
+    ReadEnum(r, "fit", b.fit, kFits);
+    r.Str("builtin", b.builtin);
+    r.Str("image", b.image);
+    r.Int("color", b.color, 0, 0x7FFFFFFF);
+    r.Num("posX", b.posX);
+    r.Num("posY", b.posY);
+    r.Num("scale", b.scale);
+}
+
+// 0.11 had the background as two effects, and face stickers that 0.12 retires. Profiles keep
+// working: the background effects become the background setting (unless the profile already has
+// one), the stickers are dropped. Every change is reported, never silent.
+void MigrateRetiredEffects(Profile& p, bool hasBackground, std::vector<std::string>& w) {
+    std::vector<EffectEntry> kept;
+    for (auto& e : p.effects) {
+        if (e.id == "background.blur" || e.id == "background.studio") {
+            if (!hasBackground && p.background.mode == BackgroundMode::Original) {
+                if (e.id == "background.blur") {
+                    p.background.mode = BackgroundMode::Blur;
+                    p.background.blur = e.strength < 40 ? BlurLevel::Low : e.strength < 75 ? BlurLevel::Medium : BlurLevel::High;
+                } else {
+                    p.background.mode = BackgroundMode::Replace;
+                    p.background.builtin = "studio-light";
+                }
+                w.push_back("effects: \"" + e.id + "\" moved to the new Background setting");
+            } else {
+                w.push_back("effects: \"" + e.id + "\" dropped (the Background setting replaces it)");
+            }
+            continue;
+        }
+        if (e.id.rfind("sticker.", 0) == 0) {
+            w.push_back("effects: \"" + e.id + "\" removed (face stickers were retired in 0.12)");
+            continue;
+        }
+        kept.push_back(std::move(e));
+    }
+    p.effects = std::move(kept);
+}
+
 // Hook for future schema changes: each step upgrades a document by exactly one version.
 bool MigrateToCurrent(json::Value& /*doc*/, int& version, std::string& error) {
     if (version == kProfileSchemaVersion) return true;
@@ -155,6 +214,31 @@ bool ParsePerformanceTier(std::string_view s, PerformanceTier& out) {
         if (s == ToString(t)) { out = t; return true; }
     }
     return false;
+}
+
+std::string_view ToString(BackgroundMode m) {
+    switch (m) {
+        case BackgroundMode::Original: return "original";
+        case BackgroundMode::Blur: return "blur";
+        case BackgroundMode::Replace: return "replace";
+        case BackgroundMode::Color: return "color";
+        case BackgroundMode::Custom: return "custom";
+    }
+    return "original";
+}
+
+std::string_view ToString(BlurLevel b) {
+    switch (b) {
+        case BlurLevel::Low: return "low";
+        case BlurLevel::Medium: return "medium";
+        case BlurLevel::High: return "high";
+    }
+    return "medium";
+}
+
+bool IsValidBackgroundName(std::string_view name) {
+    if (name.empty() || name.size() > kMaxBackgroundNameChars || name.front() == '-') return false;
+    return std::all_of(name.begin(), name.end(), [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
 }
 
 bool IsValidEffectId(std::string_view id) {
@@ -233,6 +317,27 @@ std::vector<std::string> Validate(Profile& p) {
     }
     p.effects = std::move(effects);
 
+    BackgroundSettings& bg = p.background;
+    if (!IsValidBackgroundName(bg.builtin)) {
+        w.push_back("background.builtin: invalid name, reset to \"studio-light\"");
+        bg.builtin = "studio-light";
+    }
+    if (!bg.image.empty() && !IsValidBackgroundName(bg.image)) {
+        w.push_back("background.image: invalid name, cleared");
+        bg.image.clear();
+    }
+    if (bg.mode == BackgroundMode::Custom && bg.image.empty()) {
+        w.push_back("background: custom mode without an image, switched to blur");
+        bg.mode = BackgroundMode::Blur;
+    }
+    if (bg.color > 0xFFFFFFu) {
+        w.push_back("background.color: not an RGB colour, reset");
+        bg.color = 0x3A4A5C;
+    }
+    ClampD(bg.posX, 0, 1, 0.5, "background.posX", w);
+    ClampD(bg.posY, 0, 1, 0.5, "background.posY", w);
+    ClampD(bg.scale, 1, 3, 1, "background.scale", w);
+
     ClampI(p.faceTracking.maxFaces, 1, kMaxTrackedFaces, "faceTracking.maxFaces", w);
     ClampI(p.faceTracking.detectionIntervalFrames, 0, 120, "faceTracking.detectionIntervalFrames", w);
 
@@ -281,7 +386,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
     static constexpr const char* kKnown[] = {"schemaVersion", "name", "sourceCameraId", "width", "height", "fpsNumerator",
                                              "fpsDenominator", "mirror", "zoom", "crop", "image", "effects",
                                              "faceTracking", "performanceTier", "gpu", "smoothMotion", "autoFraming", "effectsEnabled",
-                                             "hotkeys"};
+                                             "hotkeys", "background"};
     for (const auto& [k, v] : doc.AsObject()) {
         if (std::find(std::begin(kKnown), std::end(kKnown), k) == std::end(kKnown)) {
             w.push_back("unknown field \"" + k.substr(0, 64) + "\" ignored");
@@ -332,6 +437,17 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
             r.TypeWarning("effects", "an array");
         }
     }
+
+    bool hasBackground = false;
+    if (const json::Value* b = r.Get("background")) {
+        if (b->IsObject()) {
+            hasBackground = true;
+            ReadBackground(*b, p.background, w);
+        } else {
+            r.TypeWarning("background", "an object");
+        }
+    }
+    MigrateRetiredEffects(p, hasBackground, w);
 
     if (const json::Value* ft = r.Get("faceTracking")) {
         if (ft->IsObject()) {
@@ -405,6 +521,15 @@ std::string ProfileToJson(const Profile& p) {
         {"crop", json::Object{{"x", p.crop.x}, {"y", p.crop.y}, {"width", p.crop.width}, {"height", p.crop.height}}},
         {"image", std::move(image)},
         {"effects", std::move(effects)},
+        {"background", json::Object{{"mode", std::string(ToString(p.background.mode))},
+                                    {"blur", std::string(ToString(p.background.blur))},
+                                    {"builtin", p.background.builtin},
+                                    {"color", static_cast<double>(p.background.color)},
+                                    {"image", p.background.image},
+                                    {"fit", p.background.fit == BackgroundFit::Fit ? "fit" : "fill"},
+                                    {"posX", p.background.posX},
+                                    {"posY", p.background.posY},
+                                    {"scale", p.background.scale}}},
         {"faceTracking", json::Object{{"enabled", p.faceTracking.enabled},
                                       {"maxFaces", p.faceTracking.maxFaces},
                                       {"detectionIntervalFrames", p.faceTracking.detectionIntervalFrames}}},

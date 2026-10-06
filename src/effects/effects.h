@@ -10,6 +10,7 @@
 //   for it: without a face they fade out (blush, beauty) or use a centred subject (portrait).
 // * Nothing here loads or executes external content. Unknown effect ids are ignored.
 
+#include "effects/background_renderer.h"
 #include "face/face_types.h"
 #include "processing/image_pipeline.h"
 #include "segmentation/segmentation_engine.h"
@@ -29,9 +30,8 @@ enum class Cost { VeryLow, Low, Moderate };  // spec tiers A/B (no tier C effect
 struct EffectInfo {
     const char* id;
     const wchar_t* name;
-    const char* category;     // "face", "portrait", "background", "color", "lighting"
+    const char* category;     // "face", "portrait", "color", "lighting"
     bool needsFace;           // uses the tracked face (box)
-    bool needsSegmentation;   // uses the person mask (segmentation engine)
     bool needsLandmarks;      // anchored to landmarks (falls back to box estimates)
     Cost cost;
     const char* fallback;     // behaviour when no face / weak hardware
@@ -47,26 +47,28 @@ const EffectInfo* Find(std::string_view id);
 // sits between the last and the first entry.
 std::string NextLens(std::string_view current, int dir, const std::vector<EffectEntry>& effects);
 
-enum class Kind { Blush, Beauty, Portrait, Grade, BackgroundBlur, BackgroundStudio, Sticker };
+enum class Kind { Blush, Beauty, Portrait, Grade };
 
 // Compiled settings for one frame size-independent chain.
 struct EffectConfig {
     struct Face {
         Kind kind;
-        float strength;   // 0..1
-        int variant = 0;  // Sticker: stickers::Id
+        float strength;  // 0..1
     };
-    std::vector<Face> faceEffects;   // background, portrait, beauty, blush, stickers (in application order)
+    std::vector<Face> faceEffects;   // portrait, beauty, blush (in application order)
+    BackgroundConfig background;     // the Background setting (applied first)
     bool grade = false;              // colour/lighting LUTs below are not identity
     std::array<std::uint8_t, 256> yLut{}, uLut{}, vLut{};
     bool needsFaces = false;
     bool needsSegmentation = false;
-    bool Active() const { return grade || !faceEffects.empty(); }
+    bool Active() const { return grade || !faceEffects.empty() || background.Active(); }
 };
 
-// Compiles the profile's enabled effects (unknown ids ignored, strengths clamped).
-// Compiles the profile's effects; an empty (inactive) config when profile.effectsEnabled is off.
-std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool fullRange);
+// Compiles the profile's effects (none when profile.effectsEnabled is off) and its Background
+// setting. picture: the resolved background picture for Replace/Custom (see BackgroundSource);
+// without one those modes fall back to blur.
+std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool fullRange, std::shared_ptr<const BackgroundImage> picture = nullptr);
+// Effects only (unknown ids ignored, strengths clamped).
 std::shared_ptr<const EffectConfig> CompileEffects(const std::vector<EffectEntry>& effects, bool fullRange);
 
 struct FrameContext {
@@ -81,6 +83,8 @@ public:
     // Applies cfg to frame in place. frame.width/height even.
     void Apply(const processing::Nv12Frame& frame, const EffectConfig& cfg, const FrameContext& ctx);
     size_t ScratchBytes() const;
+    // Frees the background's buffers (call when no effects are active, so nothing is held).
+    void ReleaseBackground();
 
 private:
     struct Region {  // a face in output pixel coordinates, remembered for fade-out
@@ -98,14 +102,11 @@ private:
     void Beauty(const processing::Nv12Frame& f, float a, float radiusDiv = 30, float edge = 16);
     void Portrait(const processing::Nv12Frame& f, float a);
     void Grade(const processing::Nv12Frame& f, const EffectConfig& cfg);
-    // Person-mask background effects: blur (soft, defocused background) or a studio backdrop.
-    void Background(const processing::Nv12Frame& f, const FrameContext& ctx, Kind kind, float a);
     void BuildLowRes(const processing::Nv12Frame& f);  // lowY_/lowUV_: 1/8-scale frame
-    void Sticker(const processing::Nv12Frame& f, int variant, float a, bool fullRange);
 
     Region face_;
     float presence_ = 0;  // 0..1 fade for face-anchored effects
-    float maskPresence_ = 0;  // 0..1 fade-in once the first person mask arrives
+    BackgroundRenderer background_;
     std::vector<std::uint16_t> tmp_;   // beauty: horizontal box sums
     std::vector<std::uint8_t> blur_;   // beauty: blurred ROI
     std::vector<std::uint8_t> lowY_, lowUV_;  // portrait: 1/8-scale background
@@ -113,9 +114,6 @@ private:
     std::vector<std::int16_t> upRow_;
     std::vector<int> colIdx_, colW_;
     std::vector<std::int16_t> lowRow_;
-    std::vector<float> blurTmp_;              // background: weighted low-res planes + blur scratch
-    std::vector<int> maskCol_, maskColW_;     // background: per-column mask lookup
-    std::vector<std::int16_t> maskRow_;       // background: person weight 0..256 per pixel of a row
 };
 
 }  // namespace ixc::effects

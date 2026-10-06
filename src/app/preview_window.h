@@ -60,7 +60,11 @@ public:
     // "GPU" while the picture pipeline runs on the graphics card, otherwise "CPU".
     std::wstring ProcessingBackend() const { return processor_.GetStats().backend == processing::Backend::Gpu ? L"GPU" : L"CPU"; }
     // IXC effects applied after the pipeline (nullptr = none).
-    void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) { effects_ = std::move(cfg); dirty_ = sample_ != nullptr; }
+    void SetEffects(std::shared_ptr<const effects::EffectConfig> cfg) {
+        effects_ = std::move(cfg);
+        if (!effects_) renderer_.ReleaseBackground();
+        dirty_ = sample_ != nullptr;
+    }
 
     static constexpr UINT kFrameMessage = WM_APP + 10;
 

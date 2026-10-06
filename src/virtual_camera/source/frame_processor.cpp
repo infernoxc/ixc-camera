@@ -255,9 +255,12 @@ void FrameProcessor::ReloadSettings() {
     // Parsing (a few KB of strictly validated JSON) happens here, never on the frame path.
     bool missing = false;
     ProfileLoadResult r = LoadActiveProfile(&missing);
+    // The background picture is read from disk here (settings thread), outside the frame lock.
+    std::shared_ptr<const effects::BackgroundImage> picture;
+    if (r.ok) picture = bgSource_.Resolve(r.profile.background, BackgroundsDirectory());
     std::lock_guard lock(mu_);
     // Unchanged profile (the folder also changes for temp files): keep the compiled params.
-    if (r.ok && profileValid_ && r.profile == profile_) return;
+    if (r.ok && profileValid_ && r.profile == profile_ && picture == bgPicture_) return;
     if (!r.ok && !missing && params_) {
         // Present but unreadable/invalid (e.g. caught mid-write, or a bad hand edit): keep the
         // last good settings instead of flickering to neutral.
@@ -266,6 +269,7 @@ void FrameProcessor::ReloadSettings() {
     }
     profileValid_ = r.ok;
     profile_ = r.ok ? r.profile : Profile{};
+    bgPicture_ = std::move(picture);
     if (!r.ok) {
         // No usable settings at all: pass the camera through unchanged rather than guess.
         profile_.image.sharpness = 0;
@@ -290,7 +294,7 @@ void FrameProcessor::Recompile() {
     Profile effective = profile_;
     effective.image.exposureEv += compensationEv_;
     params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
-    effects_ = effects::CompileEffects(profile_, fullRange_);
+    effects_ = effects::CompileEffects(profile_, fullRange_, bgPicture_);
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases
@@ -456,6 +460,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         ++counters_.passedThrough;
         return ComPtr<IMFSample>(input);
     };
+    if (!fx) renderer_.ReleaseBackground();  // no effects: hold no background buffers
     if (!input || !params || (params->identity && !fx) || !nv12 || !type) return passThrough();
 
     ComPtr<IMFVideoSampleAllocatorEx> allocator;

@@ -114,11 +114,16 @@ if(NOT IXC_SEG_MODEL_SHA STREQUAL "beec5241486c2ad93a96ddd79a6aec6ccadce64d85657
 endif()
 add_library(ixc_segmentation STATIC
     segmentation/selfie_net.cpp
+    segmentation/mask_refine.cpp
     segmentation/segmentation_engine.cpp)
 target_link_libraries(ixc_segmentation PUBLIC ixc_processing)
 
 # ixc_effects: built-in IXC effects applied to the processed frame (Phase 8).
-add_library(ixc_effects STATIC effects/effects.cpp effects/stickers.cpp)
+add_library(ixc_effects STATIC
+    effects/effects.cpp
+    effects/background_image.cpp
+    effects/backgrounds.cpp
+    effects/background_renderer.cpp)
 target_link_libraries(ixc_effects PUBLIC ixc_face ixc_segmentation)
 
 add_subdirectory(virtual_camera)

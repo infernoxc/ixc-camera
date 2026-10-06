@@ -19,6 +19,11 @@ std::filesystem::path ActiveProfilePath() {
     return dir.empty() ? dir : dir / L"active-profile.json";
 }
 
+std::filesystem::path BackgroundsDirectory() {
+    const auto dir = ActiveProfileDirectory();
+    return dir.empty() ? dir : dir / L"backgrounds";
+}
+
 HRESULT PublishActiveProfile(const Profile& profile) {
     const auto path = ActiveProfilePath();
     if (path.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);

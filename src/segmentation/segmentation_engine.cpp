@@ -1,5 +1,6 @@
 #include "segmentation/segmentation_engine.h"
 
+#include "segmentation/mask_refine.h"
 #include "segmentation/selfie_net.h"
 
 #include <algorithm>
@@ -27,20 +28,22 @@ double SegmentationEngine::NowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+static_assert(kNetW == SelfieNet::kWidth && kNetH == SelfieNet::kHeight);
+
 bool SampleNv12ToRgb(const processing::Nv12Planes& src, const processing::YuvFormat& fmt, std::uint8_t* rgb) {
     if (!src.y || !src.uv || !rgb || src.width < kMaskW || src.height < kMaskH || src.yStride < src.width || src.uvStride < src.width) {
         return false;
     }
-    for (int oy = 0; oy < kMaskH; ++oy) {
+    for (int oy = 0; oy < kNetH; ++oy) {
         // Two luma rows a quarter and three quarters into this output row's source band.
-        const int band0 = oy * src.height / kMaskH, band1 = (oy + 1) * src.height / kMaskH;
+        const int band0 = oy * src.height / kNetH, band1 = (oy + 1) * src.height / kNetH;
         const int ya = std::min(band0 + (band1 - band0) / 4, src.height - 1), yb = std::min(band0 + 3 * (band1 - band0) / 4, src.height - 1);
         const std::uint8_t* ra = src.y + static_cast<std::ptrdiff_t>(ya) * src.yStride;
         const std::uint8_t* rb = src.y + static_cast<std::ptrdiff_t>(yb) * src.yStride;
         const std::uint8_t* uv = src.uv + static_cast<std::ptrdiff_t>(std::min((band0 + band1) / 4, src.height / 2 - 1)) * src.uvStride;
-        std::uint8_t* out = rgb + static_cast<size_t>(oy) * kMaskW * 3;
-        for (int ox = 0; ox < kMaskW; ++ox) {
-            const int c0 = ox * src.width / kMaskW, c1 = (ox + 1) * src.width / kMaskW;
+        std::uint8_t* out = rgb + static_cast<size_t>(oy) * kNetW * 3;
+        for (int ox = 0; ox < kNetW; ++ox) {
+            const int c0 = ox * src.width / kNetW, c1 = (ox + 1) * src.width / kNetW;
             const int xa = std::min(c0 + (c1 - c0) / 4, src.width - 1), xb = std::min(c0 + 3 * (c1 - c0) / 4, src.width - 1);
             const int luma = (ra[xa] + ra[xb] + rb[xa] + rb[xb] + 2) / 4;
             const int cx = std::min((c0 + c1) / 4, src.width / 2 - 1) * 2;
@@ -48,6 +51,22 @@ bool SampleNv12ToRgb(const processing::Nv12Planes& src, const processing::YuvFor
             out[ox * 3 + 0] = static_cast<std::uint8_t>((bgra >> 16) & 0xFF);  // R
             out[ox * 3 + 1] = static_cast<std::uint8_t>((bgra >> 8) & 0xFF);   // G
             out[ox * 3 + 2] = static_cast<std::uint8_t>(bgra & 0xFF);          // B
+        }
+    }
+    return true;
+}
+
+bool SampleLuma(const processing::Nv12Planes& src, std::uint8_t* luma) {
+    if (!src.y || !luma || src.width < kMaskW || src.height < kMaskH || src.yStride < src.width) return false;
+    for (int oy = 0; oy < kMaskH; ++oy) {
+        const int b0 = oy * src.height / kMaskH, b1 = (oy + 1) * src.height / kMaskH;
+        const std::uint8_t* ra = src.y + static_cast<std::ptrdiff_t>(std::min(b0 + (b1 - b0) / 4, src.height - 1)) * src.yStride;
+        const std::uint8_t* rb = src.y + static_cast<std::ptrdiff_t>(std::min(b0 + 3 * (b1 - b0) / 4, src.height - 1)) * src.yStride;
+        std::uint8_t* out = luma + static_cast<size_t>(oy) * kMaskW;
+        for (int ox = 0; ox < kMaskW; ++ox) {
+            const int c0 = ox * src.width / kMaskW, c1 = (ox + 1) * src.width / kMaskW;
+            const int xa = std::min(c0 + (c1 - c0) / 4, src.width - 1), xb = std::min(c0 + 3 * (c1 - c0) / 4, src.width - 1);
+            out[ox] = static_cast<std::uint8_t>((ra[xa] + ra[xb] + rb[xa] + rb[xb] + 2) / 4);
         }
     }
     return true;
@@ -63,23 +82,24 @@ namespace {
 
 void RgbToInput(const std::uint8_t* rgb, float* in) {
     constexpr float k = 1.0f / 255.0f;
-    for (size_t i = 0; i < static_cast<size_t>(kMaskW) * kMaskH * 3; ++i) in[i] = static_cast<float>(rgb[i]) * k;
+    for (size_t i = 0; i < static_cast<size_t>(kNetW) * kNetH * 3; ++i) in[i] = static_cast<float>(rgb[i]) * k;
 }
 
 }  // namespace
 
 bool SegmentationEngine::SegmentOnce(const processing::Nv12Planes& frame, const processing::YuvFormat& fmt, std::vector<std::uint8_t>& mask,
                                      double* runMs) {
-    std::vector<std::uint8_t> rgb(static_cast<size_t>(kMaskW) * kMaskH * 3);
-    if (!SampleNv12ToRgb(frame, fmt, rgb.data())) return false;
+    std::vector<std::uint8_t> rgb(static_cast<size_t>(kNetW) * kNetH * 3), guide(static_cast<size_t>(kMaskW) * kMaskH);
+    if (!SampleNv12ToRgb(frame, fmt, rgb.data()) || !SampleLuma(frame, guide.data())) return false;
     SelfieNet net;
-    if (!net.Init()) return false;
+    MaskRefiner refiner;
+    if (!net.Init() || !refiner.Init(kNetW, kNetH, kMaskW, kMaskH)) return false;
     RgbToInput(rgb.data(), net.Input());
     const double t0 = NowMs();
     const float* p = net.Run();
-    if (runMs) *runMs = NowMs() - t0;
     mask.resize(static_cast<size_t>(kMaskW) * kMaskH);
-    for (size_t i = 0; i < mask.size(); ++i) mask[i] = ProbabilityToMask(p[i]);
+    refiner.Refine(p, guide.data(), mask.data());
+    if (runMs) *runMs = NowMs() - t0;
     return true;
 }
 
@@ -98,10 +118,12 @@ bool SegmentationEngine::Start(double cpuBudget) {
         rateWindowStart_ = NowMs();
         rateWindowCount_ = 0;
         try {
-            rgb_.assign(static_cast<size_t>(kMaskW) * kMaskH * 3, 0);
+            rgb_.assign(static_cast<size_t>(kNetW) * kNetH * 3, 0);
+            guide_.assign(static_cast<size_t>(kMaskW) * kMaskH, 0);
             mask_.assign(static_cast<size_t>(kMaskW) * kMaskH, 0);
         } catch (const std::bad_alloc&) {
             rgb_ = {};
+            guide_ = {};
             mask_ = {};
             status_.state = SegState::Unavailable;
             return false;
@@ -125,6 +147,7 @@ void SegmentationEngine::Stop() {
     running_.store(false);
     std::lock_guard lock(mu_);
     std::vector<std::uint8_t>().swap(rgb_);
+    std::vector<std::uint8_t>().swap(guide_);
     std::vector<std::uint8_t>().swap(mask_);
     haveMask_ = false;
     if (status_.state != SegState::Unavailable) status_.state = SegState::Off;
@@ -134,8 +157,8 @@ void SegmentationEngine::Stop() {
 void SegmentationEngine::OnFrame(const processing::Nv12Planes& frame, const processing::YuvFormat& fmt, double nowMs) {
     if (!WantsFrame(nowMs)) return;
     const double t0 = NowMs();
-    // The worker is idle (busy_ false), so rgb_ is ours until we hand it over.
-    if (!SampleNv12ToRgb(frame, fmt, rgb_.data())) return;
+    // The worker is idle (busy_ false), so rgb_ and guide_ are ours until we hand them over.
+    if (!SampleNv12ToRgb(frame, fmt, rgb_.data()) || !SampleLuma(frame, guide_.data())) return;
     const double stageMs = NowMs() - t0;
     {
         std::lock_guard lock(mu_);
@@ -155,7 +178,14 @@ void SegmentationEngine::Worker() {
     SetThreadDescription(GetCurrentThread(), L"IXC segmentation");
 #endif
     SelfieNet net;
-    if (!net.Init()) {
+    MaskRefiner refiner;
+    std::vector<std::uint8_t> working;  // the mask being built, swapped in under the lock
+    try {
+        working.assign(static_cast<size_t>(kMaskW) * kMaskH, 0);
+    } catch (const std::bad_alloc&) {
+        working.clear();
+    }
+    if (working.empty() || !net.Init() || !refiner.Init(kNetW, kNetH, kMaskW, kMaskH)) {
         std::lock_guard lock(mu_);
         status_.state = SegState::Unavailable;
         return;  // busy_ stays true: frames are never staged
@@ -163,7 +193,7 @@ void SegmentationEngine::Worker() {
     {
         std::lock_guard lock(mu_);
         status_.state = SegState::Running;
-        status_.memoryBytes = net.MemoryBytes() + rgb_.capacity() + mask_.capacity();
+        status_.memoryBytes = net.MemoryBytes() + refiner.MemoryBytes() + rgb_.capacity() + guide_.capacity() + mask_.capacity() + working.capacity();
     }
     busy_.store(false, std::memory_order_release);
 
@@ -180,16 +210,13 @@ void SegmentationEngine::Worker() {
         const double t0 = NowMs();
         RgbToInput(rgb_.data(), net.Input());
         const float* p = net.Run();
+        // Refinement and temporal smoothing work on `working`, which holds the previous mask
+        // (the refiner forgets it at session start); the lock is held only for the copy.
+        refiner.Refine(p, guide_.data(), working.data());
         const double runMs = NowMs() - t0;
 
         std::lock_guard lock(mu_);
-        // Temporal smoothing: the first mask is taken as is, later ones blend with the previous
-        // one (removes edge flicker; a moving person still updates within 2-3 masks).
-        const bool first = !haveMask_;
-        for (size_t i = 0; i < mask_.size(); ++i) {
-            const int m = ProbabilityToMask(p[i]);
-            mask_[i] = first ? static_cast<std::uint8_t>(m) : static_cast<std::uint8_t>((m * 5 + mask_[i] * 3 + 4) / 8);
-        }
+        std::copy(working.begin(), working.end(), mask_.begin());
         ++generation_;
         haveMask_ = true;
         SegStatus& s = status_;

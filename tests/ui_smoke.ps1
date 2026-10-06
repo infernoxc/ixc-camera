@@ -96,8 +96,7 @@ $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 
 $IdProfile = 200; $IdProfileSave = 201; $IdHotkeys = 205; $IdReset = 206; $IdMirror = 207; $IdSlider0 = 210
 $IdMaster = 230; $IdAllOff = 231; $IdEffect0 = 240; $IdStrength0 = 260
 $IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdVcamStatus = 290; $IdVcamUse = 291
-$effectIds = 'blush.tone', 'beauty.basic', 'background.blur', 'background.studio', 'sticker.shades', 'sticker.hearts', 'sticker.crown',
-             'sticker.puppy', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
+$effectIds = 'blush.tone', 'beauty.basic', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
 $IdxMono = [array]::IndexOf($effectIds, 'color.mono'); $IdxVivid = [array]::IndexOf($effectIds, 'color.vivid')
 
 $failures = @()
@@ -220,10 +219,6 @@ try {
         if ($effectIds[$i] -eq 'blush.tone') {
             Start-Sleep -Milliseconds 2200
             Check ([Ui]::Text($status) -match 'face: (searching|tracking)') 'a face effect starts face tracking automatically'
-        }
-        if ($effectIds[$i] -eq 'background.blur') {
-            Start-Sleep -Milliseconds 2200
-            Check ([Ui]::Text($status) -match 'background: (\d+/s|off \(CPU too slow\))') 'a background effect starts person segmentation automatically'
         }
         Click $t
         $pub = Published

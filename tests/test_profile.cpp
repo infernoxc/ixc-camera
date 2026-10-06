@@ -36,6 +36,10 @@ Profile SampleProfile() {
     p.gpu = GpuMode::Off;
     p.smoothMotion = false;
     p.autoFraming = true;
+    p.background.mode = BackgroundMode::Replace;
+    p.background.builtin = "nature";
+    p.background.fit = BackgroundFit::Fit;
+    p.background.posY = 0.2;
     p.hotkeys = {{"effects.toggle", "Ctrl+Alt+F8"}};
     return p;
 }

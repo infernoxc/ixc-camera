@@ -27,7 +27,6 @@ LRESULT CALLBACK ComboWheel(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
 
 const wchar_t* CategoryText(const effects::EffectInfo& e) {
     if (e.needsFace) return L"Face effect · uses face tracking";
-    if (e.needsSegmentation) return L"Background · finds you in the picture";
     if (std::string_view(e.category) == "lighting") return L"Lighting look";
     return L"Colour look";
 }

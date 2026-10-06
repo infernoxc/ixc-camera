@@ -17,6 +17,7 @@
 #include "common/strings.h"
 #include "diagnostics/error.h"
 #include "diagnostics/log.h"
+#include "effects/backgrounds.h"
 #include "effects/effects.h"
 #include "face/face_settings.h"
 #include "ixc/version.h"
@@ -167,6 +168,7 @@ private:
     std::string stem_ = "default";  // active profile file
     bool hotkeysRegistered_ = false;
     std::string cycledLens_;  // the effect the lens hotkeys added last ("" = none); only it is replaced
+    effects::BackgroundSource bgSource_;  // the preview's background picture (one cached)
     vcam::Status vcam_;
     HANDLE vcamProcess_ = nullptr;  // elevated ixc_vcam.exe while a change is in progress
     HANDLE vcamWait_ = nullptr;
@@ -956,7 +958,7 @@ void MainWindow::UpdatePipeline() {
     Profile effective = profile_;
     effective.image.exposureEv += smoothEv_;
     preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
-    auto fx = effects::CompileEffects(profile_, fullRange);
+    auto fx = effects::CompileEffects(profile_, fullRange, bgSource_.Resolve(profile_.background, BackgroundsDirectory()));
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
