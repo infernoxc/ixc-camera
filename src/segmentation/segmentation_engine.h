@@ -71,10 +71,15 @@ public:
     SegmentationEngine& operator=(const SegmentationEngine&) = delete;
 
     // cpuBudget: fraction of one core the worker may use (clamped to 0.05..0.6).
-    bool Start(double cpuBudget = 0.25);
+    bool Start(double cpuBudget = 0.4);
     // Where the network runs (live). factory: how to make a GPU runner; null = CPU only.
     void SetMode(ProcessingMode mode);
     void SetGpuFactory(GpuRunnerFactory factory);
+    // Mask refinement (live): temporal stability and edge detail, 0..1 each (see MaskRefiner).
+    void SetRefinement(float temporal, float hair) {
+        temporal_.store(temporal);
+        hair_.store(hair);
+    }
     void Stop();  // joins the worker and frees everything; idempotent
     bool Running() const { return running_.load(); }
 
@@ -108,6 +113,7 @@ private:
     std::atomic<int> mode_{static_cast<int>(ProcessingMode::Auto)};
     std::atomic<unsigned> modeVersion_{0};
     std::atomic<GpuRunnerFactory> gpuFactory_{nullptr};
+    std::atomic<float> temporal_{0.5f}, hair_{0.5f};
 
     mutable std::mutex mu_;
     std::condition_variable cv_;

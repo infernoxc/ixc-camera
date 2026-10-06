@@ -68,10 +68,22 @@ struct EffectEntry {
 enum class BackgroundMode { Original, Blur, Replace, Color, Custom };
 enum class BlurLevel { Low, Medium, High };
 enum class BackgroundFit { Fill, Fit };  // Fill: cover the frame (crop); Fit: whole image, edges extended
+enum class BlurStyle { Standard, Bokeh };  // Bokeh: highlight bloom and a stronger focus falloff (DSLR-like)
+// Blur presets (the app's Style list); Custom = the advanced values were changed by hand.
+enum class BlurPreset { Soft, Standard, Dslr, Strong, Custom };
 
 struct BackgroundSettings {
     BackgroundMode mode = BackgroundMode::Original;
-    BlurLevel blur = BlurLevel::Medium;
+    BlurLevel blur = BlurLevel::Medium;    // 0.12 setting, kept for older apps; 0.13 uses `strength`
+    // 0.13 blur controls (0..100 each).
+    BlurPreset preset = BlurPreset::Standard;
+    BlurStyle style = BlurStyle::Standard;
+    double strength = 55;        // 0 = no blur, 25 subtle, 50 natural, 65 DSLR-like, 100 maximum
+    double falloff = 50;         // focus falloff: how far from you the blur reaches full strength
+    double feather = 35;         // edge softness (0 = crisp cut-out, 100 = very soft)
+    double edgeProtection = 60;  // keeps face, ears and hairline sharp (face tracking)
+    double temporal = 50;        // mask stability over time (more = steadier, slower to follow)
+    double hair = 50;            // edge detail: how closely the mask follows hair and fine edges
     std::string builtin = "studio-light";  // built-in background id ([a-z0-9-], see effects/backgrounds.h)
     std::uint32_t color = 0x3A4A5C;        // Color mode, 0xRRGGBB
     std::string image;                     // Custom mode: name of a prepared image in the backgrounds folder; never a path
@@ -84,6 +96,9 @@ struct BackgroundSettings {
 // Power-line frequency of the room's lighting, for the camera's anti-flicker control.
 enum class AntiFlicker { Auto, Hz50, Hz60, Off };
 std::string_view ToString(AntiFlicker a);  // "auto", "50hz", "60hz", "off"
+
+// Applies a preset's values (strength, style, falloff); Custom leaves them.
+void ApplyBlurPreset(BackgroundSettings& b, BlurPreset preset);
 
 inline constexpr size_t kMaxBackgroundNameChars = 64;
 bool IsValidBackgroundName(std::string_view name);  // [a-z0-9-], 1..64

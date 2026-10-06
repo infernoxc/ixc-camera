@@ -50,16 +50,6 @@ float MaskAt(const std::vector<std::uint8_t>& m, float sx, float sy) {
     return (top + (bottom - top) * fy) * (1.0f / 255.0f);
 }
 
-// Blur radii (in 1/8-scale cells) for the near and far background.
-void BlurRadii(BlurLevel level, int& nearR, int& farR) {
-    switch (level) {
-        case BlurLevel::Low: nearR = 1, farR = 2; return;
-        case BlurLevel::Medium: nearR = 2, farR = 4; return;
-        case BlurLevel::High: nearR = 3, farR = 7; return;
-    }
-    nearR = 2, farR = 4;
-}
-
 struct Yuv {
     float y, u, v;
 };
@@ -83,11 +73,19 @@ float Sample(const std::uint8_t* plane, int w, int h, int channels, int c, float
 
 }  // namespace
 
-void BackgroundRenderer::BuildMask(const BackgroundContext& ctx) {
+void BackgroundRenderer::BuildMask(const BackgroundContext& ctx, const BackgroundConfig& cfg) {
     const auto& src = ctx.mask->value;
     if (mask_.size() != src.size()) mask_.resize(src.size());  // first use only
-    std::copy(src.begin(), src.end(), mask_.begin());
-    if (!ctx.faces) return;
+    // Edge feather: a contrast curve around the mask's 50% line. Low = crisp cut-out (less
+    // background leaking through half-certain edges), high = soft transition.
+    if (cfg.feather != lutFeather_) {
+        lutFeather_ = cfg.feather;
+        const float width = 0.12f + 0.6f * std::clamp(cfg.feather, 0.0f, 1.0f);
+        for (int v = 0; v < 256; ++v) featherLut_[v] = Clamp8(255.0f * Smoothstep(0.5f - width / 2, 0.5f + width / 2, static_cast<float>(v) / 255.0f));
+    }
+    for (size_t k = 0; k < src.size(); ++k) mask_[k] = featherLut_[src[k]];
+    const float protect = std::clamp(cfg.protection * 2.0f, 0.0f, 1.0f);  // >= 50%: full guard; below it fades out
+    if (!ctx.faces || protect <= 0.0f) return;
     // Face guard: head (with ears and hairline) and neck are always foreground.
     for (int i = 0; i < ctx.faces->count && i < face::kMaxFaces; ++i) {
         const face::TrackedFace& fc = ctx.faces->faces[static_cast<size_t>(i)];
@@ -97,7 +95,7 @@ void BackgroundRenderer::BuildMask(const BackgroundContext& ctx) {
         struct Ell {
             float cx, cy, rx, ry;
         };
-        const Ell shapes[2] = {{cx, by + fh * 0.42f, fw * 0.66f, fh * 0.80f},   // head, ears, hairline
+        const Ell shapes[2] = {{cx, by + fh * 0.42f, fw * 0.62f, fh * 0.78f},   // head, ears, hairline
                                {cx, by + fh * 1.10f, fw * 0.34f, fh * 0.40f}};  // neck
         for (const Ell& e : shapes) {
             const int x0 = std::max(0, static_cast<int>(e.cx - e.rx)), x1 = std::min(seg::kMaskW - 1, static_cast<int>(e.cx + e.rx));
@@ -107,7 +105,7 @@ void BackgroundRenderer::BuildMask(const BackgroundContext& ctx) {
                 std::uint8_t* row = mask_.data() + static_cast<size_t>(y) * seg::kMaskW;
                 for (int x = x0; x <= x1; ++x) {
                     const float dx = (static_cast<float>(x) + 0.5f - e.cx) / e.rx;
-                    const float v = 255.0f * Smoothstep(1.0f, 0.8f, dx * dx + dy * dy);
+                    const float v = 255.0f * protect * Smoothstep(1.0f, 0.8f, dx * dx + dy * dy);
                     if (v > static_cast<float>(row[x])) row[x] = static_cast<std::uint8_t>(v);
                 }
             }
@@ -116,8 +114,15 @@ void BackgroundRenderer::BuildMask(const BackgroundContext& ctx) {
 }
 
 void BackgroundRenderer::BuildBlurSource(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx) {
-    lw_ = std::max(2, f.width / 8);
-    lh_ = std::max(2, f.height / 8);
+    // Radii from the strength (in output pixels at 1080p, scaled to the frame width). The source
+    // scale follows the radius: 1/8 once the far blur spans at least 2 cells there (smooth enough),
+    // otherwise 1/4 so light blur keeps its detail.
+    const float s = std::clamp(cfg.strength, 0.0f, 1.0f), scaleW = static_cast<float>(f.width) / 1920.0f;
+    const float farPx = (6.0f + 90.0f * s) * scaleW, nearPx = farPx * (cfg.bokeh ? 0.3f : 0.5f);
+    cell_ = farPx / 8.0f / 1.7f >= 2.0f ? 8 : 4;
+    const int cell = cell_;
+    lw_ = std::max(2, f.width / cell);
+    lh_ = std::max(2, f.height / cell);
     const size_t ln = static_cast<size_t>(lw_) * lh_;
     if (lowY_.size() < ln) lowY_.resize(ln);
     if (lowUV_.size() < ln * 2) lowUV_.resize(ln * 2);
@@ -131,23 +136,30 @@ void BackgroundRenderer::BuildBlurSource(const processing::Nv12Frame& f, const B
     const face::OutputMapping& m = ctx.map;
     const float W = static_cast<float>(f.width), H = static_cast<float>(f.height);
     for (int by = 0; by < lh_; ++by) {
-        // 4 luma samples and 4 chroma samples per 8x8 cell.
-        const std::uint8_t* r0 = f.y + static_cast<std::ptrdiff_t>(std::min(by * 8 + 2, f.height - 1)) * f.yStride;
-        const std::uint8_t* r1 = f.y + static_cast<std::ptrdiff_t>(std::min(by * 8 + 6, f.height - 1)) * f.yStride;
-        const std::uint8_t* c0 = f.uv + static_cast<std::ptrdiff_t>(std::min(by * 4 + 1, f.height / 2 - 1)) * f.uvStride;
-        const std::uint8_t* c1 = f.uv + static_cast<std::ptrdiff_t>(std::min(by * 4 + 3, f.height / 2 - 1)) * f.uvStride;
-        const float oy = (static_cast<float>(by) + 0.5f) * 8 / H;
+        // 4 luma samples and 4 chroma samples per cell.
+        const int q = cell / 4, q3 = 3 * cell / 4, cq = cell / 8, cq3 = 3 * cell / 8, half = cell / 2;
+        const std::uint8_t* r0 = f.y + static_cast<std::ptrdiff_t>(std::min(by * cell + q, f.height - 1)) * f.yStride;
+        const std::uint8_t* r1 = f.y + static_cast<std::ptrdiff_t>(std::min(by * cell + q3, f.height - 1)) * f.yStride;
+        const std::uint8_t* c0 = f.uv + static_cast<std::ptrdiff_t>(std::min(by * half + cq, f.height / 2 - 1)) * f.uvStride;
+        const std::uint8_t* c1 = f.uv + static_cast<std::ptrdiff_t>(std::min(by * half + cq3, f.height / 2 - 1)) * f.uvStride;
+        const float oy = (static_cast<float>(by) + 0.5f) * static_cast<float>(cell) / H;
         const float sy = m.y + oy * m.h;
         for (int bx = 0; bx < lw_; ++bx) {
             const size_t i = static_cast<size_t>(by) * lw_ + bx;
-            const int xa = std::min(bx * 8 + 2, f.width - 1), xb = std::min(bx * 8 + 6, f.width - 1);
-            const int ca = std::min(bx * 4 + 1, f.width / 2 - 1) * 2, cb = std::min(bx * 4 + 3, f.width / 2 - 1) * 2;
-            const float ox = (static_cast<float>(bx) + 0.5f) * 8 / W;
+            const int xa = std::min(bx * cell + q, f.width - 1), xb = std::min(bx * cell + q3, f.width - 1);
+            const int ca = std::min(bx * half + cq, f.width / 2 - 1) * 2, cb = std::min(bx * half + cq3, f.width / 2 - 1) * 2;
+            const float ox = (static_cast<float>(bx) + 0.5f) * static_cast<float>(cell) / W;
             const float sx = m.x + (m.mirror ? 1 - ox : ox) * m.w;
             const float person = MaskAt(mask_, sx, sy);
-            const float w = 1.0f - person + 1e-3f;
+            const float luma = static_cast<float>(r0[xa] + r0[xb] + r1[xa] + r1[xb]) * 0.25f;
+            float w = 1.0f - person + 1e-3f;
+            if (cfg.bokeh) {
+                // Highlights dominate their neighbourhood, like out-of-focus lights through a lens.
+                const float hl = std::max(0.0f, (luma - 160.0f) / 95.0f);
+                w *= 1.0f + 5.0f * hl * hl;
+            }
             base[0][i] = w;
-            base[1][i] = w * static_cast<float>(r0[xa] + r0[xb] + r1[xa] + r1[xb]) * 0.25f;
+            base[1][i] = w * luma;
             base[2][i] = w * static_cast<float>(c0[ca] + c0[cb] + c1[ca] + c1[cb]) * 0.25f;
             base[3][i] = w * static_cast<float>(c0[ca + 1] + c0[cb + 1] + c1[ca + 1] + c1[cb + 1]) * 0.25f;
             dist[i] = person > 0.5f ? 0.0f : 1e6f;
@@ -174,17 +186,17 @@ void BackgroundRenderer::BuildBlurSource(const processing::Nv12Frame& f, const B
                 if (x > 0) d = std::min(d, dist[static_cast<size_t>(y + 1) * lw_ + x - 1] + 1.4f);
             }
         }
-    int nearR = 2, farR = 4;
-    BlurRadii(cfg.blur, nearR, farR);
+    // Three box passes approximate a Gaussian (smooth, no blocky rings). Bokeh keeps the near
+    // level sharper so the focus falloff reads as depth.
+    const int farR = std::max(1, static_cast<int>(farPx / static_cast<float>(cell) / 1.7f + 0.5f));
+    const int nearR = std::max(0, static_cast<int>(nearPx / static_cast<float>(cell) / 1.7f + 0.5f));
     for (int k = 0; k < 4; ++k) {
         std::copy(base[k], base[k] + ln, nearP[k]);
-        BoxBlur(nearP[k], lw_, lh_, nearR, tmp);
-        BoxBlur(nearP[k], lw_, lh_, nearR, tmp);
-        BoxBlur(base[k], lw_, lh_, farR, tmp);  // base becomes the far level
-        BoxBlur(base[k], lw_, lh_, farR, tmp);
+        for (int pass = 0; pass < 3 && nearR > 0; ++pass) BoxBlur(nearP[k], lw_, lh_, nearR, tmp);
+        for (int pass = 0; pass < 3; ++pass) BoxBlur(base[k], lw_, lh_, farR, tmp);  // base becomes the far level
     }
-    // Depth-like mix: near blur next to the person, far blur from ~18% of the width away.
-    const float reach = std::max(2.0f, static_cast<float>(lw_) * 0.18f);
+    // Depth-like mix: near blur next to the person, far blur further away (focus falloff).
+    const float reach = std::max(2.0f, static_cast<float>(lw_) * (0.04f + 0.36f * std::clamp(cfg.falloff, 0.0f, 1.0f)));
     for (size_t i = 0; i < ln; ++i) {
         const float t = Smoothstep(0.0f, reach, dist[i]);
         const float invN = 1.0f / nearP[0][i], invF = 1.0f / base[0][i];
@@ -302,7 +314,7 @@ void BackgroundRenderer::Composite(const processing::Nv12Frame& f, const Backgro
 
     auto plane = [&](std::uint8_t* base, int stride, int width, int height, int channels, float scale, const std::uint8_t* low,
                      const std::uint8_t* plate) {
-        const float pxPerLow = 8.0f / scale;
+        const float pxPerLow = static_cast<float>(cell_) / scale;
         const bool blur = !picture && !solid;  // only the blur reads the 1/8-scale source
         for (auto* v : {&colIdx_, &colW_, &maskCol_, &maskColW_})
             if (v->size() < static_cast<size_t>(width)) v->resize(static_cast<size_t>(width));
@@ -379,8 +391,12 @@ void BackgroundRenderer::Apply(const processing::Nv12Frame& f, const BackgroundC
     const bool haveMask = ctx.mask && ctx.mask->generation != 0 && ctx.mask->value.size() == static_cast<size_t>(seg::kMaskW) * seg::kMaskH;
     presence_ = haveMask ? presence_ + (1.0f - presence_) * 0.25f : 0.0f;  // fades in over ~8 frames
     if (!cfg.Active() || !haveMask || presence_ < 0.01f || !f.y || !f.uv || f.width < 16 || f.height < 16) return;
-    BuildMask(ctx);
     BackgroundConfig effective = cfg;
+    if (cfg.mode == BackgroundMode::Blur && cfg.strength <= 0.005f) {  // 0%: nothing to do
+        ReleaseBlur();
+        return;
+    }
+    BuildMask(ctx, cfg);
     const bool picture = cfg.mode == BackgroundMode::Replace || cfg.mode == BackgroundMode::Custom;
     if (picture && (!cfg.image || cfg.image->width < 16)) effective.mode = BackgroundMode::Blur;  // picture unavailable: blur instead
     const bool usePicture = picture && effective.mode != BackgroundMode::Blur;

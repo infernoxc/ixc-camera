@@ -192,15 +192,19 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
 void FrameProcessor::UpdateSegmentation() {
     bool want = false;
     ProcessingMode mode = ProcessingMode::Auto;
+    float temporal = 0.5f, hair = 0.5f;
     {
         std::lock_guard lock(mu_);
         want = effects_ && effects_->needsSegmentation && nv12_ && type_ != nullptr;
         mode = profile_.processing;
+        temporal = static_cast<float>(profile_.background.temporal / 100.0);
+        hair = static_cast<float>(profile_.background.hair / 100.0);
     }
     {
         std::lock_guard sl(segMu_);
         seg_.SetGpuFactory(&seg::MakeGpuRunner);
         seg_.SetMode(mode);  // live: the worker switches between two masks
+        seg_.SetRefinement(temporal, hair);
         if (want == seg_.Running()) return;
     }
     if (!want) {

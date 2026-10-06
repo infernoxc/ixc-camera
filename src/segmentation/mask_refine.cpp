@@ -8,7 +8,6 @@ namespace ixc::seg {
 
 namespace {
 constexpr int kGuideRadius = 4;       // pixels at mask resolution (~1.5% of the width)
-constexpr float kGuideEps = 0.004f;   // edge sensitivity: smaller keeps finer guide detail (hair)
 }  // namespace
 
 bool MaskRefiner::Init(int netW, int netH, int outW, int outH) {
@@ -99,7 +98,7 @@ void MaskRefiner::GuidedFilter(const std::uint8_t* guide, float* p) {
     for (size_t k = 0; k < n; ++k) {
         const float var = varI_[k] - meanI_[k] * meanI_[k];
         const float cov = covIp_[k] - meanI_[k] * meanP_[k];
-        const float a = cov / (var + kGuideEps);
+        const float a = cov / (var + eps_);
         varI_[k] = a;
         covIp_[k] = meanP_[k] - a * meanI_[k];
     }
@@ -108,11 +107,18 @@ void MaskRefiner::GuidedFilter(const std::uint8_t* guide, float* p) {
     for (size_t k = 0; k < n; ++k) p[k] = std::clamp(meanI_[k] * I[k] + meanP_[k], 0.0f, 1.0f);
 }
 
-std::uint8_t MaskRefiner::Temporal(int previous, int current) {
+void MaskRefiner::SetParams(float temporal, float hair) {
+    temporal_ = std::clamp(temporal, 0.0f, 1.0f);
+    // Edge sensitivity: smaller eps keeps finer guide detail (hair), larger is calmer on noise.
+    eps_ = 0.012f * std::pow(0.08f, std::clamp(hair, 0.0f, 1.0f));  // 0.012 .. 0.001 (0.5 → ~0.0034)
+}
+
+std::uint8_t MaskRefiner::Temporal(int previous, int current, float strength) {
     // Agreement → heavier averaging (kills edge flicker); disagreement → follow the new mask
-    // (a moving arm doesn't leave a ghost).
+    // (a moving arm doesn't leave a ghost). strength scales the averaging (0.5 = default).
     const int d = std::abs(current - previous);
-    const int keep = d < 24 ? 5 : d < 64 ? 3 : d < 128 ? 1 : 0;  // eighths of the previous value
+    const int base = d < 24 ? 5 : d < 64 ? 3 : d < 128 ? 1 : 0;  // eighths of the previous value
+    const int keep = std::clamp(static_cast<int>(static_cast<float>(base) * strength * 2.0f + 0.5f), 0, d < 128 ? 7 : 0);
     return static_cast<std::uint8_t>((current * (8 - keep) + previous * keep + 4) / 8);
 }
 
@@ -125,7 +131,7 @@ void MaskRefiner::Refine(const float* prob, const std::uint8_t* guide, std::uint
         // Soft threshold: smoothstep over 0.3..0.7 of the refined probability.
         const float t = std::clamp((p[k] - 0.3f) * 2.5f, 0.0f, 1.0f);
         const int v = static_cast<int>(t * t * (3 - 2 * t) * 255.0f + 0.5f);
-        mask[k] = havePrevious_ ? Temporal(mask[k], v) : static_cast<std::uint8_t>(v);
+        mask[k] = havePrevious_ ? Temporal(mask[k], v, temporal_) : static_cast<std::uint8_t>(v);
     }
     havePrevious_ = true;
 }

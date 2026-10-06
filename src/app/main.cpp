@@ -1031,7 +1031,8 @@ void MainWindow::UpdatePipeline() {
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
     preview_.SetAutoFraming(profile_.autoFraming);
-    preview_.SetProcessingMode(profile_.processing);
+    preview_.SetProcessingMode(profile_.processing, static_cast<float>(profile_.background.temporal / 100.0),
+                               static_cast<float>(profile_.background.hair / 100.0));
     if (profile_.faceTracking.enabled || profile_.autoFraming || effectsNeedFaces) {
         const face::EngineConfig fc = face::EngineConfigFor(profile_);
         preview_.SetFaceTracking(&fc);

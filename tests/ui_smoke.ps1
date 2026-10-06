@@ -95,7 +95,7 @@ $WM_SETTEXT = 0x000C; $WM_HOTKEY = 0x0312
 $IdCamera = 101; $IdFormat = 103; $IdStart = 104; $IdPreview = 105; $IdStatus = 106; $IdHint = 107
 $IdProfile = 200; $IdProfileSave = 201; $IdHotkeys = 205; $IdReset = 206; $IdMirror = 207; $IdSlider0 = 210
 $IdMaster = 230; $IdAllOff = 231; $IdEffect0 = 240; $IdStrength0 = 260
-$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdFlicker = 285; $IdDiag = 286; $IdBgMode = 300; $IdBgBlur = 301; $IdBgBuiltin = 302; $IdBgColor = 306; $IdBgFit = 307; $IdVcamStatus = 290; $IdVcamUse = 291
+$IdSmooth = 280; $IdFace = 281; $IdMarkers = 282; $IdGpu = 283; $IdAutoFrame = 284; $IdFlicker = 285; $IdDiag = 286; $IdBgMode = 300; $IdBgBlur = 301; $IdBgBuiltin = 302; $IdBgColor = 306; $IdBgFit = 307; $IdBgAdvanced = 308; $IdBgStrength = 313; $IdVcamStatus = 290; $IdVcamUse = 291
 $effectIds = 'blush.tone', 'beauty.basic', 'portrait.soft', 'color.warm', 'color.cool', 'color.mono', 'color.vivid', 'lighting.soft'
 $IdxMono = [array]::IndexOf($effectIds, 'color.mono'); $IdxVivid = [array]::IndexOf($effectIds, 'color.vivid')
 
@@ -250,7 +250,11 @@ try {
     Choose $IdFlicker 0; Check ((Published) -match '"antiFlicker": "(50hz|60hz|auto)"') 'Anti-flicker Auto is published (resolved for the region)'
     # Background: each mode, its own rows, and the preview keeps running.
     Choose $IdBgMode 1; Check ((Published) -match '"mode": "blur"' -and [Ui]::IsWindowVisible((P $IdBgBlur)) -and -not [Ui]::IsWindowVisible((P $IdBgBuiltin))) 'Background Blur: published, blur strength shown'
-    Choose $IdBgBlur 2; Check ((Published) -match '"blur": "high"') 'Blur High is published'
+    Choose $IdBgBlur 2; Check ((Published) -match '"preset": "dslr"' -and (Published) -match '"style": "bokeh"' -and [Ui]::IsWindowVisible((P $IdBgStrength))) 'DSLR Bokeh preset is published, strength slider shown'
+    SetSlider (P $IdBgStrength) 80; Check ((Published) -match '"strength": 80' -and (Published) -match '"preset": "custom"') 'Blur strength is published (preset becomes Custom)'
+    Click (P $IdBgAdvanced); Check ([Ui]::IsWindowVisible((P ($IdBgStrength + 1)))) 'Advanced blur settings open'
+    SetSlider (P ($IdBgStrength + 2)) 20; Check ((Published) -match '"feather": 20') 'Edge feather is published'
+    Click (P $IdBgAdvanced)
     Choose $IdBgMode 2; Check ((Published) -match '"mode": "replace"' -and [Ui]::IsWindowVisible((P $IdBgBuiltin)) -and [Ui]::IsWindowVisible((P $IdBgFit))) 'Background Replace: published, scene and fit shown'
     Choose $IdBgBuiltin 0; Check ((Published) -match '"builtin": "[a-z-]+"') 'Built-in scene is published'
     Choose $IdBgMode 3; Check ((Published) -match '"mode": "color"' -and [Ui]::IsWindowVisible((P $IdBgColor))) 'Background Colour: published, colour button shown'

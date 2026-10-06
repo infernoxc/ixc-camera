@@ -25,6 +25,7 @@
   - Segmentation runs at 256×144 (refined to 512×288). Very fine hair strands and fast hand motion can show soft or slightly late edges.
   - Objects you hold, and headphones, are kept or dropped as the network judges.
   - Custom WEBP pictures need the Windows WebP Image Extension.
+- **Portrait matting:** the person mask comes from a 256×144 segmentation network refined to 512×288 (not a dedicated matting network such as MODNet). Very fine hair strands and objects you hold are judged by that network; Edge feather and Hair refinement tune the result.
 - **Denoise is temporal.** Fast-moving areas keep their noise rather than smear.
 - **Anti-flicker** depends on the camera's power-line control. Cameras without one are left unchanged.
 - **Auto anti-flicker** uses your Windows region. Japan (both frequencies) leaves the camera's own setting.

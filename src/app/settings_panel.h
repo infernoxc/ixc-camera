@@ -56,7 +56,8 @@ enum PanelId : int {
     kIdBgRemove,
     kIdBgColor,
     kIdBgFit,
-    kIdBgSlider0 = 310,  // zoom, horizontal, vertical: 310..312
+    kIdBgAdvanced,
+    kIdBgSlider0 = 310,  // picture zoom/horizontal/vertical 310..312, blur strength 313, advanced 314..318
 };
 
 class SettingsPanel {
@@ -136,6 +137,9 @@ private:
     Choice bgMode_, bgBlur_, bgBuiltin_, bgCustom_, bgFit_;
     HWND bgColorLabel_ = nullptr, bgColor_ = nullptr, bgBrowse_ = nullptr, bgRemove_ = nullptr;
     std::vector<Slider> bgSliders_;
+    std::vector<int> bgGroup_;  // per bg slider: 0 picture, 1 blur, 2 blur (advanced)
+    HWND bgAdvanced_ = nullptr;
+    bool bgAdvancedOn_ = false;
     std::vector<std::string> recent_;  // custom pictures shown in bgCustom_
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
     bool faceOverlay_ = true;

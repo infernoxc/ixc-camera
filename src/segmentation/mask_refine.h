@@ -28,16 +28,20 @@ public:
     // prob: netW*netH floats 0..1. guide: outW*outH luma bytes. mask: outW*outH bytes (in/out:
     // holds the previous mask for temporal smoothing).
     void Refine(const float* prob, const std::uint8_t* guide, std::uint8_t* mask);
+    // temporal 0..1: how strongly a steady edge is averaged over time (0.5 = default).
+    // hair 0..1: how closely the edge follows fine image detail (guided-filter sensitivity).
+    void SetParams(float temporal, float hair);
 
     // Individual steps, exposed for tests.
     void Upsample(const float* prob, float* out) const;
     void GuidedFilter(const std::uint8_t* guide, float* p);  // in place on p (outW*outH)
-    static std::uint8_t Temporal(int previous, int current);
+    static std::uint8_t Temporal(int previous, int current, float strength = 0.5f);
 
 private:
     void BoxFilter(const float* in, float* out, int r);  // mean over a (2r+1)^2 window, edges clamped
 
     int netW_ = 0, netH_ = 0, w_ = 0, h_ = 0;
+    float temporal_ = 0.5f, eps_ = 0.004f;
     std::vector<float> p_, i_, meanI_, meanP_, varI_, covIp_, tmp_;
     bool havePrevious_ = false;
 };

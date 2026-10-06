@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.13.0 — Portrait-quality background blur
+
+### Added
+- **Blur styles:**
+  - Soft Blur, Standard Blur, **DSLR Bokeh** and Strong Bokeh, plus Custom.
+  - A continuous **Blur strength** from 0 to 100%: 0 is no blur, 25 subtle, 50 natural, 65 DSLR-like, 100 maximum.
+- **DSLR Bokeh:**
+  - Bright points bloom the way out-of-focus lights do through a lens.
+  - A sharper focus falloff: the blur grows with the distance from you.
+- **Advanced blur settings** (collapsed by default): Focus falloff, Edge feather, Edge protection (face, ears, hairline), Temporal stability and Hair refinement.
+- `ixc_probe --bench-effects` times each blur style.
+
+### Changed
+- **Smoother blur:**
+  - three box passes approximate a Gaussian, so there are no blocky 8×8 cells;
+  - the blur source scale follows the radius: 1/4 for light blur, 1/8 for strong;
+  - the radius scales with the frame width.
+- **Cleaner edges:**
+  - an adjustable contrast curve at the mask's 50% line reduces half-sharp background leaking around you;
+  - a tighter face guard;
+  - Hair refinement tunes how closely the mask follows fine edges.
+- **Edges follow movement faster:** the segmentation worker may use 40% of a core (was 25%), so masks update more often. On the GPU, only the refinement counts against that budget.
+- 0.12 profiles keep their look: Low, Medium and High become 30%, 55% and 85% strength.
+
+### Known limitation
+- The person mask still comes from the MediaPipe selfie segmenter, refined by IXC.
+- A dedicated portrait-matting network (MODNet, Apache-2.0) was evaluated but is **not** included. Its weights could not be fetched and converted in this build environment. It's planned for a later version.
+
 ## 0.12.0 — Professional backgrounds, low-light denoise, anti-flicker, real GPU/CPU mode
 
 ### Added

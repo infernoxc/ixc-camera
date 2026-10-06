@@ -311,6 +311,7 @@ void SegmentationEngine::Worker() {
         const double netMs = NowMs() - t0;
         // Refinement and temporal smoothing work on `working`, which holds the previous mask
         // (the refiner forgets it at session start); the lock is held only for the copy.
+        refiner.SetParams(temporal_.load(), hair_.load());
         refiner.Refine(p, guide_.data(), working.data());
         const double runMs = NowMs() - t0;
         const bool onGpu = runner->Backend() == SegBackend::Gpu;

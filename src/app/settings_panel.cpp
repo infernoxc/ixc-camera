@@ -151,7 +151,8 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
 
     // Background
     bgMode_ = choice(kIdBgMode, L"Background", {L"Original", L"Blur", L"Replace (built-in scene)", L"Solid colour", L"Custom picture"});
-    bgBlur_ = choice(kIdBgBlur, L"Blur strength", {L"Low", L"Medium", L"High"});
+    bgBlur_ = choice(kIdBgBlur, L"Style", {L"Soft Blur", L"Standard Blur", L"DSLR Bokeh", L"Strong Bokeh", L"Custom"});
+    bgAdvanced_ = toggle(kIdBgAdvanced, L"Advanced blur settings", L"Focus falloff, edges, stability, hair");
     bgBuiltin_ = choice(kIdBgBuiltin, L"Scene", {});
     for (const auto& b : effects::BuiltinBackgrounds()) SendMessageW(bgBuiltin_.combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(b.name));
     bgCustom_ = choice(kIdBgCustom, L"Picture", {});
@@ -166,11 +167,19 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
         {L"Picture zoom", 100, 300, 0.01, L"%.2f×", [](const Profile& p) { return p.background.scale; }, [](Profile& p, double v) { p.background.scale = v; }},
         {L"Horizontal position", 0, 100, 0.01, L"%.2f", [](const Profile& p) { return p.background.posX; }, [](Profile& p, double v) { p.background.posX = v; }},
         {L"Vertical position", 0, 100, 0.01, L"%.2f", [](const Profile& p) { return p.background.posY; }, [](Profile& p, double v) { p.background.posY = v; }},
+        {L"Blur strength", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.strength; }, [](Profile& p, double v) { p.background.strength = v; }},
+        {L"Focus falloff", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.falloff; }, [](Profile& p, double v) { p.background.falloff = v; }},
+        {L"Edge feather", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.feather; }, [](Profile& p, double v) { p.background.feather = v; }},
+        {L"Edge protection", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.edgeProtection; }, [](Profile& p, double v) { p.background.edgeProtection = v; }},
+        {L"Temporal stability", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.temporal; }, [](Profile& p, double v) { p.background.temporal = v; }},
+        {L"Hair refinement", 0, 100, 1.0, L"%", [](const Profile& p) { return p.background.hair; }, [](Profile& p, double v) { p.background.hair = v; }},
     };
+    bgGroup_ = {0, 0, 0, 1, 2, 2, 2, 2, 2};
     for (size_t i = 0; i < bgSliders_.size(); ++i) {
         Slider& s = bgSliders_[i];
         const bool zoom = i == 0;
-        s.wnd = CreateSlider(content_, kIdBgSlider0 + static_cast<int>(i), s.label, s.min, s.max, zoom ? 100 : 50,
+        const int def = static_cast<int>(std::lround(s.get(Profile{}) / s.scale));
+        s.wnd = CreateSlider(content_, kIdBgSlider0 + static_cast<int>(i), s.label, s.min, s.max, def,
                              [zoom](int p) {
                                  wchar_t b[32];
                                  if (zoom) swprintf_s(b, L"%.2f×", p / 100.0);
@@ -276,6 +285,13 @@ void SettingsPanel::LayoutContent(int width) {
     beginCard(L"BACKGROUND", nullptr);
     choiceRow(bgMode_);
     choiceRow(bgBlur_);
+    if (visible(bgAdvanced_)) {
+        for (size_t i = 0; i < bgSliders_.size(); ++i)
+            if (bgGroup_[i] == 1 && visible(bgSliders_[i].wnd)) row(bgSliders_[i].wnd);
+        row(bgAdvanced_);
+        for (size_t i = 0; i < bgSliders_.size(); ++i)
+            if (bgGroup_[i] == 2 && visible(bgSliders_[i].wnd)) row(bgSliders_[i].wnd);
+    }
     choiceRow(bgBuiltin_);
     if (visible(bgColor_)) {
         place(bgColorLabel_, x, y, labelW - gap, Scale(30));
@@ -290,8 +306,8 @@ void SettingsPanel::LayoutContent(int width) {
         y += Scale(30) + gap;
     }
     choiceRow(bgFit_);
-    for (auto& s : bgSliders_)
-        if (visible(s.wnd)) row(s.wnd);
+    for (size_t i = 0; i < bgSliders_.size(); ++i)
+        if (bgGroup_[i] == 0 && visible(bgSliders_[i].wnd)) row(bgSliders_[i].wnd);
     endCard();
 
     beginCard(L"CAMERA FEATURES", nullptr);
@@ -385,7 +401,8 @@ void SettingsPanel::Refresh() {
     SendMessageW(diagnostics_, BM_SETCHECK, diagnosticsOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
     const BackgroundSettings& bg = profile_->background;
     SendMessageW(bgMode_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.mode), 0);
-    SendMessageW(bgBlur_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.blur), 0);
+    SendMessageW(bgBlur_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.preset), 0);
+    SendMessageW(bgAdvanced_, BM_SETCHECK, bgAdvancedOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(bgFit_.combo, CB_SETCURSEL, static_cast<WPARAM>(bg.fit), 0);
     const auto& builtins = effects::BuiltinBackgrounds();
     for (size_t i = 0; i < builtins.size(); ++i)
@@ -445,11 +462,16 @@ void SettingsPanel::Changed() {
 }
 
 bool SettingsPanel::OnScroll(HWND control) {
-    for (auto& s : bgSliders_) {
+    for (size_t i = 0; i < bgSliders_.size(); ++i) {
+        Slider& s = bgSliders_[i];
         if (s.wnd != control) continue;
         const double v = static_cast<double>(SendMessageW(s.wnd, TBM_GETPOS, 0, 0)) * s.scale;
         if (v != s.get(*profile_)) {
             s.set(*profile_, v);
+            if (bgGroup_[i] != 0 && profile_->background.preset != BlurPreset::Custom) {  // hand-tuned blur
+                profile_->background.preset = BlurPreset::Custom;
+                SendMessageW(bgBlur_.combo, CB_SETCURSEL, static_cast<WPARAM>(BlurPreset::Custom), 0);
+            }
             Changed();
         }
         return true;
@@ -512,6 +534,10 @@ bool SettingsPanel::OnCommand(HWND control, int code) {
         case kIdBgColor:
             PickColor();
             return true;
+        case kIdBgAdvanced:
+            bgAdvancedOn_ = checked(bgAdvanced_);
+            UpdateBackgroundRows();
+            return true;  // view only
         case kIdSmoothMotion: profile_->smoothMotion = checked(smooth_); break;
         case kIdAutoFraming: profile_->autoFraming = checked(autoFraming_); break;
         case kIdFaceTracking: profile_->faceTracking.enabled = checked(face_); break;
@@ -567,7 +593,10 @@ bool SettingsPanel::OnChoice(int id, int sel) {
             bg.mode = mode;
             break;
         }
-        case kIdBgBlur: bg.blur = static_cast<BlurLevel>(std::clamp(sel, 0, 2)); break;
+        case kIdBgBlur:
+            ApplyBlurPreset(bg, static_cast<BlurPreset>(std::clamp(sel, 0, 4)));
+            Refresh();  // the sliders show the preset's values
+            break;
         case kIdBgFit: bg.fit = sel == 1 ? BackgroundFit::Fit : BackgroundFit::Fill; break;
         case kIdBgBuiltin: {
             const auto& list = effects::BuiltinBackgrounds();
@@ -652,7 +681,10 @@ void SettingsPanel::UpdateBackgroundRows() {
     show(bgBrowse_, m == BackgroundMode::Custom);
     show(bgRemove_, m == BackgroundMode::Custom);
     showChoice(bgFit_, picture);
-    for (auto& s : bgSliders_) show(s.wnd, picture);
+    const bool blur = m == BackgroundMode::Blur;
+    show(bgAdvanced_, blur);
+    for (size_t i = 0; i < bgSliders_.size(); ++i)
+        show(bgSliders_[i].wnd, bgGroup_[i] == 0 ? picture : bgGroup_[i] == 1 ? blur : blur && bgAdvancedOn_);
     if (changed) Relayout();
 }
 

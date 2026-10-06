@@ -60,9 +60,10 @@ public:
     seg::SegStatus SegmentationStatus() const { return seg_.Status(); }
     // Processing mode (Auto/GPU/CPU) for the segmentation network; the picture pipeline takes it
     // from the pipeline parameters. Applied live.
-    void SetProcessingMode(ProcessingMode mode) {
+    void SetProcessingMode(ProcessingMode mode, float temporal = 0.5f, float hair = 0.5f) {
         seg_.SetGpuFactory(&seg::MakeGpuRunner);
         seg_.SetMode(mode);
+        seg_.SetRefinement(temporal, hair);
     }
     processing::AdaptiveNv12Processor::Stats PipelineStats() const { return processor_.GetStats(); }
     // "GPU" while the picture pipeline runs on the graphics card, otherwise "CPU".

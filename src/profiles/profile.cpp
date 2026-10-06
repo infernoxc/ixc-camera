@@ -3,6 +3,7 @@
 #include "common/strings.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 
@@ -148,6 +149,17 @@ void ReadBackground(const json::Value& o, BackgroundSettings& b, std::vector<std
     static constexpr const char* kFits[] = {"fill", "fit"};
     ReadEnum(r, "mode", b.mode, kModes);
     ReadEnum(r, "blur", b.blur, kLevels);
+    if (!r.Get("strength")) b.strength = b.blur == BlurLevel::Low ? 30 : b.blur == BlurLevel::High ? 85 : 55;  // 0.12 profile
+    static constexpr const char* kPresets[] = {"soft", "standard", "dslr", "strong", "custom"};
+    static constexpr const char* kStyles[] = {"standard", "bokeh"};
+    ReadEnum(r, "preset", b.preset, kPresets);
+    ReadEnum(r, "style", b.style, kStyles);
+    r.Num("strength", b.strength);
+    r.Num("falloff", b.falloff);
+    r.Num("feather", b.feather);
+    r.Num("edgeProtection", b.edgeProtection);
+    r.Num("temporal", b.temporal);
+    r.Num("hair", b.hair);
     ReadEnum(r, "fit", b.fit, kFits);
     r.Str("builtin", b.builtin);
     r.Str("image", b.image);
@@ -168,6 +180,7 @@ void MigrateRetiredEffects(Profile& p, bool hasBackground, std::vector<std::stri
                 if (e.id == "background.blur") {
                     p.background.mode = BackgroundMode::Blur;
                     p.background.blur = e.strength < 40 ? BlurLevel::Low : e.strength < 75 ? BlurLevel::Medium : BlurLevel::High;
+                    p.background.strength = p.background.blur == BlurLevel::Low ? 30 : p.background.blur == BlurLevel::High ? 85 : 55;
                 } else {
                     p.background.mode = BackgroundMode::Replace;
                     p.background.builtin = "studio-light";
@@ -214,6 +227,22 @@ bool ParsePerformanceTier(std::string_view s, PerformanceTier& out) {
         if (s == ToString(t)) { out = t; return true; }
     }
     return false;
+}
+
+void ApplyBlurPreset(BackgroundSettings& b, BlurPreset preset) {
+    b.preset = preset;
+    struct V {
+        double strength;
+        BlurStyle style;
+        double falloff;
+    };
+    static constexpr V kValues[] = {{30, BlurStyle::Standard, 40}, {55, BlurStyle::Standard, 50}, {65, BlurStyle::Bokeh, 65}, {85, BlurStyle::Bokeh, 75}};
+    if (preset == BlurPreset::Custom) return;
+    const V& v = kValues[static_cast<size_t>(preset)];
+    b.strength = v.strength;
+    b.style = v.style;
+    b.falloff = v.falloff;
+    b.blur = v.strength < 40 ? BlurLevel::Low : v.strength < 75 ? BlurLevel::Medium : BlurLevel::High;
 }
 
 std::string_view ToString(ProcessingMode m) {
@@ -356,6 +385,12 @@ std::vector<std::string> Validate(Profile& p) {
     ClampD(bg.posX, 0, 1, 0.5, "background.posX", w);
     ClampD(bg.posY, 0, 1, 0.5, "background.posY", w);
     ClampD(bg.scale, 1, 3, 1, "background.scale", w);
+    ClampD(bg.strength, 0, 100, 55, "background.strength", w);
+    ClampD(bg.falloff, 0, 100, 50, "background.falloff", w);
+    ClampD(bg.feather, 0, 100, 35, "background.feather", w);
+    ClampD(bg.edgeProtection, 0, 100, 60, "background.edgeProtection", w);
+    ClampD(bg.temporal, 0, 100, 50, "background.temporal", w);
+    ClampD(bg.hair, 0, 100, 50, "background.hair", w);
 
     ClampI(p.faceTracking.maxFaces, 1, kMaxTrackedFaces, "faceTracking.maxFaces", w);
     ClampI(p.faceTracking.detectionIntervalFrames, 0, 120, "faceTracking.detectionIntervalFrames", w);
@@ -550,6 +585,14 @@ std::string ProfileToJson(const Profile& p) {
         {"effects", std::move(effects)},
         {"background", json::Object{{"mode", std::string(ToString(p.background.mode))},
                                     {"blur", std::string(ToString(p.background.blur))},
+                                    {"preset", std::string(std::array<const char*, 5>{"soft", "standard", "dslr", "strong", "custom"}[static_cast<size_t>(p.background.preset)])},
+                                    {"style", p.background.style == BlurStyle::Bokeh ? "bokeh" : "standard"},
+                                    {"strength", p.background.strength},
+                                    {"falloff", p.background.falloff},
+                                    {"feather", p.background.feather},
+                                    {"edgeProtection", p.background.edgeProtection},
+                                    {"temporal", p.background.temporal},
+                                    {"hair", p.background.hair},
                                     {"builtin", p.background.builtin},
                                     {"color", static_cast<double>(p.background.color)},
                                     {"image", p.background.image},
