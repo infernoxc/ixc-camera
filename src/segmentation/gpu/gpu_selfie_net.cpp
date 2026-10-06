@@ -3,6 +3,10 @@
 #include "common/strings.h"
 #include "segmentation/segmentation_engine.h"
 #include "segmentation/selfie_net.h"
+#include <d3d11.h>  // before the shader blobs (they use BYTE)
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+
 #include "shaders/SegCSActivate.h"
 #include "shaders/SegCSBinary.h"
 #include "shaders/SegCSConv.h"
@@ -10,10 +14,6 @@
 #include "shaders/SegCSDwConv.h"
 #include "shaders/SegCSMean.h"
 #include "shaders/SegCSResize2x.h"
-
-#include <d3d11.h>
-#include <dxgi1_2.h>
-#include <wrl/client.h>
 
 #include <algorithm>
 #include <cmath>

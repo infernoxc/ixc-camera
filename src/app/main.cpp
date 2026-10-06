@@ -170,7 +170,7 @@ private:
     HWND camera_ = nullptr, format_ = nullptr, startStop_ = nullptr;
     HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr, perf_ = nullptr;
     app::PerfMonitor perfMonitor_;
-    void UpdatePerf() { SetWindowTextW(perf_, app::PerfMonitor::Format(perfMonitor_.Sample()).c_str()); }
+    void UpdatePerf();
     // Owned by the settings panel (see settings_panel.h); handled here.
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr, profileCombo_ = nullptr, profileDelete_ = nullptr, hotkeys_ = nullptr;
     app::theme::Fonts fonts_;
@@ -448,9 +448,6 @@ void MainWindow::RefreshFeatureStates() {
         if (neededBy) face += std::wstring(L" · for ") + neededFor;
     }
     panel_.SetFaceTrackingState(face);
-    panel_.SetGpuState(profile_.processing == ProcessingMode::Cpu ? L"Off: CPU only"
-                                                                  : (previewing_ ? L"Picture: " + preview_.ProcessingBackend()
-                                                                                 : std::wstring(L"Auto: measured on this PC")));
 }
 
 LRESULT MainWindow::ControlColor(HWND control, HDC dc) {
@@ -965,6 +962,56 @@ void MainWindow::OnPictureChanged() {
     }
     RefreshFeatureStates();
     SetTimer(hwnd_, kPublishTimer, 250, nullptr);  // disk writes only after the slider settles
+}
+
+// Once a second: the status-bar readout, and the diagnostics view when it's open.
+void MainWindow::UpdatePerf() {
+    const bool diag = panel_.Diagnostics();
+    perfMonitor_.EnableGpuCounters(diag);
+    const app::PerfSample s = perfMonitor_.Sample();
+    SetWindowTextW(perf_, app::PerfMonitor::Format(s).c_str());
+    if (!diag) return;
+    std::wstring t;
+    wchar_t b[256];
+    if (previewing_ && session_) {
+        const FrameStatsSnapshot fs = session_->Stats();
+        const FrameLayout l = session_->Layout();
+        swprintf_s(b, L"Preview: %ux%u · %.1f FPS (camera mode %.0f) · %llu dropped\n", l.width, l.height, fs.fps, fs.nominalFps,
+                   static_cast<unsigned long long>(session_->DroppedFrames()));
+        t += b;
+    } else {
+        t += L"Preview: stopped\n";
+    }
+    swprintf_s(b, L"App: CPU %.1f%% · RAM %.0f MB", s.cpuPercent, s.ramMB);
+    t += b;
+    if (s.gpuPercent >= 0) {
+        swprintf_s(b, L" · GPU %.0f%%", s.gpuPercent);
+        t += b;
+    }
+    if (s.vramMB >= 0) {
+        swprintf_s(b, L" · VRAM %.0f MB", s.vramMB);
+        t += b;
+    }
+    t += L"\n";
+    const auto ps = preview_.PipelineStats();
+    const wchar_t* mode = profile_.processing == ProcessingMode::Gpu ? L"GPU" : profile_.processing == ProcessingMode::Cpu ? L"CPU" : L"Auto";
+    swprintf_s(b, L"Processing %s · picture on %s (CPU %.1f ms, GPU %.1f ms)%s%s\n", mode, ps.backend == processing::Backend::Gpu ? L"GPU" : L"CPU",
+               ps.cpuAvgMs, ps.gpuAvgMs, ps.adapter.empty() ? L"" : L" · ", ps.adapter.c_str());
+    t += b;
+    const seg::SegStatus ss = preview_.SegmentationStatus();
+    if (ss.state == seg::SegState::Off) {
+        t += L"Segmentation: off (no background effect)";
+    } else {
+        swprintf_s(b, L"Segmentation: %hs on %hs (%s) · %.1f ms network · %.1f masks/s · %.1f MB", seg::ToString(ss.state), seg::ToString(ss.backend),
+                   Utf8ToWide(ss.device).c_str(), ss.avgNetMs, ss.masksPerSecond, static_cast<double>(ss.memoryBytes) / 1048576.0);
+        t += b;
+        if (!ss.gpuNote.empty()) t += L"\n  " + Utf8ToWide(ss.gpuNote);
+    }
+    static const wchar_t* const kModes[] = {L"Original", L"Blur", L"Replace", L"Colour", L"Custom"};
+    swprintf_s(b, L"\nBackground: %s · face tracking: %hs", kModes[static_cast<int>(profile_.background.mode)], face::ToString(preview_.FaceStatus().state));
+    t += b;
+    t += L"\nIXC Camera in other apps runs inside the Windows camera service (see scripts/trace-vcam.ps1).";
+    panel_.SetDiagnosticsText(t);
 }
 
 void MainWindow::UpdatePipeline() {
