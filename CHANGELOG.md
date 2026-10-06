@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.2 — Settings reach other apps reliably
+
+### Fixed
+- **Blur strength and other changes often didn't reach OBS, Teams, browsers or other apps** (the preview changed, IXC Camera in other apps kept the old settings). The app publishes settings by writing a temp file and renaming it over `active-profile.json`. Creating the temp file already wakes the camera service, which then opened `active-profile.json` without delete sharing, and the rename failing at that moment was neither retried nor visible (the warning sat on the Settings page). Now:
+  - the service (and every reader) opens the file with full sharing, so it never blocks a replace;
+  - the replace is retried for up to ~250 ms while another process holds the file (also covers an older service DLL still loaded in the Windows camera service after an upgrade);
+  - the app retries a failed publish and shows a hint if it keeps failing;
+  - the live settings file is no longer flushed to disk on every slider step (faster publishing; the replace stays atomic).
+- The camera service re-reads the settings at once if they changed while it was reading them (a change can't wait for the next one any more).
+- **Settings panel glitches:** switching sections showed the old page's pixels or a half-built page, and re-laying out a page (e.g. Advanced blur settings) repainted every control mid-move ("double" UI). Pages are now laid out hidden or with drawing suspended and painted once; the new page appears before the old one is hidden.
+- Test: publishing succeeds while a reader holds the settings file.
+
 ## 0.14.1 — Settings panel fix
 
 ### Fixed

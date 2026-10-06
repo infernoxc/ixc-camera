@@ -231,12 +231,17 @@ bool SettingsPanel::IsContent(HWND h) const {
 
 void SettingsPanel::SetSection(PanelSection s) {
     if (s == section_) return;
-    ShowWindow(content_, SW_HIDE);
+    // Lay the new page out while it's still hidden, show it on top, then hide the old one: the
+    // panel never shows a half-built page or the previous page's pixels.
+    HWND old = content_;
+    const bool hadFocus = IsChild(old, GetFocus()) != FALSE;
     section_ = s;
     content_ = contents_[static_cast<int>(s)];
     scroll_ = 0;
     Relayout();
-    ShowWindow(content_, SW_SHOW);
+    SetWindowPos(content_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    ShowWindow(old, SW_HIDE);
+    if (hadFocus) SetFocus(host_);  // keys must not reach a control on the hidden page
 }
 
 void SettingsPanel::SetUpdateState(const std::wstring& text, bool canInstall, bool canSkip, bool checking) {
@@ -269,6 +274,9 @@ void SettingsPanel::Relayout() {
 void SettingsPanel::LayoutContent(int width) {
     if (width <= 0) return;
     width_ = width;
+    // Move everything with drawing suspended, then repaint the page once: no half-moved frames.
+    const bool visiblePage = (GetWindowLongPtrW(content_, GWL_STYLE) & WS_VISIBLE) != 0;
+    if (visiblePage) SendMessageW(content_, WM_SETREDRAW, FALSE, 0);
     const int pad = Scale(12), inner = Scale(14), gap = Scale(6), titleH = Scale(30), cardGap = Scale(12);
     const int x = pad + inner, w = std::max(Scale(120), width - 2 * (pad + inner));
     int ys[kPanelSections];
@@ -447,7 +455,12 @@ void SettingsPanel::LayoutContent(int width) {
     si.nPage = static_cast<UINT>(std::max(0L, host.bottom));
     SetScrollInfo(host_, SB_VERT, &si, TRUE);
     ScrollTo(scroll_);
-    InvalidateRect(content_, nullptr, FALSE);
+    if (visiblePage) {
+        SendMessageW(content_, WM_SETREDRAW, TRUE, 0);
+        RedrawWindow(content_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    } else {
+        InvalidateRect(content_, nullptr, FALSE);
+    }
 }
 
 void SettingsPanel::ScrollTo(int pos) {

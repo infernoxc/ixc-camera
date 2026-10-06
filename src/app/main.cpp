@@ -236,6 +236,7 @@ private:
     app::PreviewWindow preview_;
     app::SettingsPanel panel_;
     bool publishWarned_ = false;
+    int publishFailures_ = 0;  // consecutive failed publishes (retried, see PublishNow)
     bool previewing_ = false;
     bool resumeOnRestore_ = false;
 };
@@ -1072,11 +1073,28 @@ void MainWindow::PublishNow() {
     // Camera pick the change up on their next frame.
     if (!vcam_.comRegistered) return;
     const HRESULT hr = PublishActiveProfile(ForPublishing(profile_));
-    if (FAILED(hr) && !publishWarned_) {
+    if (SUCCEEDED(hr)) {
+        publishFailures_ = 0;
+        if (publishWarned_) {  // recovered: drop the warning
+            publishWarned_ = false;
+            RefreshVcamStatus();
+        }
+        return;
+    }
+    // Not delivered: IXC Camera would keep the old settings. Try again shortly (the file can be
+    // held open for a moment by another process); warn once it keeps failing.
+    log::Warn("profiles", "publishing settings failed: " + HResultHex(hr));
+    if (++publishFailures_ <= 20) {
+        sync_.OnChange();
+        SetTimer(hwnd_, kPublishTimer, 150, nullptr);
+    }
+    if (publishFailures_ >= 3 && !publishWarned_) {
         publishWarned_ = true;
         const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};
         log::Error("profiles", e.Describe());
         SetVcamText((W(e.Describe()) + L" Reinstalling IXC Camera repairs the settings folder.").c_str());
+        SetHint(L"Other apps aren't receiving your latest settings (IXC Camera's settings file can't be updated). "
+                L"Reinstalling IXC Camera repairs the settings folder.");
     }
 }
 
