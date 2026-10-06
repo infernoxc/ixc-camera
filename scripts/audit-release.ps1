@@ -18,7 +18,7 @@ $binaries = @('src\virtual_camera\IXCCameraSource.dll', 'src\app\IXCCamera.exe',
     ForEach-Object { Join-Path $BuildDir $_ }
 # Windows system DLLs only: no VC++ redistributable, no third-party DLLs.
 $allowed = '^(kernel32|user32|gdi32|shell32|ole32|oleaut32|advapi32|comctl32|comdlg32|mf|mfplat|mfreadwrite|mfsensorgroup|mfsrcsnk|cfgmgr32|combase|' +
-           'api-ms-win-.*|d3d11|dxgi|ksuser|shlwapi|version|bcrypt|ntdll|mfcore|uxtheme|dwmapi|evr|strmiids|quartz|rpcrt4|setupapi|shcore|propsys)\.dll$'
+           'api-ms-win-.*|d3d11|dxgi|ksuser|shlwapi|version|bcrypt|ntdll|mfcore|uxtheme|dwmapi|evr|strmiids|quartz|rpcrt4|setupapi|shcore|propsys|pdh|windowscodecs)\.dll$'
 foreach ($b in $binaries) {
     "== $(Split-Path -Leaf $b)"
     if (-not (Test-Path $b)) { Check $false "exists"; continue }
