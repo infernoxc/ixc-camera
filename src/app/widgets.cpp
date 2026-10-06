@@ -6,6 +6,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <memory>
 
@@ -99,6 +100,7 @@ struct Widget {
     std::wstring sub;
     bool checked = false;
     bool hover = false, pressed = false, dragging = false;
+    POINT pressAt{};  // screen position of the press (a click survives the control moving under it)
     int min = 0, max = 100, pos = 0, def = 0;
     std::function<std::wstring(int)> format;
 };
@@ -287,6 +289,8 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetFocus(h);
             SetCapture(h);
             w->pressed = true;
+            w->pressAt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ClientToScreen(h, &w->pressAt);
             if (w->kind == Kind::Slider) {
                 w->dragging = true;
                 SetPos(h, w, PosFromX(h, w, GET_X_LPARAM(lp)), true, false);
@@ -301,10 +305,17 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 w->dragging = false;
                 SetPos(h, w, w->pos, true, true);
             } else {
+                // A click: released over the control, or released where it was pressed. The
+                // second case matters when the layout moves the control under a still mouse
+                // (a status hint appearing, a slider showing), which used to lose the click.
                 RECT rc;
                 GetClientRect(h, &rc);
-                const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-                if (PtInRect(&rc, p)) Click(h, w);
+                POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                const bool inside = PtInRect(&rc, p) != FALSE;
+                ClientToScreen(h, &p);
+                const bool still = std::abs(p.x - w->pressAt.x) <= GetSystemMetrics(SM_CXDRAG) &&
+                                   std::abs(p.y - w->pressAt.y) <= GetSystemMetrics(SM_CYDRAG);
+                if (inside || still) Click(h, w);
             }
             InvalidateRect(h, nullptr, FALSE);
             return 0;
@@ -315,10 +326,17 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             else if (w && w->kind != Kind::Slider) SendMessageW(h, WM_LBUTTONDOWN, wp, lp);
             return 0;
         case WM_CAPTURECHANGED:
-            if (w && w->dragging) {
-                w->dragging = false;
-                w->pressed = false;
-                SetPos(h, w, w->pos, true, true);
+            // Capture taken away (another window, a dialog): end the drag, cancel a pending press
+            // so the control never stays stuck in its pressed state.
+            if (w && reinterpret_cast<HWND>(lp) != h) {
+                if (w->dragging) {
+                    w->dragging = false;
+                    SetPos(h, w, w->pos, true, true);
+                }
+                if (w->pressed) {
+                    w->pressed = false;
+                    InvalidateRect(h, nullptr, FALSE);
+                }
             }
             return 0;
         case WM_KEYDOWN:

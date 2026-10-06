@@ -112,6 +112,28 @@ IXC_TEST(Format_TierDefaults) {
     IXC_CHECK(!SelectFormat({}, {1920, 1080, 30}));
 }
 
+IXC_TEST(Format_BestPicksLargestSmoothModeAtItsHighestRate) {
+    FormatRequest best;
+    best.best = true;
+    // 4K only at 15 FPS (not smooth), 1080p at 30 and 60: 1080p60.
+    const auto a = NormalizeFormats({F(MFVideoFormat_MJPG, 3840, 2160, 15), F(MFVideoFormat_MJPG, 1920, 1080, 30),
+                                     F(MFVideoFormat_MJPG, 1920, 1080, 60), F(MFVideoFormat_NV12, 1280, 720, 60)});
+    IXC_CHECK_EQ(Pick(a, best).height, 1080u);
+    IXC_CHECK_EQ(Pick(a, best).Fps(), 60.0);
+    // 4K at 30 is smooth: the largest wins.
+    const auto b = NormalizeFormats({F(MFVideoFormat_MJPG, 3840, 2160, 30), F(MFVideoFormat_MJPG, 1920, 1080, 60)});
+    IXC_CHECK_EQ(Pick(b, best).height, 2160u);
+    // Same size and rate: the uncompressed format (no decode).
+    const auto c = NormalizeFormats({F(MFVideoFormat_MJPG, 1280, 720, 30), F(MFVideoFormat_YUY2, 1280, 720, 30)});
+    IXC_CHECK(IsEqualGUID(Pick(c, best).subtype, MFVideoFormat_YUY2));
+    // Nothing smooth: the fastest mode.
+    const auto d = NormalizeFormats({F(MFVideoFormat_YUY2, 1920, 1080, 5), F(MFVideoFormat_YUY2, 640, 480, 15)});
+    IXC_CHECK_EQ(Pick(d, best).height, 480u);
+    // The USB 2.0 webcam: 1080p30 MJPG (its YUY2 1080p is only 5 FPS).
+    IXC_CHECK_EQ(Pick(Usb2Webcam(), RequestForTier(PerformanceTier::Auto)).height, 1080u);
+    IXC_CHECK_EQ(Pick(Usb2Webcam(), RequestForTier(PerformanceTier::Auto)).Fps(), 30.0);
+}
+
 IXC_TEST(Format_SlowCameraGetsBestAvailableRate) {
     const auto fs = NormalizeFormats({F(MFVideoFormat_YUY2, 1280, 720, 10), F(MFVideoFormat_YUY2, 1280, 720, 5)});
     const auto& f = Pick(fs, {1280, 720, 30});

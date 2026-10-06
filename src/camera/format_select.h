@@ -19,9 +19,14 @@ struct FormatRequest {
     std::uint32_t width = 0;   // 0 = choose automatically
     std::uint32_t height = 0;
     double fps = 0;            // 0 = highest available up to 30 FPS
+    // Best for this camera: the largest resolution it delivers smoothly (>= 24 FPS), at the
+    // highest frame rate offered for that resolution (e.g. 1080p60 rather than 1080p30). width,
+    // height and fps are ignored.
+    bool best = false;
 };
 
-// Default capture request for a performance tier (Ultra Low / Low → 720p30, else 1080p30).
+// Default capture request for a performance tier: Ultra Low / Low → 720p30 (weak PCs), every
+// other tier → the best mode the camera has (FormatRequest::best).
 FormatRequest RequestForTier(PerformanceTier tier);
 
 // Removes exact duplicates (same subtype, size, rate) keeping the first, and sorts

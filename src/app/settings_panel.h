@@ -112,6 +112,7 @@ private:
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr;
     bool faceOverlay_ = true;
     int contentHeight_ = 0, scroll_ = 0, width_ = 0;
+    RECT bounds_{};  // last SetBounds rectangle (unchanged bounds: no relayout)
 };
 
 }  // namespace ixc::app

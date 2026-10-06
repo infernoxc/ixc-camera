@@ -7,6 +7,7 @@
 //   * Frames are painted only when they arrive. There is no render loop.
 //   * The 1 s status timer runs only while previewing.
 
+#include "app/perf_monitor.h"
 #include "app/settings_panel.h"
 #include "app/widgets.h"
 #include "app/preview_window.h"
@@ -63,6 +64,7 @@ enum ControlId : int {
     kIdStatus = 106,
     kIdHint = 107,
     kIdPrivacy = 108,
+    kIdPerf = 109,
     // Settings column controls: app::PanelId (settings_panel.h), 200 and up.
 };
 using app::kIdProfileCombo;
@@ -79,6 +81,7 @@ constexpr UINT kAutoStartMessage = WM_APP + 13;  // start the preview once the w
 constexpr UINT_PTR kStatusTimer = 1;
 constexpr UINT_PTR kDeviceRefreshTimer = 2;
 constexpr UINT_PTR kPublishTimer = 3;       // saves/publishes settings shortly after the last slider move
+constexpr UINT_PTR kPerfTimer = 4;          // live CPU/RAM readout (always on, 1 s)
 
 std::filesystem::path LocalAppDataDir() {
     PWSTR raw = nullptr;
@@ -156,7 +159,9 @@ private:
     HINSTANCE instance_;
     HWND hwnd_ = nullptr;
     HWND camera_ = nullptr, format_ = nullptr, startStop_ = nullptr;
-    HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr;
+    HWND status_ = nullptr, hint_ = nullptr, privacy_ = nullptr, perf_ = nullptr;
+    app::PerfMonitor perfMonitor_;
+    void UpdatePerf() { SetWindowTextW(perf_, app::PerfMonitor::Format(perfMonitor_.Sample()).c_str()); }
     // Owned by the settings panel (see settings_panel.h); handled here.
     HWND vcamStatus_ = nullptr, vcamUse_ = nullptr, profileCombo_ = nullptr, profileDelete_ = nullptr, hotkeys_ = nullptr;
     app::theme::Fonts fonts_;
@@ -271,6 +276,7 @@ void MainWindow::CreateControls() {
     preview_.Create(hwnd_, instance_, kIdPreview);
     status_ = label(kIdStatus, WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS);
     hint_ = label(kIdHint, SS_LEFT);  // shown only while it has something to say
+    perf_ = label(kIdPerf, WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE);
     privacy_ = CreateButton(hwnd_, kIdPrivacy, L"Open camera privacy settings", ButtonStyle::Secondary, &fonts_, theme::kBg);
     ShowWindow(privacy_, SW_HIDE);
     preview_.Clear(L"Choose a camera and select Start preview.");
@@ -285,7 +291,7 @@ void MainWindow::CreateControls() {
 void MainWindow::ApplyFont() {
     fonts_.Create(dpi_);
     for (HWND h : {camera_, format_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
-    for (HWND h : {status_, hint_, vcamStatus_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.caption), TRUE);
+    for (HWND h : {status_, hint_, vcamStatus_, perf_}) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.caption), TRUE);
     SendMessageW(profileCombo_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_.body), TRUE);
     if (iconHeader_) DestroyIcon(iconHeader_);
     iconHeader_ = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(1), IMAGE_ICON, Scale(28), Scale(28), LR_DEFAULTCOLOR));
@@ -346,7 +352,9 @@ void MainWindow::Layout() {
     place(preview_.hwnd(), left + 1, y + 1, right - left - 2, previewBottom - y - 2);
     int fy = previewBottom + Scale(6);
     statusDot_ = {left + Scale(4), fy + Scale(10), left + Scale(12), fy + Scale(18)};
-    place(status_, left + Scale(20), fy, right - left - Scale(20), Scale(28));
+    const int perfW = Scale(230);  // live CPU/RAM, right-aligned on the status row
+    place(status_, left + Scale(20), fy, std::max(Scale(80), right - left - Scale(20) - perfW), Scale(28));
+    place(perf_, right - perfW, fy, perfW, Scale(28));
     fy += Scale(28);
     if (hintH) {
         place(hint_, left + Scale(12), fy + Scale(7), right - left - Scale(24), hintH - Scale(14));
@@ -853,7 +861,7 @@ void MainWindow::OnCameraSelected() {
     formats_ = NormalizeFormats(raw);
 
     const auto autoPick = SelectFormat(formats_, RequestForTier(profile_.tier));
-    std::wstring autoLabel = L"Auto (recommended)";
+    std::wstring autoLabel = L"Auto (best for this camera)";
     if (autoPick) autoLabel += L": " + W(Describe(formats_[*autoPick]));
     SendMessageW(format_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(autoLabel.c_str()));
     for (const auto& f : formats_) {
@@ -1092,6 +1100,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CREATE:
             dpi_ = GetDpiForWindow(hwnd_);
             CreateControls();
+            SetTimer(hwnd_, kPerfTimer, 1000, nullptr);  // live CPU/RAM readout at the bottom
             ApplyFont();
             return 0;
 
@@ -1145,6 +1154,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             ApplyFont();
             SetWindowPos(hwnd_, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
             Layout();
+            panel_.Relayout();  // new font metrics even if the panel's rectangle didn't change
             return 0;
         }
 
@@ -1238,6 +1248,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_TIMER:
             if (wp == kStatusTimer) UpdateStatus();
+            if (wp == kPerfTimer) UpdatePerf();
             else if (wp == kPublishTimer) SaveAndPublish();
             else if (wp == kDeviceRefreshTimer) {
                 KillTimer(hwnd_, kDeviceRefreshTimer);
@@ -1265,6 +1276,7 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DESTROY:
             KillTimer(hwnd_, kStatusTimer);
+            KillTimer(hwnd_, kPerfTimer);
             UnregisterHotkeys();
             if (KillTimer(hwnd_, kPublishTimer)) SaveAndPublish();  // don't lose the last slider move
             if (session_) {

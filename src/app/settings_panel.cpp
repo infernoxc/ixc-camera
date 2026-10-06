@@ -138,6 +138,11 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
 }
 
 void SettingsPanel::SetBounds(const RECT& r) {
+    // The main window lays out often (status hints come and go). Moving and re-laying out every
+    // control when nothing changed made the panel flicker and could move a control while it was
+    // being clicked, so only real changes are applied.
+    if (EqualRect(&r, &bounds_)) return;
+    bounds_ = r;
     MoveWindow(host_, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
     Relayout();
 }
