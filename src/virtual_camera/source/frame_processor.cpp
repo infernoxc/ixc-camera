@@ -62,6 +62,28 @@ private:
     bool ok_ = false;
 };
 
+// Identity of the settings file's current version (each publish replaces it with a new file).
+struct SettingsStamp {
+    FILETIME written{};
+    DWORD sizeLow = 0;
+    bool exists = false;
+    bool operator==(const SettingsStamp& o) const {
+        return exists == o.exists && sizeLow == o.sizeLow && written.dwLowDateTime == o.written.dwLowDateTime &&
+               written.dwHighDateTime == o.written.dwHighDateTime;
+    }
+};
+
+SettingsStamp StampOf(const std::filesystem::path& file) {
+    SettingsStamp s;
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!file.empty() && GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &a)) {
+        s.exists = true;
+        s.written = a.ftLastWriteTime;
+        s.sizeLow = a.nFileSizeLow;
+    }
+    return s;
+}
+
 }  // namespace
 
 FrameProcessor::~FrameProcessor() { EndSession(); }
@@ -170,7 +192,14 @@ void FrameProcessor::EndSession() {
 void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
     auto* self = static_cast<FrameProcessor*>(ctx);
     FindNextChangeNotification(self->change_);  // re-arm before reading, so no change is missed
-    self->ReloadSettings();
+    // The app's temp file wakes this before the new settings are renamed into place. If the file
+    // changed while it was being read, read it again right away instead of relying on the next
+    // notification (a missed one would leave the previous settings until the next change).
+    for (int pass = 0; pass < 4; ++pass) {
+        const SettingsStamp before = StampOf(ActiveProfilePath());
+        self->ReloadSettings();
+        if (StampOf(ActiveProfilePath()) == before) break;
+    }
     {
         // Smooth motion switched on/off mid-session: restart it (turning it off restores auto exposure).
         std::lock_guard lock(self->smoothMu_);

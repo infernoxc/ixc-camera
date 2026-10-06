@@ -8,6 +8,8 @@
   - the replace is retried for up to ~250 ms while another process holds the file (also covers an older service DLL still loaded in the Windows camera service after an upgrade);
   - the app retries a failed publish and shows a hint if it keeps failing;
   - the live settings file is no longer flushed to disk on every slider step (faster publishing; the replace stays atomic).
+- The camera service re-reads the settings at once if they changed while it was reading them (a change can't wait for the next one any more).
+- **Settings panel glitches:** switching sections showed the old page's pixels or a half-built page, and re-laying out a page (e.g. Advanced blur settings) repainted every control mid-move ("double" UI). Pages are now laid out hidden or with drawing suspended and painted once; the new page appears before the old one is hidden.
 - Test: publishing succeeds while a reader holds the settings file.
 
 ## 0.14.1 — Settings panel fix
