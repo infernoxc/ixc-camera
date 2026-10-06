@@ -29,7 +29,9 @@ HRESULT PublishActiveProfile(const Profile& profile) {
     if (path.empty()) return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
     Profile copy = profile;
     Validate(copy);
-    return WriteFileAtomic(path, ProfileToJson(copy));
+    // Rewritten up to ~25 times a second while a slider moves, and regenerated from the user's
+    // profile at every app start: no disk flush needed (the replace itself stays atomic).
+    return WriteFileAtomic(path, ProfileToJson(copy), /*durable=*/false);
 }
 
 ProfileLoadResult LoadActiveProfile(bool* missing) {

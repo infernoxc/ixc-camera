@@ -26,7 +26,9 @@ HRESULT LastErrorHr() { return HRESULT_FROM_WIN32(GetLastError()); }
 
 HRESULT ReadFileLimited(const std::filesystem::path& path, size_t maxBytes, std::string& out) {
     out.clear();
-    FileHandle f(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+    // Share everything: a reader must never block a writer replacing the file (the app publishes
+    // settings with a rename while the camera service may be reading the previous version).
+    FileHandle f(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
     if (!f.valid()) return LastErrorHr();
 
@@ -49,7 +51,7 @@ HRESULT ReadFileLimited(const std::filesystem::path& path, size_t maxBytes, std:
     return S_OK;
 }
 
-HRESULT WriteFileAtomic(const std::filesystem::path& path, std::string_view data) {
+HRESULT WriteFileAtomic(const std::filesystem::path& path, std::string_view data, bool durable) {
     if (data.size() > static_cast<size_t>(UINT_MAX)) return E_INVALIDARG;
     std::filesystem::path tmp = path;
     tmp += L".tmp";
@@ -64,19 +66,28 @@ HRESULT WriteFileAtomic(const std::filesystem::path& path, std::string_view data
             DeleteFileW(tmp.c_str());
             return FAILED(hr) ? hr : E_FAIL;
         }
-        if (!FlushFileBuffers(f.get())) {
+        if (durable && !FlushFileBuffers(f.get())) {
             const HRESULT hr = LastErrorHr();
             DeleteFileW(tmp.c_str());
             return hr;
         }
     }
 
-    if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const HRESULT hr = LastErrorHr();
-        DeleteFileW(tmp.c_str());
-        return hr;
+    // Another process may have `path` open for a moment (the camera service reading the previous
+    // settings, an antivirus scan, an older IXC Camera service that opened it without delete
+    // sharing). Replacing fails while it does, so retry briefly: a bounded wait of at most
+    // ~250 ms on a rare failure, not a polling loop.
+    const DWORD flags = MOVEFILE_REPLACE_EXISTING | (durable ? MOVEFILE_WRITE_THROUGH : 0);
+    for (int attempt = 0;; ++attempt) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(), flags)) return S_OK;
+        const DWORD e = GetLastError();
+        const bool busy = e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION;
+        if (!busy || attempt >= 25) {
+            DeleteFileW(tmp.c_str());
+            return HRESULT_FROM_WIN32(e);
+        }
+        Sleep(10);
     }
-    return S_OK;
 }
 
 }  // namespace ixc
