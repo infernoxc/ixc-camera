@@ -15,6 +15,8 @@
 - `ixc_probe --bench-effects` times the background effects with a person mask and reports the segmentation network's cost.
 - Tests: `test_segmentation.cpp` (network output against values from the reference TFLite runtime, colour sampling, the engine's thread and memory lifecycle) and background-effect tests (mask, mirror and zoom mapping, no-mask fallback, no per-frame allocation).
 
+- **Releases are built on GitHub:** `.github/workflows/release.yml` builds, tests, audits and packages IXC Camera on a clean Windows runner and publishes the `v<version>` release with the installer and checksums. Start it from Actions → Release → Run workflow (or by pushing the matching tag).
+
 ### Fixed
 - `tests/ui_smoke.ps1` addressed effect switches by fixed positions; it now finds them by id, so new effects don't shift its checks.
 - **Portrait now blurs and mutes the background's colour, not only its brightness.** The low-resolution colour background was computed every frame but never applied, so colour edges stayed sharp behind the subject. Adds the chroma pass (half the luma cost).
