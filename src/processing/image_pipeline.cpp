@@ -1,5 +1,7 @@
 #include "processing/image_pipeline.h"
 
+#include "processing/temporal_denoise.h"
+
 #include <emmintrin.h>
 
 #include <algorithm>
@@ -59,6 +61,13 @@ void FitGeometry(const Profile& p, std::uint32_t w, std::uint32_t h, PipelinePar
 
 }  // namespace
 
+Profile WithSmoothMotionGain(const Profile& profile, double ev) {
+    Profile p = profile;
+    p.image.exposureEv += ev;
+    p.image.denoise = std::max(p.image.denoise, TemporalDenoiser::AutoStrengthForGain(ev));
+    return p;
+}
+
 PipelineParams CompileParams(const Profile& profile, std::uint32_t width, std::uint32_t height, bool fullRange) {
     PipelineParams p;
     const ImageSettings& im = profile.image;
@@ -96,6 +105,9 @@ PipelineParams CompileParams(const Profile& profile, std::uint32_t width, std::u
     p.lutIdentity = toneNeutral && chromaNeutral;
 
     p.sharpenAmount = static_cast<int>(std::lround(std::clamp(im.sharpness, 0.0, 100.0) / 100.0 * 1.5 * 256));
+    // With denoise on, sharpening ignores slightly larger detail: it would otherwise re-amplify
+    // the grain the denoiser is about to average out (sharpening runs first).
+    p.sharpenThreshold = 2 + static_cast<int>(std::lround(std::clamp(im.denoise, 0.0, 100.0) * 0.04));
     p.mirror = profile.mirror;
     FitGeometry(profile, width, height, p);
     p.identity = p.lutIdentity && p.sharpenAmount == 0 && !p.mirror && p.geometryIdentity;

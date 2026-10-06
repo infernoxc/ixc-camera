@@ -12,6 +12,8 @@ namespace {
 // sessions). Memory only: lighting changes are caught because a remembered decision is re-verified.
 std::mutex g_hintMu;
 ExposureGovernor::Hint g_hint;
+ULONGLONG g_hintTick = 0;                      // when g_hint was stored
+constexpr ULONGLONG kFlickerMemoryMs = 20 * 60 * 1000;  // lights change: try fixed exposure again later
 }  // namespace
 
 void SmoothMotion::Begin(IKsControl* ks, bool enabled, double nominalFps) {
@@ -34,6 +36,7 @@ void SmoothMotion::Begin(IKsControl* ks, bool enabled, double nominalFps) {
     {
         std::lock_guard lock(g_hintMu);
         hint = g_hint;
+        if (hint.flicker && GetTickCount64() - g_hintTick > kFlickerMemoryMs) hint = {};
     }
     if (sharedFixed) {
         const bool known = hint.valid && hint.exposure == originalValue_ && std::abs(hint.fps - nominalFps) < 0.5;
@@ -44,6 +47,7 @@ void SmoothMotion::Begin(IKsControl* ks, bool enabled, double nominalFps) {
     }
     governed_ = autoExposure || sharedFixed;
     governor_.Reset(governed_, nominalFps, hint);
+    flicker_.Reset();
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     qpcToMs_ = 1000.0 / static_cast<double>(f.QuadPart);
@@ -106,6 +110,22 @@ bool SmoothMotion::OnFrame(const std::uint8_t* y, int stride, int width, int hei
         luma = n ? static_cast<double>(sum) / static_cast<double>(n) : 0;
     }
 
+    // Mains-flicker watch: reference rows under auto exposure, then the fixed exposure's rows.
+    if (y && width > 0 && height > 0) {
+        if (governor_.ExposureChanged()) {
+            const int n = FlickerDetector::RowMeans(y, stride, width, height, rows_);
+            if (flicker_.AddFixed(rows_, n)) {
+                if (governor_.AbortForFlicker() == ExposureGovernor::Action::RestoreAutoExposure) RestoreAuto();
+                const bool changed = lastCompensation_ != 0;
+                lastCompensation_ = 0;
+                return changed;
+            }
+        } else if (governor_.state() == ExposureGovernor::State::Observing) {
+            const int n = FlickerDetector::RowMeans(y, stride, width, height, rows_);
+            flicker_.AddReference(rows_, n);
+        }
+    }
+
     switch (governor_.OnFrame(interval, luma)) {
         case ExposureGovernor::Action::SetManualExposure:
             governor_.OnExposureApplied(SUCCEEDED(SetExposure(governor_.RequestedExposure(), true)));
@@ -129,7 +149,10 @@ HRESULT SmoothMotion::End() {
         const auto st = governor_.state();
         {
             std::lock_guard lock(g_hintMu);
-            if (hint.valid) g_hint = hint;
+            if (hint.valid || hint.flicker) {
+                g_hint = hint;
+                g_hintTick = GetTickCount64();
+            }
             else if (st == ExposureGovernor::State::Disabled && governed_) g_hint = {};  // fixed exposure didn't help
         }
         if (governor_.ExposureChanged()) hr = RestoreAuto();  // give the camera its auto exposure back

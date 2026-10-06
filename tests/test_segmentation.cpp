@@ -3,6 +3,7 @@
 #include "segmentation/selfie_net.h"
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -127,4 +128,15 @@ IXC_TEST(Segmentation_EngineProducesMaskWithoutBlockingFrames) {
     // Restarting continues the generation count: an old copy never looks current.
     IXC_CHECK(e.Start(0.5));
     e.Stop();
+}
+
+IXC_TEST(Segmentation_LowLightGainBrightensDarkInput) {
+    std::vector<std::uint8_t> rgb(300 * 3, 120);
+    IXC_CHECK_EQ(seg::LowLightGain(rgb.data(), 300), 1.0f);  // normal light: untouched
+    std::fill(rgb.begin(), rgb.end(), std::uint8_t{55});
+    IXC_CHECK(std::abs(seg::LowLightGain(rgb.data(), 300) - 2.0f) < 0.01f);
+    std::fill(rgb.begin(), rgb.end(), std::uint8_t{20});
+    IXC_CHECK_EQ(seg::LowLightGain(rgb.data(), 300), 2.5f);  // capped: noise grows with gain
+    std::fill(rgb.begin(), rgb.end(), std::uint8_t{1});
+    IXC_CHECK_EQ(seg::LowLightGain(rgb.data(), 300), 1.0f);  // black: nothing to recover
 }

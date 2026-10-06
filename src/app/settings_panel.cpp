@@ -89,6 +89,7 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
         {L"Highlights", -100, 100, 1.0, L"%+.0f", IXC_IMAGE_FIELD(highlights)},
         {L"Shadows", -100, 100, 1.0, L"%+.0f", IXC_IMAGE_FIELD(shadows)},
         {L"Low-light boost", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(lowLight)},
+        {L"Noise reduction", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(denoise)},
         {L"Gamma", 20, 300, 0.01, L"%.2f", IXC_IMAGE_FIELD(gamma)},
         {L"Sharpness", 0, 100, 1.0, L"%.0f", IXC_IMAGE_FIELD(sharpness)},
         {L"Digital zoom", 100, 400, 0.01, L"%.2f×", [](const Profile& p) { return p.zoom; }, [](Profile& p, double v) { p.zoom = v; }},

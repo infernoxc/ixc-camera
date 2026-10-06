@@ -12,6 +12,7 @@
 // Settings changes apply to the next frame. Parsing happens on the watcher thread, and the
 // frame path only swaps in the compiled result.
 
+#include "camera/power_line.h"
 #include "camera/smooth_motion.h"
 #include "effects/backgrounds.h"
 #include "effects/effects.h"
@@ -86,6 +87,7 @@ private:
     // Smooth motion (fixed exposure in low light). Lock order: smoothMu_ before mu_.
     std::mutex smoothMu_;
     camera::SmoothMotion smooth_;
+    camera::PowerLineControl powerLine_;  // anti-flicker (under smoothMu_)
     Microsoft::WRL::ComPtr<IKsControl> ks_;
     double nominalFps_ = 0;       // under mu_
     double compensationEv_ = 0;   // under mu_: added to the profile's exposure

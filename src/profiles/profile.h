@@ -76,6 +76,10 @@ struct BackgroundSettings {
     bool operator==(const BackgroundSettings&) const = default;
 };
 
+// Power-line frequency of the room's lighting, for the camera's anti-flicker control.
+enum class AntiFlicker { Auto, Hz50, Hz60, Off };
+std::string_view ToString(AntiFlicker a);  // "auto", "50hz", "60hz", "off"
+
 inline constexpr size_t kMaxBackgroundNameChars = 64;
 bool IsValidBackgroundName(std::string_view name);  // [a-z0-9-], 1..64
 std::string_view ToString(BackgroundMode m);
@@ -114,6 +118,9 @@ struct Profile {
     // Keep the camera at its full frame rate in low light (fixed exposure + brightness
     // compensation) instead of letting auto exposure slow it down. See camera/exposure_governor.h.
     bool smoothMotion = true;
+    // Mains-light flicker (the camera's power-line frequency control). Auto = the frequency of the
+    // user's region (left as the camera has it where the region doesn't say). See camera/power_line.h.
+    AntiFlicker antiFlicker = AntiFlicker::Auto;
     // Keep the tracked face framed: zoom and pan smoothly inside the crop/zoom rectangle (uses
     // face tracking). See face/auto_framer.h.
     bool autoFraming = false;

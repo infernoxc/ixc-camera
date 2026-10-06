@@ -88,6 +88,9 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
         std::lock_guard lock(smoothMu_);
         std::lock_guard l2(mu_);
         smoothEnabled_ = profile_.smoothMotion;
+        // Anti-flicker first: the camera's auto exposure (which Smooth motion observes) follows it.
+        // The app publishes Auto already resolved for the user's region; Auto here = leave as is.
+        powerLine_.Apply(ks_.Get(), profile_.antiFlicker);
         smooth_.Begin(ks_.Get(), smoothEnabled_ && nv12_, nominalFps_);
     }
     UpdateFaceTracking();
@@ -127,6 +130,7 @@ void FrameProcessor::EndSession() {
         smoothEv = smooth_.CompensationEv();
         smoothReasserts = smooth_.Reasserts();
         smoothRestore = smooth_.End();  // gives the camera its automatic exposure back
+        powerLine_.Apply(nullptr, AntiFlicker::Auto);  // and its own power-line setting
     }
     ks_.Reset();
     if (change_ != INVALID_HANDLE_VALUE) {
@@ -170,6 +174,7 @@ void CALLBACK FrameProcessor::OnSettingsChanged(void* ctx, BOOLEAN) {
         // Smooth motion switched on/off mid-session: restart it (turning it off restores auto exposure).
         std::lock_guard lock(self->smoothMu_);
         std::lock_guard l2(self->mu_);
+        if (self->profile_.antiFlicker != self->powerLine_.applied()) self->powerLine_.Apply(self->ks_.Get(), self->profile_.antiFlicker);
         if (self->smoothSettingChanged_) {
             self->smoothSettingChanged_ = false;
             self->smooth_.End();
@@ -290,11 +295,11 @@ void FrameProcessor::Recompile() {
         params_ = std::move(identity);
         return;
     }
-    // Smooth motion's software brightness compensation rides on the exposure tone step.
-    Profile effective = profile_;
-    effective.image.exposureEv += compensationEv_;
+    // Smooth motion's software brightness compensation rides on the exposure tone step (and
+    // raises temporal denoise to match).
+    const Profile effective = processing::WithSmoothMotionGain(profile_, compensationEv_);
     params_ = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, width_, height_, fullRange_));
-    effects_ = effects::CompileEffects(profile_, fullRange_, bgPicture_);
+    effects_ = effects::CompileEffects(effective, fullRange_, bgPicture_);
 }
 
 // Returns this session's allocator, creating it on first use. Requires mu_ (EndSession releases

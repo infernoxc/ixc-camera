@@ -14,6 +14,7 @@
 #include "camera/capture_session.h"
 #include "camera/device_enum.h"
 #include "camera/format_select.h"
+#include "camera/power_line.h"
 #include "common/fileio.h"
 #include "common/strings.h"
 #include "diagnostics/error.h"
@@ -54,6 +55,14 @@ using namespace ixc::camera;
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"IXCCameraMainWindow";
+
+// What the IXC Camera source receives: Auto anti-flicker resolved for this user's region (the
+// camera service runs under a service account and can't know it; there Auto = leave as is).
+Profile ForPublishing(const Profile& p) {
+    Profile out = p;
+    out.antiFlicker = ResolveAntiFlicker(p.antiFlicker, UserRegion());
+    return out;
+}
 constexpr wchar_t kSingleInstanceMutex[] = L"Local\\IXCCamera.UI.SingleInstance";
 
 enum ControlId : int {
@@ -244,7 +253,7 @@ bool MainWindow::Create(int showCmd) {
     // Make sure IXC Camera applies this user's current settings (write only when they differ).
     if (vcam_.comRegistered && profileLoaded_) {
         const ProfileLoadResult published = LoadActiveProfile();
-        Profile current = profile_;
+        Profile current = ForPublishing(profile_);
         Validate(current);
         if (!published.ok || !(published.profile == current)) SaveAndPublish();
     }
@@ -905,6 +914,7 @@ void MainWindow::StartPreview() {
     cfg.format = formats_[*idx];
     cfg.output = OutputFormat::Nv12;  // pipeline format; the preview converts only displayed pixels
     cfg.smoothMotion = profile_.smoothMotion;
+    session_->SetAntiFlicker(ResolveAntiFlicker(profile_.antiFlicker, UserRegion()));
 
     SetWindowTextW(status_, (L"Opening " + W(cam.name) + L"…").c_str());
     const Error err = session_->Start(cfg);
@@ -944,7 +954,10 @@ void MainWindow::StartPreview() {
 // ---- picture settings -------------------------------------------------------------------------------
 
 void MainWindow::OnPictureChanged() {
-    if (session_) session_->SetSmoothMotion(profile_.smoothMotion);
+    if (session_) {
+        session_->SetSmoothMotion(profile_.smoothMotion);
+        session_->SetAntiFlicker(ResolveAntiFlicker(profile_.antiFlicker, UserRegion()));
+    }
     UpdatePipeline();                            // preview reflects the change immediately
     if (panel_.FaceOverlay() != app_.showFaceMarkers) {  // app-level preference (not part of a profile)
         app_.showFaceMarkers = panel_.FaceOverlay();
@@ -961,12 +974,12 @@ void MainWindow::UpdatePipeline() {
     }
     const FrameLayout l = session_->Layout();
     const bool fullRange = l.nominalRange == MFNominalRange_0_255;
-    // Same as the IXC Camera source: Smooth motion's brightness gain adds to the user's exposure.
+    // Same as the IXC Camera source: Smooth motion's brightness gain adds to the user's exposure
+    // (and raises temporal denoise to match).
     smoothEv_ = session_->SmoothCompensationEv();
-    Profile effective = profile_;
-    effective.image.exposureEv += smoothEv_;
+    const Profile effective = processing::WithSmoothMotionGain(profile_, smoothEv_);
     preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
-    auto fx = effects::CompileEffects(profile_, fullRange, bgSource_.Resolve(profile_.background, BackgroundsDirectory()));
+    auto fx = effects::CompileEffects(effective, fullRange, bgSource_.Resolve(profile_.background, BackgroundsDirectory()));
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
@@ -986,7 +999,7 @@ void MainWindow::SaveAndPublish() {
     // Publish for the IXC Camera source (inside the Windows camera service). Apps using IXC
     // Camera pick the change up on their next frame.
     if (!vcam_.comRegistered) return;
-    const HRESULT hr = PublishActiveProfile(profile_);
+    const HRESULT hr = PublishActiveProfile(ForPublishing(profile_));
     if (FAILED(hr) && !publishWarned_) {
         publishWarned_ = true;
         const Error e{hr, "PublishActiveProfile", "IXC Camera could not share these settings with the system camera."};

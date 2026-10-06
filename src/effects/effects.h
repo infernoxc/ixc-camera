@@ -13,6 +13,7 @@
 #include "effects/background_renderer.h"
 #include "face/face_types.h"
 #include "processing/image_pipeline.h"
+#include "processing/temporal_denoise.h"
 #include "segmentation/segmentation_engine.h"
 #include "profiles/profile.h"
 
@@ -57,15 +58,16 @@ struct EffectConfig {
     };
     std::vector<Face> faceEffects;   // portrait, beauty, blush (in application order)
     BackgroundConfig background;     // the Background setting (applied first)
+    double denoise = 0;              // temporal denoise strength 0..100 (image.denoise; applied before all else)
     bool grade = false;              // colour/lighting LUTs below are not identity
     std::array<std::uint8_t, 256> yLut{}, uLut{}, vLut{};
     bool needsFaces = false;
     bool needsSegmentation = false;
-    bool Active() const { return grade || !faceEffects.empty() || background.Active(); }
+    bool Active() const { return denoise > 0 || grade || !faceEffects.empty() || background.Active(); }
 };
 
-// Compiles the profile's effects (none when profile.effectsEnabled is off) and its Background
-// setting. picture: the resolved background picture for Replace/Custom (see BackgroundSource);
+// Compiles the profile's effects (none when profile.effectsEnabled is off), its Background
+// setting and its temporal denoise (image.denoise). picture: the resolved background picture for Replace/Custom (see BackgroundSource);
 // without one those modes fall back to blur.
 std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool fullRange, std::shared_ptr<const BackgroundImage> picture = nullptr);
 // Effects only (unknown ids ignored, strengths clamped).
@@ -83,7 +85,8 @@ public:
     // Applies cfg to frame in place. frame.width/height even.
     void Apply(const processing::Nv12Frame& frame, const EffectConfig& cfg, const FrameContext& ctx);
     size_t ScratchBytes() const;
-    // Frees the background's buffers (call when no effects are active, so nothing is held).
+    // Frees the background's and the denoiser's buffers (call when no effects are active, so
+    // nothing is held).
     void ReleaseBackground();
 
 private:
@@ -107,6 +110,7 @@ private:
     Region face_;
     float presence_ = 0;  // 0..1 fade for face-anchored effects
     BackgroundRenderer background_;
+    processing::TemporalDenoiser denoise_;
     std::vector<std::uint16_t> tmp_;   // beauty: horizontal box sums
     std::vector<std::uint8_t> blur_;   // beauty: blurred ROI
     std::vector<std::uint8_t> lowY_, lowUV_;  // portrait: 1/8-scale background

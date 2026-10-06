@@ -111,6 +111,8 @@ private:
 // Samples an NV12 frame into kNetW x kNetH RGB bytes (2x2 luma average, one chroma sample per
 // output pixel). False on inconsistent input. Exposed for tests.
 bool SampleNv12ToRgb(const processing::Nv12Planes& src, const processing::YuvFormat& fmt, std::uint8_t* rgb);
+// Brightness gain applied to the network input of a dark frame (1 in normal light, up to 2.5).
+float LowLightGain(const std::uint8_t* rgb, size_t pixels);
 // Samples the luma plane into kMaskW x kMaskH bytes (the refinement guide).
 bool SampleLuma(const processing::Nv12Planes& src, std::uint8_t* luma);
 

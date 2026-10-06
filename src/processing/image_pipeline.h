@@ -39,6 +39,11 @@ struct PipelineParams {
     bool gpuAllowed = true;       // profile permits GPU use where it's measured to help
 };
 
+// The profile as actually applied while Smooth motion brightens the picture by `ev` stops in
+// software: the gain adds to the exposure, and temporal denoise is raised to match (the gain
+// amplifies noise too). Shared by the app preview and the IXC Camera source.
+Profile WithSmoothMotionGain(const Profile& profile, double ev);
+
 // Compiles profile settings for frames of the given size and YUV range.
 PipelineParams CompileParams(const Profile& profile, std::uint32_t width, std::uint32_t height, bool fullRange);
 

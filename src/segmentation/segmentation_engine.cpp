@@ -78,11 +78,23 @@ std::uint8_t ProbabilityToMask(float p) {
     return static_cast<std::uint8_t>(t * t * (3 - 2 * t) * 255.0f + 0.5f);
 }
 
+float LowLightGain(const std::uint8_t* rgb, size_t pixels) {
+    if (!rgb || pixels == 0) return 1.0f;
+    std::uint64_t sum = 0;
+    for (size_t i = 0; i < pixels; ++i) sum += rgb[i * 3] + 2u * rgb[i * 3 + 1] + rgb[i * 3 + 2];
+    const double mean = static_cast<double>(sum) / (4.0 * static_cast<double>(pixels));
+    if (mean >= 90 || mean < 4) return 1.0f;  // normal light, or nothing to see
+    return static_cast<float>(std::min(2.5, 110.0 / mean));
+}
+
 namespace {
 
+// Network input: RGB in 0..1. A dark frame is brightened first (the network was trained on
+// normally exposed pictures; in a dim room it otherwise loses the hair and shoulders).
 void RgbToInput(const std::uint8_t* rgb, float* in) {
-    constexpr float k = 1.0f / 255.0f;
-    for (size_t i = 0; i < static_cast<size_t>(kNetW) * kNetH * 3; ++i) in[i] = static_cast<float>(rgb[i]) * k;
+    const size_t pixels = static_cast<size_t>(kNetW) * kNetH;
+    const float k = LowLightGain(rgb, pixels) / 255.0f;
+    for (size_t i = 0; i < pixels * 3; ++i) in[i] = std::min(1.0f, static_cast<float>(rgb[i]) * k);
 }
 
 }  // namespace

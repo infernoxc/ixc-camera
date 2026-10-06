@@ -23,7 +23,14 @@ void ExposureGovernor::Reset(bool enabled, double nominalFps, const Hint& hint) 
     compensationEv_ = 0;
     changed_ = false;
     fromHint_ = false;
+    flicker_ = false;
     exposure_ = ExposureForFps(nominalFps);
+    if (state_ == State::Observing && hint.flicker && std::abs(hint.fps - nominalFps) < 0.5) {
+        // Fixed exposure banded under this room's lights last time: stay on auto exposure.
+        state_ = State::Disabled;
+        flicker_ = true;
+        return;
+    }
     if (state_ == State::Observing) skip_ = cfg_.settleFrames;  // auto exposure still converging at start
     if (state_ == State::Observing && hint.valid && std::abs(hint.fps - nominalFps) < 0.5) {
         // Start from the decision that worked last time; the first frame requests it.
@@ -40,6 +47,7 @@ ExposureGovernor::Hint ExposureGovernor::CurrentHint() const {
     h.fps = nominalFps_;
     h.exposure = exposure_;
     h.compensationEv = compensationEv_;
+    h.flicker = flicker_;
     return h;
 }
 
@@ -111,6 +119,17 @@ ExposureGovernor::Action ExposureGovernor::OnFrame(double intervalMs, double mea
     rounds_ = 0;
     state_ = !fromHint_ && cfg_.refineFrames > 0 && cfg_.refineRounds > 0 ? State::Refining : State::Locked;
     return Action::None;
+}
+
+ExposureGovernor::Action ExposureGovernor::AbortForFlicker() {
+    if (state_ == State::Disabled && !changed_) return Action::None;
+    const bool restore = changed_;
+    changed_ = false;
+    compensationEv_ = 0;
+    fromHint_ = false;
+    flicker_ = true;
+    state_ = State::Disabled;
+    return restore ? Action::RestoreAutoExposure : Action::None;
 }
 
 void ExposureGovernor::OnExposureApplied(bool ok) {

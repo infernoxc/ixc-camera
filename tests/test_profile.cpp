@@ -35,6 +35,7 @@ Profile SampleProfile() {
     p.tier = PerformanceTier::UltraLow;
     p.gpu = GpuMode::Off;
     p.smoothMotion = false;
+    p.antiFlicker = AntiFlicker::Hz60;
     p.autoFraming = true;
     p.background.mode = BackgroundMode::Replace;
     p.background.builtin = "nature";

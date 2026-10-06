@@ -468,8 +468,11 @@ void EffectRenderer::Grade(const processing::Nv12Frame& f, const EffectConfig& c
 }
 
 void EffectRenderer::Apply(const processing::Nv12Frame& frame, const EffectConfig& cfg, const FrameContext& ctx) {
-    if (!cfg.background.Active()) ReleaseBackground();  // background switched off: give its memory back
+    if (!cfg.background.Active() && background_.ScratchBytes() > 0) background_ = BackgroundRenderer();  // switched off: give its memory back
+    if (!(cfg.denoise > 0)) denoise_.Release();
     if (!frame.y || !frame.uv || frame.width < 16 || frame.height < 16 || !cfg.Active()) return;
+    // Denoise first: it needs the camera's picture, not the composited one, to tell noise from motion.
+    if (cfg.denoise > 0) denoise_.Apply(frame, cfg.denoise);
     // The background goes first: face effects and colour looks then apply to the whole picture.
     if (cfg.background.Active()) {
         BackgroundContext bctx;
@@ -493,12 +496,14 @@ void EffectRenderer::Apply(const processing::Nv12Frame& frame, const EffectConfi
 
 void EffectRenderer::ReleaseBackground() {
     if (background_.ScratchBytes() > 0) background_ = BackgroundRenderer();
+    denoise_.Release();
 }
 
 size_t EffectRenderer::ScratchBytes() const {
     return tmp_.capacity() * sizeof(std::uint16_t) + blur_.capacity() + lowY_.capacity() + lowUV_.capacity() +
            colDx2_.capacity() * sizeof(float) + upRow_.capacity() * 2 + lowRow_.capacity() * 2 +
-           (colIdx_.capacity() + colW_.capacity()) * sizeof(int) + background_.ScratchBytes();
+           (colIdx_.capacity() + colW_.capacity()) * sizeof(int) + background_.ScratchBytes() +
+           denoise_.MemoryBytes();
 }
 
 }  // namespace ixc::effects
@@ -517,6 +522,7 @@ std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool 
     bc.posY = static_cast<float>(b.posY);
     bc.scale = static_cast<float>(b.scale);
     bc.image = std::move(picture);
+    cfg->denoise = std::clamp(profile.image.denoise, 0.0, 100.0);
     if (bc.Active()) {
         cfg->needsSegmentation = true;
         cfg->needsFaces = true;  // the face guard keeps the head, ears and nose in the foreground

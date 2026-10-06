@@ -368,6 +368,8 @@ void CaptureSession::TeardownLocked() {
         if (smoothRunning_ && FAILED(smooth_.End())) log::Warn("capture", "could not give the camera its automatic exposure back");
         smoothRunning_ = false;
         smoothEv_.store(0);
+        powerLine_.Apply(nullptr, AntiFlicker::Auto);  // the camera's own power-line setting back
+        flickerApplied_ = false;
     }
     if (reader) {
         // Flush cancels the pending ReadSample; wait for OnFlush so no callback for this reader
@@ -444,6 +446,20 @@ STDMETHODIMP CaptureSession::OnReadSample(HRESULT hrStatus, DWORD, DWORD flags, 
 void CaptureSession::FeedSmoothMotion(IMFSample* sample) {
     std::lock_guard lock(smoothMu_);
     if (smoothBlocked_) return;
+    // Anti-flicker first (on the first frame and when changed): auto exposure follows it.
+    const auto flicker = static_cast<AntiFlicker>(flickerWanted_.load());
+    if (!flickerApplied_ || flicker != powerLine_.applied()) {
+        ComPtr<IMFMediaSource> source;
+        {
+            std::lock_guard l(mu_);
+            source = source_;
+        }
+        ComPtr<IKsControl> ks;
+        if (source) source.As(&ks);
+        const HRESULT hr = powerLine_.Apply(ks.Get(), flicker);
+        if (FAILED(hr)) log::Info("capture", "camera has no anti-flicker control (power-line frequency)");
+        flickerApplied_ = true;
+    }
     const bool want = smoothWanted_.load();
     if (want != smoothRunning_) {
         if (want) {

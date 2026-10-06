@@ -4,8 +4,14 @@
 // (IKsControl, KSPROPERTY_CAMERACONTROL_EXPOSURE). Cheap per frame: one timestamp and a sparse
 // brightness sample (1 in 64 luma pixels). The camera's automatic exposure is always restored
 // in End(), so other apps see the camera unchanged.
+//
+// While the exposure is fixed, a row-brightness profile (256 rows x every 16th pixel) feeds the
+// mains-flicker detector: if the fixed exposure makes the room's lights band the picture, the
+// exposure goes back to automatic (bands are worse than a lower frame rate), and that's
+// remembered for this frame rate for 20 minutes.
 
 #include "camera/exposure_governor.h"
+#include "camera/flicker_detector.h"
 
 #include <windows.h>
 #include <mfidl.h>  // COM base declarations ksproxy.h relies on
@@ -36,7 +42,9 @@ public:
     double CompensationEv() const { return governor_.CompensationEv(); }
     ExposureGovernor::State state() const { return governor_.state(); }
     int Reasserts() const { return governor_.Reasserts(); }
-    bool NeedsLuma() const { return governor_.NeedsLuma(); }
+    // The frame's luma is needed while deciding, and while a fixed exposure is watched for bands.
+    bool NeedsLuma() const { return governor_.NeedsLuma() || governor_.ExposureChanged(); }
+    bool FlickerAborted() const { return governor_.FlickerAborted(); }
     int AppliedExposure() const { return governor_.ExposureChanged() ? governor_.RequestedExposure() : 0; }
 
 private:
@@ -46,6 +54,8 @@ private:
 
     Microsoft::WRL::ComPtr<IKsControl> ks_;
     ExposureGovernor governor_;
+    FlickerDetector flicker_;
+    float rows_[FlickerDetector::kMaxRows] = {};
     long long lastQpc_ = 0;
     double qpcToMs_ = 0;
     double lastCompensation_ = 0;

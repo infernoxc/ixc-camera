@@ -129,9 +129,11 @@ IXC_TEST(Format_BestPicksLargestSmoothModeAtItsHighestRate) {
     // Nothing smooth: the fastest mode.
     const auto d = NormalizeFormats({F(MFVideoFormat_YUY2, 1920, 1080, 5), F(MFVideoFormat_YUY2, 640, 480, 15)});
     IXC_CHECK_EQ(Pick(d, best).height, 480u);
-    // The USB 2.0 webcam: 1080p30 MJPG (its YUY2 1080p is only 5 FPS).
-    IXC_CHECK_EQ(Pick(Usb2Webcam(), RequestForTier(PerformanceTier::Auto)).height, 1080u);
-    IXC_CHECK_EQ(Pick(Usb2Webcam(), RequestForTier(PerformanceTier::Auto)).Fps(), 30.0);
+    // The USB 2.0 webcam: 1080p30 MJPG (its YUY2 1080p is only 5 FPS). Kept in a variable: Pick
+    // returns a reference into the list.
+    const auto usb = Usb2Webcam();
+    IXC_CHECK_EQ(Pick(usb, RequestForTier(PerformanceTier::Auto)).height, 1080u);
+    IXC_CHECK_EQ(Pick(usb, RequestForTier(PerformanceTier::Auto)).Fps(), 30.0);
 }
 
 IXC_TEST(Format_SlowCameraGetsBestAvailableRate) {

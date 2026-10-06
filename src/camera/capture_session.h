@@ -18,6 +18,7 @@
 #include "camera/frame_stats.h"
 #include "camera/latest_mailbox.h"
 #include "camera/reconnect_policy.h"
+#include "camera/power_line.h"
 #include "camera/smooth_motion.h"
 #include "diagnostics/error.h"
 
@@ -91,6 +92,8 @@ public:
     // matches what the camera delivered before its exposure was fixed. 0 when inactive.
     void SetSmoothMotion(bool enabled) { smoothWanted_.store(enabled); }
     double SmoothCompensationEv() const { return smoothEv_.load(); }
+    // Anti-flicker (resolved: Auto = leave the camera's own setting). Applied on the next frame.
+    void SetAntiFlicker(AntiFlicker a) { flickerWanted_.store(static_cast<int>(a)); }
 
     // IUnknown
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
@@ -151,6 +154,9 @@ private:
     double smoothFps_ = 0;
     std::atomic<bool> smoothWanted_{false};
     std::atomic<double> smoothEv_{0};
+    PowerLineControl powerLine_;  // under smoothMu_
+    bool flickerApplied_ = false; // powerLine_ set for the current stream
+    std::atomic<int> flickerWanted_{0};
 
     std::mutex listenerMu_;
     ICaptureListener* listener_;

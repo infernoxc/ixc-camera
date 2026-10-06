@@ -216,6 +216,16 @@ bool ParsePerformanceTier(std::string_view s, PerformanceTier& out) {
     return false;
 }
 
+std::string_view ToString(AntiFlicker a) {
+    switch (a) {
+        case AntiFlicker::Auto: return "auto";
+        case AntiFlicker::Hz50: return "50hz";
+        case AntiFlicker::Hz60: return "60hz";
+        case AntiFlicker::Off: return "off";
+    }
+    return "auto";
+}
+
 std::string_view ToString(BackgroundMode m) {
     switch (m) {
         case BackgroundMode::Original: return "original";
@@ -386,7 +396,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
     static constexpr const char* kKnown[] = {"schemaVersion", "name", "sourceCameraId", "width", "height", "fpsNumerator",
                                              "fpsDenominator", "mirror", "zoom", "crop", "image", "effects",
                                              "faceTracking", "performanceTier", "gpu", "smoothMotion", "autoFraming", "effectsEnabled",
-                                             "hotkeys", "background"};
+                                             "hotkeys", "background", "antiFlicker"};
     for (const auto& [k, v] : doc.AsObject()) {
         if (std::find(std::begin(kKnown), std::end(kKnown), k) == std::end(kKnown)) {
             w.push_back("unknown field \"" + k.substr(0, 64) + "\" ignored");
@@ -401,6 +411,10 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
     r.Int("fpsDenominator", p.fpsDenominator, 0, 10'000'000);
     r.Bool("mirror", p.mirror);
     r.Bool("smoothMotion", p.smoothMotion);
+    {
+        static constexpr const char* kFlicker[] = {"auto", "50hz", "60hz", "off"};
+        ReadEnum(r, "antiFlicker", p.antiFlicker, kFlicker);
+    }
     r.Bool("autoFraming", p.autoFraming);
     r.Bool("effectsEnabled", p.effectsEnabled);
     r.Num("zoom", p.zoom);
@@ -536,6 +550,7 @@ std::string ProfileToJson(const Profile& p) {
         {"performanceTier", std::string(ToString(p.tier))},
         {"gpu", p.gpu == GpuMode::Off ? "off" : "auto"},
         {"smoothMotion", p.smoothMotion},
+        {"antiFlicker", std::string(ToString(p.antiFlicker))},
         {"autoFraming", p.autoFraming},
         {"effectsEnabled", p.effectsEnabled},
         {"hotkeys", std::move(hotkeys)},

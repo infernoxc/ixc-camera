@@ -34,7 +34,7 @@ enum PanelId : int {
     kIdHotkeys,
     kIdPictureReset,
     kIdMirror,
-    kIdPictureSlider0 = 210,  // 12 sliders: 210..221 (order in settings_panel.cpp)
+    kIdPictureSlider0 = 210,  // 13 sliders: 210..222 (order in settings_panel.cpp)
     kIdEffectsMaster = 230,
     kIdEffectsAllOff,
     kIdEffectToggle0 = 240,   // one per effects::Catalog() entry: 240..

@@ -186,7 +186,7 @@ try {
         @('brightness', 40, '"brightness": 40'), @('contrast', 40, '"contrast": 40'), @('saturation', 40, '"saturation": 40'),
         @('warmth', 40, '"temperature": 40'), @('tint', 40, '"tint": 40'), @('exposure', 10, '"exposureEv": 1'),
         @('highlights', 40, '"highlights": 40'), @('shadows', 40, '"shadows": 40'), @('low-light', 40, '"lowLight": 40'),
-        @('gamma', 150, '"gamma": 1.5'), @('sharpness', 40, '"sharpness": 40'), @('zoom', 150, '"zoom": 1.5'))
+        @('noise reduction', 40, '"denoise": 40'), @('gamma', 150, '"gamma": 1.5'), @('sharpness', 40, '"sharpness": 40'), @('zoom', 150, '"zoom": 1.5'))
     $before = [Ui]::PreviewStats($preview)[2]
     for ($i = 0; $i -lt $sliders.Count; $i++) {
         $s = P ($IdSlider0 + $i)

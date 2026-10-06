@@ -19,6 +19,9 @@ add_library(ixc_camera STATIC
     camera/frame_stats.cpp
     camera/reconnect_policy.cpp
     camera/exposure_governor.cpp
+    camera/flicker_detector.cpp
+    camera/power_line.cpp
+    camera/power_line_region.cpp
     camera/smooth_motion.cpp
     camera/device_enum.cpp
     camera/capture_session.cpp)
@@ -28,6 +31,7 @@ target_link_libraries(ixc_camera PUBLIC ixc_core mfplat mf mfreadwrite mfuuid cf
 add_library(ixc_processing STATIC
     processing/color.cpp
     processing/image_pipeline.cpp
+    processing/temporal_denoise.cpp
     processing/backend_selector.cpp)
 target_link_libraries(ixc_processing PUBLIC ixc_core)
 
