@@ -13,9 +13,21 @@
 - If the Windows camera service still has the previous IXC DLL loaded during an upgrade or uninstall, the old file is renamed `*.old-*` and deleted at the next reboot. Until the service unloads it (it stops by itself when idle, or on reboot), apps may still get the old version.
 
 ## Picture processing
-- Processing runs on the CPU (SSE2). Only crop/zoom may move to the GPU, and only when measured faster on your PC. That costs ~40–60 MB of RAM while zoom is active and is never done on PCs with under 4 GB RAM. Turn it off with the app's "Use the graphics card for zoom" checkbox (or `"gpu": "off"`). Without a usable GPU, digital zoom costs ≈7 ms per 1080p frame on the reference Ryzen (more on weak CPUs), so prefer 720p when zooming.
-- GPU acceleration has only been measured on an AMD RX 6600. Integrated Intel/AMD graphics (the low-end target) haven't been measured yet. The on-machine selection is designed to decide correctly there, but that's unverified.
-- **Denoise isn't implemented yet.** "Low-light boost" lifts dark tones but doesn't reduce noise.
+- **Processing: Auto / GPU / CPU.**
+  - What moves to the GPU: the picture pipeline (colour, sharpen, crop/zoom) and the segmentation network.
+  - What always runs on the CPU (SSE2): temporal denoise, mask refinement, background compositing and the face effects. GPU mode lowers the CPU load but doesn't remove it.
+  - The GPU path uses ~40–60 MB for the picture and ~3 MB of video memory for the network.
+  - Auto never considers the GPU for the picture on PCs with under 4 GB RAM.
+- **GPU paths:**
+  - CI tests them on WARP, Direct3D's software device, against the CPU.
+  - The picture pipeline was measured on an AMD RX 6600. The segmentation network on real GPUs (integrated Intel/AMD, NVIDIA) is **NOT TESTED — REQUIRES USER ENVIRONMENT**. Run `ixc_probe --bench-seg` to see the numbers on your PC.
+- **Background:**
+  - Segmentation runs at 256×144 (refined to 512×288). Very fine hair strands and fast hand motion can show soft or slightly late edges.
+  - Objects you hold, and headphones, are kept or dropped as the network judges.
+  - Custom WEBP pictures need the Windows WebP Image Extension.
+- **Denoise is temporal.** Fast-moving areas keep their noise rather than smear.
+- **Anti-flicker** depends on the camera's power-line control. Cameras without one are left unchanged.
+- **Auto anti-flicker** uses your Windows region. Japan (both frequencies) leaves the camera's own setting.
 - Crop can be set in a profile file but has no editor in the app yet. Digital zoom (centre crop) is in the app.
 - The app's preview and IXC Camera can't run at the same time (one app per webcam, see below). Adjust settings with the preview, close it, then use IXC Camera. Changes made in the app while another app uses IXC Camera still apply live.
 - IXC Camera settings are machine-wide: any user on this PC who opens the app changes what IXC Camera shows.
