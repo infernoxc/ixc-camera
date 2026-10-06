@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.1 — Settings panel fix
+
+### Fixed
+- **Every settings section was empty in 0.14.0.** The panel laid out all controls in one `DeferWindowPos` batch. Since 0.14 each section is its own page (a different parent window), and Windows rejects a batch with mixed parents as a whole, so no control was ever placed. Controls are now positioned individually (only when their rectangle changes).
+
 ## 0.14.0 — New layout, live sync, in-app updates
 
 ### Added
