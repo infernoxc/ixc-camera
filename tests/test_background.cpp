@@ -61,6 +61,7 @@ BackgroundConfig Mode(BackgroundMode mode, BlurLevel level = BlurLevel::Medium) 
     BackgroundConfig c;
     c.mode = mode;
     c.blur = level;
+    c.strength = level == BlurLevel::Low ? 0.3f : level == BlurLevel::High ? 0.85f : 0.55f;
     return c;
 }
 
@@ -399,7 +400,7 @@ IXC_TEST(Background_SwitchingModesReleasesMemory) {
         f = src;
         r.Apply(f.View(), *blur, fctx);
     }
-    IXC_CHECK(r.ScratchBytes() < pictureBytes);  // plate released (only the blur's buffers now)
+    IXC_CHECK_EQ(r.BackgroundPlateBytes(), static_cast<size_t>(0));  // plate released (only the blur's buffers now)
     p.background.mode = BackgroundMode::Original;
     const auto none = CompileEffects(p, false, source.Resolve(p.background, {}));
     f = src;
@@ -415,4 +416,80 @@ IXC_TEST(Background_SwitchingModesReleasesMemory) {
         if (round >= 3) IXC_CHECK(r.ScratchBytes() <= peak + 4096);
         peak = std::max(peak, r.ScratchBytes());
     }
+}
+
+IXC_TEST(Background_StrengthStyleAndEdgeControls) {
+    const Frame src = Textured(320, 180);
+    const seg::SegMask mask = ColumnMask();
+    BackgroundContext ctx;
+    ctx.mask = &mask;
+    // 0%: the frame is left exactly as it is.
+    {
+        BackgroundRenderer r;
+        BackgroundConfig c = Mode(BackgroundMode::Blur);
+        c.strength = 0;
+        IXC_CHECK(Render(r, src, c, ctx).buf == src.buf);
+        IXC_CHECK_EQ(r.ScratchBytes() < 300000, true);
+    }
+    // Continuous strength: more strength, less background detail.
+    double prev = 1e9;
+    for (float s : {0.2f, 0.5f, 0.8f, 1.0f}) {
+        BackgroundRenderer r;
+        BackgroundConfig c = Mode(BackgroundMode::Blur);
+        c.strength = s;
+        Frame o = Render(r, src, c, ctx);
+        const double d = Detail(o, 8, 80);
+        IXC_CHECK(d <= prev + 1e-9);
+        prev = d;
+    }
+    // Bokeh renders differently from the standard blur (highlight bloom, falloff) and still keeps the person.
+    {
+        BackgroundRenderer a, b;
+        BackgroundConfig c = Mode(BackgroundMode::Blur);
+        c.strength = 0.65f;
+        const Frame std1 = Render(a, src, c, ctx);
+        c.bokeh = true;
+        Frame bok = Render(b, src, c, ctx);
+        IXC_CHECK(std1.buf != bok.buf);
+        Frame s2 = src;
+        IXC_CHECK_EQ(bok.Y(160, 90), s2.Y(160, 90));
+    }
+    // Feather: a crisp setting gives a harder mask edge than a soft one.
+    {
+        seg::SegMask soft = ColumnMask();
+        for (int y = 0; y < seg::kMaskH; ++y)
+            for (int x = 0; x < seg::kMaskW; ++x) soft.value[static_cast<size_t>(y) * seg::kMaskW + x] = static_cast<std::uint8_t>(std::clamp(x - 128, 0, 255));
+        BackgroundContext sc;
+        sc.mask = &soft;
+        BackgroundRenderer a, b;
+        BackgroundConfig c = Mode(BackgroundMode::Color);
+        c.feather = 0.0f;
+        Render(a, src, c, sc);
+        c.feather = 1.0f;
+        Render(b, src, c, sc);
+        const size_t at = static_cast<size_t>(10) * seg::kMaskW + 128 + 160;  // mask value 160 (above the 50% line)
+        IXC_CHECK(a.EffectiveMask()[at] > b.EffectiveMask()[at]);
+    }
+}
+
+IXC_TEST(Background_BlurControlsInProfile) {
+    Profile p;
+    p.background.mode = BackgroundMode::Blur;
+    ApplyBlurPreset(p.background, BlurPreset::Dslr);
+    IXC_CHECK(p.background.style == BlurStyle::Bokeh && p.background.strength == 65);
+    p.background.feather = 20;
+    p.background.preset = BlurPreset::Custom;
+    const auto r = ProfileFromJson(ProfileToJson(p));
+    IXC_REQUIRE(r.ok && r.warnings.empty());
+    IXC_CHECK(r.profile.background == p.background);
+    // A 0.12 profile ("blur": "high", no strength) keeps its look: strength 85.
+    const auto old = ProfileFromJson(R"({"schemaVersion":1,"background":{"mode":"blur","blur":"high"}})");
+    IXC_REQUIRE(old.ok);
+    IXC_CHECK_EQ(old.profile.background.strength, 85.0);
+    // Out of range is clamped with a warning, never silently.
+    const auto bad = ProfileFromJson(R"({"schemaVersion":1,"background":{"strength":250}})");
+    IXC_CHECK(bad.ok && bad.profile.background.strength == 100 && !bad.warnings.empty());
+    // The compiled config carries the controls.
+    const auto cfg = CompileEffects(p, false);
+    IXC_CHECK(cfg->background.bokeh && std::abs(cfg->background.feather - 0.2f) < 1e-6f && std::abs(cfg->background.strength - 0.65f) < 1e-6f);
 }

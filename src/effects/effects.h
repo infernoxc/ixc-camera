@@ -85,6 +85,7 @@ public:
     // Applies cfg to frame in place. frame.width/height even.
     void Apply(const processing::Nv12Frame& frame, const EffectConfig& cfg, const FrameContext& ctx);
     size_t ScratchBytes() const;
+    size_t BackgroundPlateBytes() const { return background_.PlateBytes(); }
     // Frees the background's and the denoiser's buffers (call when no effects are active, so
     // nothing is held).
     void ReleaseBackground();

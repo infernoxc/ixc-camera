@@ -8,7 +8,7 @@
 //      from the face tracker, when available) so the face, ears, nose and hairline are never cut
 //      even when the network is unsure (side light, low light, glasses, headsets).
 //   2. Background source:
-//        Blur    - "depth-like": the frame is reduced to 1/8 scale, background-weighted (the
+//        Blur    - "depth-like": the frame is reduced to 1/4 or 1/8 scale (by strength), background-weighted (the
 //                  person's colours don't bleed into the blur: no halo), and blurred twice: a
 //                  near level and a far level. The blur grows with the distance from the person,
 //                  like a real lens focused on the subject.
@@ -34,7 +34,12 @@ namespace ixc::effects {
 
 struct BackgroundConfig {
     BackgroundMode mode = BackgroundMode::Original;
-    BlurLevel blur = BlurLevel::Medium;
+    BlurLevel blur = BlurLevel::Medium;  // 0.12 (unused by the renderer since 0.13: see strength)
+    float strength = 0.55f;   // blur 0..1 (0 = none)
+    bool bokeh = false;       // DSLR-like: highlight bloom, sharper focus falloff
+    float falloff = 0.5f;     // 0..1: distance over which the blur grows to full strength
+    float feather = 0.35f;    // 0..1: edge softness
+    float protection = 0.6f;  // 0..1: face guard strength
     std::uint32_t color = 0x3A4A5C;
     BackgroundFit fit = BackgroundFit::Fill;
     float posX = 0.5f, posY = 0.5f, scale = 1.0f;
@@ -55,6 +60,7 @@ public:
     // in over a few frames once the first mask arrives).
     void Apply(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx);
     size_t ScratchBytes() const;
+    size_t PlateBytes() const { return plateY_.capacity() + plateUV_.capacity(); }
     void ReleasePlate();  // frees the picture plate (when the mode stops using it)
     void ReleaseBlur();   // frees the blur buffers (when the mode stops using them)
 
@@ -62,7 +68,7 @@ public:
     const std::vector<std::uint8_t>& EffectiveMask() const { return mask_; }
 
 private:
-    void BuildMask(const BackgroundContext& ctx);
+    void BuildMask(const BackgroundContext& ctx, const BackgroundConfig& cfg);
     void BuildBlurSource(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx);
     void BuildPlate(const processing::Nv12Frame& f, const BackgroundConfig& cfg, bool fullRange);
     void Composite(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx, float mix);
@@ -71,6 +77,9 @@ private:
     std::vector<std::uint8_t> mask_;           // effective mask
     // Blur: 1/8-scale frame planes and the blurred result.
     int lw_ = 0, lh_ = 0;
+    int cell_ = 8;                             // blur source scale: 1/cell_ (4 for light blur, 8 for strong)
+    std::uint8_t featherLut_[256] = {};
+    float lutFeather_ = -1;
     std::vector<std::uint8_t> lowY_, lowUV_;   // result: lw*lh, lw*lh*2
     std::vector<float> work_;                  // weighted planes and blur scratch
     // Picture plate at frame size, and what it was built from.

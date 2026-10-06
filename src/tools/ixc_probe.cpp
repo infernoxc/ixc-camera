@@ -1579,17 +1579,18 @@ int BenchEffects() {
     struct BgCase {
         const char* name;
         BackgroundMode mode;
-        BlurLevel blur;
+        BlurPreset preset;
     };
-    const BgCase bgCases[] = {{"bg blur low", BackgroundMode::Blur, BlurLevel::Low},
-                              {"bg blur medium", BackgroundMode::Blur, BlurLevel::Medium},
-                              {"bg blur high", BackgroundMode::Blur, BlurLevel::High},
-                              {"bg replace", BackgroundMode::Replace, BlurLevel::Medium},
-                              {"bg color", BackgroundMode::Color, BlurLevel::Medium}};
+    const BgCase bgCases[] = {{"bg soft blur", BackgroundMode::Blur, BlurPreset::Soft},
+                              {"bg standard blur", BackgroundMode::Blur, BlurPreset::Standard},
+                              {"bg dslr bokeh", BackgroundMode::Blur, BlurPreset::Dslr},
+                              {"bg strong bokeh", BackgroundMode::Blur, BlurPreset::Strong},
+                              {"bg replace", BackgroundMode::Replace, BlurPreset::Standard},
+                              {"bg color", BackgroundMode::Color, BlurPreset::Standard}};
     for (const BgCase& bc : bgCases) {
         Profile prof;
         prof.background.mode = bc.mode;
-        prof.background.blur = bc.blur;
+        ApplyBlurPreset(prof.background, bc.preset);
         prof.background.builtin = "office";
         effects::BackgroundSource source;
         const auto cfg = effects::CompileEffects(prof, false, source.Resolve(prof.background, {}));
