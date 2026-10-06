@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.14.0 — New layout, live sync, in-app updates
+
+### Added
+- **Navigation rail** (Camera, Effects, Background, Profiles, Settings, Updates). The settings column became an inspector that shows the selected section only.
+- **Toolbar:** Refresh button next to camera and format. **Quick bar** under the preview: background None/Blur/Image/Colour and an Effects switch, editing the same profile as the inspector.
+- **LIVE badge** in the header; the version is shown in the rail.
+- **In-app updates** (`app/updater.*`, `common/update_check.*`, `common/sha256.*`):
+  - checks `infernoxc/ixc-camera` GitHub releases on a background thread, at most once a day, plus *Check for updates*; offline stays silent;
+  - drafts, pre-releases and asset URLs outside the release's download path are rejected; versions compare numerically;
+  - the installer is downloaded only after confirmation, verified against `SHA256SUMS.txt`, re-hashed right before it starts; *Skip this version* is remembered.
+- Tests: SHA-256 vectors, semver, release JSON validation, checksum lookup, publish coalescing, slider wheel latching, BoxFilter in place, mask easing/dropout, feather continuity.
+
+### Changed
+- **Real-time sync with IXC Camera:** slider changes are published at most every 40 ms while dragging (the old 250 ms timer restarted on every move, so nothing reached the virtual camera until the slider stopped). The profile file is written 700 ms after the last change (`profiles/settings_sync.h`).
+- **Virtual camera reload:** the service parses and compiles a new profile outside the frame lock and swaps immutable snapshots; reloads are serialized; invalid files keep the previous settings.
+- **Sliders:** the wheel over a slider adjusts it; right after the panel scrolled, the wheel keeps scrolling the panel (Shift always scrolls).
+- **Blur mask:** 1-2-1 smoothing before feathering, easing between segmentation frames (large changes snap, so no ghosting), and the last good mask fades out over a few frames when a mask is missing.
+- `scripts/audit-release.ps1`: the app may import WinHTTP (update check); the camera source, ixc_vcam and installer still import no network API.
+
 ## 0.13.0 — Portrait-quality background blur
 
 ### Added

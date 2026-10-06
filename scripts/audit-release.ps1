@@ -30,7 +30,8 @@ foreach ($b in $binaries) {
     Check ($h -match 'Guard' -and $lc -match 'CF Instrumented') 'Control Flow Guard'
     Check ($h -match 'CET compatible' -or $lc -match 'CET compatible') 'CET shadow stack compatible'
     $deps = (& $dumpbin /nologo /dependents $b) -match '^\s+\S+\.dll\s*$' | ForEach-Object { $_.Trim().ToLowerInvariant() }
-    $bad = $deps | Where-Object { $_ -notmatch $allowed }
+    # The app alone may use WinHTTP: its opt-in update check (HTTPS to the official GitHub releases only).
+    $bad = $deps | Where-Object { $_ -notmatch $allowed -and -not ($_ -eq 'winhttp.dll' -and (Split-Path -Leaf $b) -eq 'IXCCamera.exe') }
     Check (-not $bad) ("imports only Windows system DLLs" + $(if ($bad) { ": unexpected $($bad -join ', ')" } else { " ($($deps.Count))" }))
     Check (-not ($deps -match 'vcruntime|msvcp|ucrtbase')) 'static CRT (no VC++ redistributable)'
 }
@@ -44,8 +45,11 @@ foreach ($p in @(@('IXCCameraSource.dll', 'src\virtual_camera\IXCCameraSource.dl
 $setupBytes = [IO.File]::ReadAllBytes((Join-Path $BuildDir 'src\installer\IXC-Camera-Setup-x64.exe'))
 $text = [Text.Encoding]::ASCII.GetString($setupBytes)
 Check ($text -match 'requireAdministrator') 'installer manifest requests elevation explicitly'
-$netImports = foreach ($b in $binaries) { (& $dumpbin /nologo /dependents $b) -match '(winhttp|wininet|ws2_32|urlmon|webio).dll' }
-Check (-not $netImports) 'no binary imports a network API (no downloads, no telemetry)'
+$netImports = foreach ($b in $binaries | Where-Object { (Split-Path -Leaf $_) -ne 'IXCCamera.exe' }) {
+    (& $dumpbin /nologo /dependents $b) -match '(winhttp|wininet|ws2_32|urlmon|webio).dll' }
+Check (-not $netImports) 'camera source, ixc_vcam and installer import no network API (no downloads, no telemetry)'
+$appNet = (& $dumpbin /nologo /dependents (Join-Path $BuildDir 'src\app\IXCCamera.exe')) -match '(wininet|ws2_32|urlmon|webio).dll'
+Check (-not $appNet) 'the app imports WinHTTP only (update check), no other network API'
 
 "== repository secret scan"
 $patterns = 'AKIA[0-9A-Z]{16}', '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----', 'ghp_[A-Za-z0-9]{36}', 'xox[baprs]-[A-Za-z0-9-]{10,}',

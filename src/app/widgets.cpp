@@ -1,11 +1,14 @@
 #include "app/widgets.h"
 
+#include "profiles/settings_sync.h"
+
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -102,8 +105,11 @@ struct Widget {
     bool hover = false, pressed = false, dragging = false;
     POINT pressAt{};  // screen position of the press (a click survives the control moving under it)
     int min = 0, max = 100, pos = 0, def = 0;
+    int wheelAccum = 0;  // partial wheel delta (high-resolution wheels and touchpads)
     std::function<std::wstring(int)> format;
 };
+
+std::atomic<unsigned long long> g_lastPanelScroll{0};
 
 Widget* Get(HWND h) { return reinterpret_cast<Widget*>(GetWindowLongPtrW(h, GWLP_USERDATA)); }
 int Dpi(HWND h, int v) { return MulDiv(v, static_cast<int>(GetDpiForWindow(h)), 96); }
@@ -179,6 +185,20 @@ void Paint(HWND h, Widget* w, HDC dc, const RECT& rc) {
                 border = kBad;
                 text = kBad;
                 break;
+            case ButtonStyle::Nav:
+            case ButtonStyle::NavSelected: {
+                // Navigation rail entry: left-aligned, the selected one tinted with an accent bar.
+                const bool sel = w->style == ButtonStyle::NavSelected;
+                fill = sel ? Mix(w->bg, kAccent, 56) : (w->hover || w->pressed ? kSurfaceHi : w->bg);
+                RECT b = rc;
+                InflateRect(&b, -1, -1);
+                FillRound(dc, b, r, fill, focused ? kAccentHi : fill);
+                if (sel) FillRound(dc, RECT{b.left + Dpi(h, 4), b.top + Dpi(h, 9), b.left + Dpi(h, 7), b.bottom - Dpi(h, 9)}, Dpi(h, 2), kAccentHi, CLR_INVALID);
+                RECT t{rc.left + Dpi(h, 16), rc.top, rc.right - Dpi(h, 6), rc.bottom};
+                DrawTextIn(dc, label, t, sel ? w->fonts->bold : w->fonts->body, dim(sel ? kText : kTextDim),
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                return;
+            }
         }
         RECT b = rc;
         InflateRect(&b, -1, -1);
@@ -265,6 +285,17 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(h, nullptr, FALSE);
             return r;
         }
+        case WM_MOUSEWHEEL:
+            if (w && w->kind == Kind::Slider && IsWindowEnabled(h) &&
+                WheelAdjustsSlider(GetTickCount64(), g_lastPanelScroll.load(), (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0)) {
+                // One notch = 1/50 of the range (at least 1), like a coarse arrow key.
+                w->wheelAccum += GET_WHEEL_DELTA_WPARAM(wp);
+                const int notches = w->wheelAccum / WHEEL_DELTA;
+                w->wheelAccum -= notches * WHEEL_DELTA;
+                if (notches != 0) SetPos(h, w, w->pos + notches * std::max(1, (w->max - w->min) / 50), true, true);
+                return 0;
+            }
+            return SendMessageW(GetParent(h), msg, wp, lp);  // the panel scrolls
         case WM_GETDLGCODE:
             return w && w->kind == Kind::Slider ? DLGC_WANTARROWS : DLGC_BUTTON | (w && w->kind == Kind::Button ? DLGC_UNDEFPUSHBUTTON : 0);
         case WM_MOUSEMOVE: {
@@ -457,5 +488,14 @@ int WidgetHeight(HWND widget) {
     }
     return Dpi(widget, 32);
 }
+
+void SetButtonStyle(HWND button, ButtonStyle style) {
+    Widget* w = Get(button);
+    if (!w || w->style == style) return;
+    w->style = style;
+    InvalidateRect(button, nullptr, FALSE);
+}
+
+void NotePanelScrolled() { g_lastPanelScroll.store(GetTickCount64()); }
 
 }  // namespace ixc::app

@@ -58,7 +58,14 @@ enum PanelId : int {
     kIdBgFit,
     kIdBgAdvanced,
     kIdBgSlider0 = 310,  // picture zoom/horizontal/vertical 310..312, blur strength 313, advanced 314..318
+    kIdUpdateCheck = 330,  // Updates section (handled by the main window)
+    kIdUpdateInstall,
+    kIdUpdateSkip,
 };
+
+// The inspector shows one section at a time (chosen in the main window's navigation rail).
+enum class PanelSection { Adjust, Effects, Background, Profiles, Settings, Updates };
+inline constexpr int kPanelSections = 6;
 
 class SettingsPanel {
 public:
@@ -68,6 +75,10 @@ public:
     void SetBounds(const RECT& r);  // position of the scrolling column in the owner
     void Relayout();                // after DPI/font changes or rows appearing
     void Refresh();                 // controls <- profile
+    void SetSection(PanelSection s);
+    PanelSection Section() const { return section_; }
+    // Updates section: status text and which actions are offered.
+    void SetUpdateState(const std::wstring& text, bool canInstall, bool canSkip, bool checking);
 
     // Messages forwarded from the owner. true = handled here.
     bool OnCommand(HWND control, int code);
@@ -103,13 +114,15 @@ private:
     struct Card {
         RECT rc;
         std::wstring title;
+        int section;
     };
     static LRESULT CALLBACK HostProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     static LRESULT CALLBACK ContentProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     int Scale(int v) const;
     void LayoutContent(int width);
     void ScrollTo(int pos);
-    void PaintContent(HDC dc, const RECT& rc);
+    void PaintContent(HWND content, HDC dc, const RECT& rc);
+    bool IsContent(HWND h) const;
     void ShowEffectSliders();
     void UpdateBackgroundRows();
     bool OnChoice(int id, int sel);
@@ -118,7 +131,11 @@ private:
     int EffectIndex(HWND control, int firstId) const;
     void Changed();
 
-    HWND owner_ = nullptr, host_ = nullptr, content_ = nullptr;
+    HWND owner_ = nullptr, host_ = nullptr, content_ = nullptr;  // content_: the visible section's page
+    HWND contents_[kPanelSections] = {};
+    int heights_[kPanelSections] = {};
+    PanelSection section_ = PanelSection::Adjust;
+    HWND updateText_ = nullptr, updateCheck_ = nullptr, updateInstall_ = nullptr, updateSkip_ = nullptr;
     const theme::Fonts* fonts_ = nullptr;
     Profile* profile_ = nullptr;
     std::function<void()> onChange_;

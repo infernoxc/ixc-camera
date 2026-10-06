@@ -11,7 +11,14 @@ Re-run with `scripts/audit-release.ps1 -BuildDir build/release` (exit 0 = pass).
 | CET shadow-stack compatible | PASS |
 | Imports only Windows system DLLs | PASS (5–16 each; 0.12 adds pdh (GPU/CPU readout) and windowscodecs (background pictures), both part of Windows) |
 | Static CRT: no VC++ redistributable | PASS |
-| No network APIs imported (winhttp, wininet, ws2_32, urlmon, webio): no downloads, no telemetry | PASS |
+| Camera source, ixc_vcam and installer import no network API (winhttp, wininet, ws2_32, urlmon, webio): no downloads, no telemetry | PASS |
+| IXCCamera.exe imports WinHTTP only (0.14 update check) | see below |
+
+## In-app updates (0.14)
+- Only the app (IXCCamera.exe) talks to the network, and only to `https://api.github.com/repos/infernoxc/ixc-camera/releases/latest` (at most once a day, and when the user selects *Check for updates*) and to that release's own `https://github.com/infernoxc/ixc-camera/releases/download/v<version>/` assets. No account, token, telemetry or identifiers are sent; offline simply means no update information.
+- HTTPS only, no HTTPS→HTTP redirects, size limits on every response, background thread only (never the camera path).
+- Drafts and pre-releases are ignored. Asset URLs outside the release's download path are rejected (`common/update_check.cpp`, unit-tested).
+- The installer is downloaded only after the user confirms, accepted only if its SHA-256 matches the release's `SHA256SUMS.txt`, hashed again right before it starts, and then run normally (UAC prompt). The camera service DLL never makes network calls.
 
 ## Installer package
 - The embedded payload is byte-identical to the build outputs (SHA-256): PASS.

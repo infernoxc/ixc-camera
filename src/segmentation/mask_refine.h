@@ -37,8 +37,12 @@ public:
     void GuidedFilter(const std::uint8_t* guide, float* p);  // in place on p (outW*outH)
     static std::uint8_t Temporal(int previous, int current, float strength = 0.5f);
 
+    // Mean over a (2r+1)^2 window, windows clipped at the borders. Safe in place (in == out): the
+    // horizontal pass reads `in` and writes only the scratch buffer; the vertical pass reads only
+    // the scratch buffer and writes `out` (proven in test_segmentation.cpp).
+    void BoxFilter(const float* in, float* out, int r);
+
 private:
-    void BoxFilter(const float* in, float* out, int r);  // mean over a (2r+1)^2 window, edges clamped
 
     int netW_ = 0, netH_ = 0, w_ = 0, h_ = 0;
     float temporal_ = 0.5f, eps_ = 0.004f;

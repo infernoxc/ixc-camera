@@ -9,7 +9,7 @@ A lightweight, local-first webcam enhancer for Windows 11. IXC Camera takes a no
 - **Runs on weak PCs first.** The main target is dual-core laptops with 2–8 GB RAM and integrated graphics. Features degrade gracefully instead of failing.
 - **Native.** C++, Media Foundation and Direct3D. No Electron, no browser runtime, no OBS required.
 - **Nothing runs when nothing uses the camera.** The processing engine starts only when an app opens IXC Camera, and it releases the physical webcam when that app is done.
-- **Local only.** No account, no cloud processing, no telemetry.
+- **Local only.** No account, no cloud processing, no telemetry. The only network use is the app's update check against this repository's GitHub releases (once a day; updates install only after you confirm and the SHA-256 checksum matches).
 - **Honest.** It never advertises resolutions or frame rates the webcam can't deliver, and it doesn't claim every app will accept a software camera.
 
 ## Requirements

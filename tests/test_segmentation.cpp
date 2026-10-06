@@ -1,5 +1,6 @@
 #include "ixc_test.h"
 #include "segmentation/segmentation_engine.h"
+#include "segmentation/mask_refine.h"
 #include "segmentation/selfie_net.h"
 
 #include <chrono>
@@ -252,4 +253,32 @@ IXC_TEST(Segmentation_AutoKeepsFasterGpu) {
     IXC_CHECK(RunUntil(c, [](const SegStatus& s) { return s.masks >= 2; }));
     IXC_CHECK(c.Status().backend == SegBackend::Cpu && c.Status().gpuNote.empty());
     c.Stop();
+}
+
+IXC_TEST(Segmentation_BoxFilterInPlaceEqualsOutOfPlace) {
+    MaskRefiner r;
+    IXC_REQUIRE(r.Init(kNetW, kNetH, 96, 54));
+    std::vector<float> a(96 * 54), out(96 * 54);
+    std::uint32_t s = 5;
+    for (auto& v : a) {
+        s = s * 1664525u + 1013904223u;
+        v = static_cast<float>(s >> 8) / 16777216.0f;
+    }
+    std::vector<float> inPlace = a;
+    for (int radius : {1, 4, 30}) {  // 30: wider than the height (windows clipped at both ends)
+        r.BoxFilter(a.data(), out.data(), radius);
+        inPlace = a;
+        r.BoxFilter(inPlace.data(), inPlace.data(), radius);
+        IXC_CHECK(inPlace == out);
+        // And it is a true box mean: an interior pixel equals the brute-force average.
+        double sum = 0;
+        int n = 0;
+        for (int y = 27 - radius; y <= 27 + radius; ++y)
+            for (int x = 48 - radius; x <= 48 + radius; ++x)
+                if (x >= 0 && x < 96 && y >= 0 && y < 54) {
+                    sum += a[static_cast<size_t>(y) * 96 + x];
+                    ++n;
+                }
+        IXC_CHECK(std::abs(out[27 * 96 + 48] - sum / n) < 1e-4);
+    }
 }

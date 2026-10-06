@@ -13,6 +13,8 @@ struct AppSettings {
     std::string activeProfile = "default";  // profile store stem
     bool hotkeysEnabled = true;             // global Ctrl+Alt hotkeys (see docs/hotkeys in README)
     bool showFaceMarkers = true;            // preview overlay of tracked faces (preview only)
+    double lastUpdateCheck = 0;             // Unix time of the last automatic update check (once a day)
+    std::string skippedVersion;             // "Skip this version" (no reminder for that release)
     bool operator==(const AppSettings&) const = default;
 };
 

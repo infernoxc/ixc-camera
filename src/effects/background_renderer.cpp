@@ -75,7 +75,12 @@ float Sample(const std::uint8_t* plane, int w, int h, int channels, int c, float
 
 void BackgroundRenderer::BuildMask(const BackgroundContext& ctx, const BackgroundConfig& cfg) {
     const auto& src = ctx.mask->value;
-    if (mask_.size() != src.size()) mask_.resize(src.size());  // first use only
+    const bool first = mask_.size() != src.size();
+    if (first) {  // first use only
+        mask_.assign(src.size(), 0);
+        target_.assign(src.size(), 0);
+        smooth_.assign(src.size(), 0);
+    }
     // Edge feather: a contrast curve around the mask's 50% line. Low = crisp cut-out (less
     // background leaking through half-certain edges), high = soft transition.
     if (cfg.feather != lutFeather_) {
@@ -83,7 +88,35 @@ void BackgroundRenderer::BuildMask(const BackgroundContext& ctx, const Backgroun
         const float width = 0.12f + 0.6f * std::clamp(cfg.feather, 0.0f, 1.0f);
         for (int v = 0; v < 256; ++v) featherLut_[v] = Clamp8(255.0f * Smoothstep(0.5f - width / 2, 0.5f + width / 2, static_cast<float>(v) / 255.0f));
     }
-    for (size_t k = 0; k < src.size(); ++k) mask_[k] = featherLut_[src[k]];
+    for (size_t k = 0; k < src.size(); ++k) target_[k] = featherLut_[src[k]];
+    // A light 1-2-1 smoothing (horizontal, then vertical) at mask resolution: rounds off the
+    // network's grid steps so diagonal edges (shoulders, arms) don't show stair steps or blocks.
+    {
+        const int W = seg::kMaskW, H = seg::kMaskH;
+        for (int y = 0; y < H; ++y) {
+            const std::uint8_t* s = target_.data() + static_cast<size_t>(y) * W;
+            std::uint8_t* d = smooth_.data() + static_cast<size_t>(y) * W;
+            for (int x = 0; x < W; ++x) d[x] = static_cast<std::uint8_t>((s[std::max(x - 1, 0)] + 2 * s[x] + s[std::min(x + 1, W - 1)] + 2) >> 2);
+        }
+        for (int y = 0; y < H; ++y) {
+            const std::uint8_t* a = smooth_.data() + static_cast<size_t>(std::max(y - 1, 0)) * W;
+            const std::uint8_t* b = smooth_.data() + static_cast<size_t>(y) * W;
+            const std::uint8_t* c2 = smooth_.data() + static_cast<size_t>(std::min(y + 1, H - 1)) * W;
+            std::uint8_t* d = target_.data() + static_cast<size_t>(y) * W;
+            for (int x = 0; x < W; ++x) d[x] = static_cast<std::uint8_t>((a[x] + 2 * b[x] + c2[x] + 2) >> 2);
+        }
+    }
+    ApplyFaceGuard(ctx, cfg);
+    // Between two segmentation masks (they arrive at 10-30/s, frames at 30/s) the shown mask eases
+    // toward the newest one instead of jumping: small changes (edge noise) move halfway per frame,
+    // large ones (an arm moving) are taken at once so nothing trails behind.
+    for (size_t k = 0; k < mask_.size(); ++k) {
+        const int t = target_[k], m = mask_[k], d = t - m;
+        mask_[k] = static_cast<std::uint8_t>(first || d > 96 || d < -96 || (d >= -1 && d <= 1) ? t : m + d / 2);
+    }
+}
+
+void BackgroundRenderer::ApplyFaceGuard(const BackgroundContext& ctx, const BackgroundConfig& cfg) {
     const float protect = std::clamp(cfg.protection * 2.0f, 0.0f, 1.0f);  // >= 50%: full guard; below it fades out
     if (!ctx.faces || protect <= 0.0f) return;
     // Face guard: head (with ears and hairline) and neck are always foreground.
@@ -102,7 +135,7 @@ void BackgroundRenderer::BuildMask(const BackgroundContext& ctx, const Backgroun
             const int y0 = std::max(0, static_cast<int>(e.cy - e.ry)), y1 = std::min(seg::kMaskH - 1, static_cast<int>(e.cy + e.ry));
             for (int y = y0; y <= y1; ++y) {
                 const float dy = (static_cast<float>(y) + 0.5f - e.cy) / e.ry;
-                std::uint8_t* row = mask_.data() + static_cast<size_t>(y) * seg::kMaskW;
+                std::uint8_t* row = target_.data() + static_cast<size_t>(y) * seg::kMaskW;
                 for (int x = x0; x <= x1; ++x) {
                     const float dx = (static_cast<float>(x) + 0.5f - e.cx) / e.rx;
                     const float v = 255.0f * protect * Smoothstep(1.0f, 0.8f, dx * dx + dy * dy);
@@ -389,14 +422,17 @@ void BackgroundRenderer::Composite(const processing::Nv12Frame& f, const Backgro
 
 void BackgroundRenderer::Apply(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx) {
     const bool haveMask = ctx.mask && ctx.mask->generation != 0 && ctx.mask->value.size() == static_cast<size_t>(seg::kMaskW) * seg::kMaskH;
-    presence_ = haveMask ? presence_ + (1.0f - presence_) * 0.25f : 0.0f;  // fades in over ~8 frames
-    if (!cfg.Active() || !haveMask || presence_ < 0.01f || !f.y || !f.uv || f.width < 16 || f.height < 16) return;
+    // Fades in over ~8 frames once masks arrive. If they stop (segmentation paused or failed), the
+    // last mask keeps being used while the effect fades out over ~15 frames: no instant cut.
+    const bool lastMask = !haveMask && !mask_.empty();
+    presence_ = haveMask ? presence_ + (1.0f - presence_) * 0.25f : lastMask ? presence_ * 0.75f : 0.0f;
+    if (!cfg.Active() || (!haveMask && !lastMask) || presence_ < 0.01f || !f.y || !f.uv || f.width < 16 || f.height < 16) return;
     BackgroundConfig effective = cfg;
     if (cfg.mode == BackgroundMode::Blur && cfg.strength <= 0.005f) {  // 0%: nothing to do
         ReleaseBlur();
         return;
     }
-    BuildMask(ctx, cfg);
+    if (haveMask) BuildMask(ctx, cfg);
     const bool picture = cfg.mode == BackgroundMode::Replace || cfg.mode == BackgroundMode::Custom;
     if (picture && (!cfg.image || cfg.image->width < 16)) effective.mode = BackgroundMode::Blur;  // picture unavailable: blur instead
     const bool usePicture = picture && effective.mode != BackgroundMode::Blur;
@@ -408,7 +444,7 @@ void BackgroundRenderer::Apply(const processing::Nv12Frame& f, const BackgroundC
 }
 
 size_t BackgroundRenderer::ScratchBytes() const {
-    return mask_.capacity() + lowY_.capacity() + lowUV_.capacity() + work_.capacity() * sizeof(float) + plateY_.capacity() + plateUV_.capacity() +
+    return mask_.capacity() + target_.capacity() + smooth_.capacity() + lowY_.capacity() + lowUV_.capacity() + work_.capacity() * sizeof(float) + plateY_.capacity() + plateUV_.capacity() +
            (colIdx_.capacity() + colW_.capacity() + maskCol_.capacity() + maskColW_.capacity()) * sizeof(int) +
            (rowWeight_.capacity() + lowRow_.capacity()) * sizeof(std::int16_t);
 }

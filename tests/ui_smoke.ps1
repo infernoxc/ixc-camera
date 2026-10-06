@@ -124,12 +124,27 @@ function Launch {
     for ($i = 0; $i -lt 50 -and $script:hwnd -eq [IntPtr]::Zero; $i++) { Start-Sleep -Milliseconds 100; $script:hwnd = [Ui]::FindWindowW('IXCCameraMainWindow', [NullString]::Value) }
     if ($script:hwnd -eq [IntPtr]::Zero) { return $false }
     $host_ = [Ui]::FindWindowExW($script:hwnd, [IntPtr]::Zero, 'IXCSettingsHost', [NullString]::Value)
-    $script:content = [Ui]::FindWindowExW($host_, [IntPtr]::Zero, 'IXCSettingsContent', [NullString]::Value)
+    # One content page per navigation section (0.14); P() opens the page that holds a control.
+    $script:pages = @(); $pg = [IntPtr]::Zero
+    while (($pg = [Ui]::FindWindowExW($host_, $pg, 'IXCSettingsContent', [NullString]::Value)) -ne [IntPtr]::Zero) { $script:pages += $pg }
+    $script:content = $script:pages[0]
     $script:start = [Ui]::GetDlgItem($script:hwnd, $IdStart); $script:status = [Ui]::GetDlgItem($script:hwnd, $IdStatus)
     $script:preview = [Ui]::GetDlgItem($script:hwnd, $IdPreview)
     return $true
 }
-function P([int]$id) { [Ui]::GetDlgItem($script:content, $id) }   # a settings column control
+function P([int]$id) {   # a settings column control; selects its section in the navigation rail first
+    for ($i = 0; $i -lt $script:pages.Count; $i++) {
+        $c = [Ui]::GetDlgItem($script:pages[$i], $id)
+        if ($c -ne [IntPtr]::Zero) {
+            if ($script:content -ne $script:pages[$i]) {
+                [Ui]::SendMessageW([Ui]::GetDlgItem($script:hwnd, 120 + $i), 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null   # BM_CLICK on the nav entry
+                $script:content = $script:pages[$i]
+            }
+            return $c
+        }
+    }
+    return [IntPtr]::Zero
+}
 function Close {
     [Ui]::PostMessageW($script:hwnd, $WM_CLOSE, 0, 0) | Out-Null
     $ok = $script:p.WaitForExit(6000)

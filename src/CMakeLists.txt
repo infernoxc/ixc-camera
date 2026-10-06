@@ -2,6 +2,8 @@
 add_library(ixc_core STATIC
     common/strings.cpp
     common/json.cpp
+    common/sha256.cpp
+    common/update_check.cpp
     common/fileio.cpp
     diagnostics/error.cpp
     diagnostics/log.cpp
