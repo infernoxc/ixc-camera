@@ -26,10 +26,10 @@ PerfSample PerfMonitor::Sample() {
         lastCpu100ns_ = cpu;
         lastWall100ns_ = wall;
     }
-    PROCESS_MEMORY_COUNTERS_EX2 mc{};
+    PROCESS_MEMORY_COUNTERS_EX mc{};
     mc.cb = sizeof(mc);
     if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&mc), sizeof(mc))) {
-        s.ramMB = static_cast<double>(mc.PrivateWorkingSetSize) / (1024.0 * 1024.0);
+        s.ramMB = static_cast<double>(mc.PrivateUsage) / (1024.0 * 1024.0);
     }
     return s;
 }

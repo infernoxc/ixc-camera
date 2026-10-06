@@ -3,7 +3,8 @@
 // Live resource use of the IXC app process, shown at the bottom of the window.
 //
 // CPU: share of the whole machine, like Task Manager (process CPU time / wall time / logical
-// processors). RAM: private working set, the "Memory" column in Task Manager. Sampled once per
+// processors). RAM: private bytes (memory committed by this process only, not shared DLLs); close to the
+// "Memory" column in Task Manager. Sampled once per
 // second from a timer; each sample is two system calls.
 //
 // The IXC Camera system camera runs inside the Windows camera service (another process), so its
@@ -17,7 +18,7 @@ namespace ixc::app {
 
 struct PerfSample {
     double cpuPercent = 0;  // 0..100 of the whole machine
-    double ramMB = 0;       // private working set
+    double ramMB = 0;       // private bytes
     bool valid = false;     // false for the first sample (no CPU interval yet)
 };
 
