@@ -375,7 +375,7 @@ void MainWindow::Layout() {
     for (int i = 0; i < app::kPanelSections; ++i) place(nav_[i], Scale(10), headerH + Scale(12) + i * Scale(42), railW - Scale(20), Scale(38));
 
     // Header: the update notice sits left of the IXC Camera status pill (painted).
-    if (IsWindowVisible(updatePill_)) place(updatePill_, w - Scale(18) - VcamPillWidth() - Scale(10) - Scale(150), (headerH - Scale(30)) / 2, Scale(150), Scale(30));
+    if (GetWindowLongPtrW(updatePill_, GWL_STYLE) & WS_VISIBLE) place(updatePill_, w - Scale(18) - VcamPillWidth() - Scale(10) - Scale(150), (headerH - Scale(30)) / 2, Scale(150), Scale(30));
 
     const int left = railW + pad, right = w - panelW - Scale(4);
     int y = headerH + Scale(8);
@@ -586,7 +586,7 @@ void MainWindow::RefreshVcamStatus() {
     }
     panel_.Relayout();  // the status text may wrap differently
     InvalidateRect(hwnd_, &header_, FALSE);
-    if (updatePill_ && IsWindowVisible(updatePill_)) Layout();  // it sits next to the status pill
+    if (updatePill_ && (GetWindowLongPtrW(updatePill_, GWL_STYLE) & WS_VISIBLE)) Layout();  // it sits next to the status pill
     UpdateVcamControls();
 }
 

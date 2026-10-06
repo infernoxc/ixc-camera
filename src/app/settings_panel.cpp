@@ -275,9 +275,15 @@ void SettingsPanel::LayoutContent(int width) {
     for (int& v : ys) v = pad;
     int y = pad, cur = 0;
     cards_.clear();
-    HDWP dwp = BeginDeferWindowPos(120);
+    // Controls live on different section pages (different parents), so they can't share one
+    // DeferWindowPos batch (it requires a single parent and fails as a whole otherwise). Each
+    // control is moved directly, and only when its rectangle actually changes (no flicker).
     auto place = [&](HWND h, int px, int py, int pw, int ph) {
-        if (dwp) dwp = DeferWindowPos(dwp, h, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT cur{};
+        GetWindowRect(h, &cur);
+        MapWindowPoints(nullptr, GetParent(h), reinterpret_cast<POINT*>(&cur), 2);
+        if (cur.left == px && cur.top == py && cur.right - cur.left == pw && cur.bottom - cur.top == ph) return;
+        SetWindowPos(h, nullptr, px, py, pw, ph, SWP_NOZORDER | SWP_NOACTIVATE);
     };
     auto row = [&](HWND h) {
         const int hh = WidgetHeight(h);
@@ -427,7 +433,6 @@ void SettingsPanel::LayoutContent(int width) {
 
     for (int i = 0; i < kPanelSections; ++i) heights_[i] = ys[i] + Scale(18) + pad;  // room for the "about" line at the bottom
     contentHeight_ = heights_[static_cast<int>(section_)];
-    if (dwp) EndDeferWindowPos(dwp);
     for (int i = 0; i < kPanelSections; ++i) {
         RECT hostRc;
         GetClientRect(host_, &hostRc);
