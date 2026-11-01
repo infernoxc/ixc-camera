@@ -137,7 +137,6 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     // Camera features
     page(PanelSection::Settings);
     smooth_ = toggle(kIdSmoothMotion, L"Smooth motion", L"Keeps the full frame rate in low light");
-    autoFraming_ = toggle(kIdAutoFraming, L"Auto-framing", L"Zooms and pans to keep you in the picture");
     face_ = toggle(kIdFaceTracking, L"Face tracking", L"Off");
     faceMarkers_ = toggle(kIdFaceMarkers, L"Show face markers", L"Preview only, never sent to apps");
     auto choice = [&](int id, const wchar_t* label, std::initializer_list<const wchar_t*> items) {
@@ -158,6 +157,33 @@ bool SettingsPanel::Create(HWND owner, HINSTANCE instance, Profile* profile, con
     diagnostics_ = toggle(kIdDiagnostics, L"Diagnostics", L"FPS, CPU/GPU use, memory, backends");
     diagText_ = CreateWindowExW(0, WC_STATICW, L"", WS_CHILD | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, content_, nullptr, instance, nullptr);
     SendMessageW(diagText_, WM_SETFONT, reinterpret_cast<WPARAM>(fonts_->caption), FALSE);
+
+    // Framing: the frame (the part of the camera picture apps receive) and auto-framing inside it.
+    page(PanelSection::Framing);
+    frameEdit_ = button(kIdFrameEdit, L"Edit frame on the preview", ButtonStyle::Primary);
+    fov_ = choice(kIdFov, L"Field of view", {L"Custom", L"Full (100%)", L"Wide (90%)", L"Medium (75%)", L"Narrow (60%)", L"Close-up (45%)"});
+    frameReset_ = button(kIdFrameReset, L"Reset", ButtonStyle::Ghost);
+    grid_ = toggle(kIdGrid, L"Grid", L"Rule-of-thirds lines on the preview only");
+    autoFraming_ = toggle(kIdAutoFraming, L"Auto-framing", L"Follows you inside the frame (zoom and pan)");
+    frameSliders_ = {
+        {L"Framing", 0, 100, 1.0, L"", [](const Profile& p) { return p.framing.tightness; }, [](Profile& p, double v) { p.framing.tightness = v; }},
+        {L"Follow speed", 0, 100, 1.0, L"", [](const Profile& p) { return p.framing.speed; }, [](Profile& p, double v) { p.framing.speed = v; }},
+        {L"Max zoom", 100, 400, 0.01, L"", [](const Profile& p) { return p.framing.maxZoom; }, [](Profile& p, double v) { p.framing.maxZoom = v; }},
+    };
+    for (size_t i = 0; i < frameSliders_.size(); ++i) {
+        Slider& s = frameSliders_[i];
+        const int def = static_cast<int>(std::lround(s.get(Profile{}) / s.scale));
+        s.wnd = CreateSlider(content_, kIdFrameSlider0 + static_cast<int>(i), s.label, s.min, s.max, def,
+                             [i](int p) {
+                                 wchar_t b[48];
+                                 if (i == 0) swprintf_s(b, L"%ls", p < 20 ? L"Wide" : p < 40 ? L"Upper body" : p < 62 ? L"Head & shoulders" : p < 82 ? L"Close" : L"Face");
+                                 else if (i == 1) swprintf_s(b, L"%ls", p < 25 ? L"Cinematic" : p < 50 ? L"Smooth" : p < 75 ? L"Responsive" : L"Instant");
+                                 else swprintf_s(b, L"%.2f×", p / 100.0);
+                                 return std::wstring(b);
+                             },
+                             fonts_, card);
+    }
+    precise_ = toggle(kIdPrecise, L"Precise face tracking", L"Faster, more accurate tracking for framing and face effects (more CPU)");
 
     // Background
     page(PanelSection::Background);
@@ -251,6 +277,11 @@ void SettingsPanel::SetUpdateState(const std::wstring& text, bool canInstall, bo
     EnableWindow(updateCheck_, !checking);
     EnableWindow(updateInstall_, !checking);
     Relayout();
+}
+
+void SettingsPanel::SetFrameEditing(bool on) {
+    SetWindowTextW(frameEdit_, on ? L"Done editing the frame" : L"Edit frame on the preview");
+    SetButtonStyle(frameEdit_, on ? ButtonStyle::Secondary : ButtonStyle::Primary);
 }
 
 void SettingsPanel::SetBounds(const RECT& r) {
@@ -350,6 +381,19 @@ void SettingsPanel::LayoutContent(int width) {
         y += Scale(30) + gap;
     };
     auto visible = [](HWND hwnd) { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0; };
+    beginCard(L"FRAME", frameReset_, PanelSection::Framing);
+    place(frameEdit_, x, y, w, Scale(34));
+    y += Scale(34) + gap;
+    choiceRow(fov_);
+    row(grid_);
+    endCard();
+
+    beginCard(L"AUTO-FRAMING", nullptr, PanelSection::Framing);
+    row(autoFraming_);
+    for (auto& s : frameSliders_) row(s.wnd);
+    row(precise_);
+    endCard();
+
     beginCard(L"BACKGROUND", nullptr, PanelSection::Background);
     choiceRow(bgMode_);
     choiceRow(bgBlur_);
@@ -380,7 +424,6 @@ void SettingsPanel::LayoutContent(int width) {
 
     beginCard(L"CAMERA FEATURES", nullptr, PanelSection::Settings);
     row(smooth_);
-    row(autoFraming_);
     row(face_);
     place(faceMarkers_, x + Scale(14), y, w - Scale(14), WidgetHeight(faceMarkers_));
     y += WidgetHeight(faceMarkers_) + gap;
@@ -521,6 +564,9 @@ void SettingsPanel::Refresh() {
     UpdateBackgroundRows();
     SendMessageW(smooth_, BM_SETCHECK, profile_->smoothMotion ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(autoFraming_, BM_SETCHECK, profile_->autoFraming ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(precise_, BM_SETCHECK, profile_->framing.precise ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(grid_, BM_SETCHECK, gridOn_ ? BST_CHECKED : BST_UNCHECKED, 0);
+    for (auto& s : frameSliders_) SendMessageW(s.wnd, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(s.get(*profile_) / s.scale)));
     SendMessageW(face_, BM_SETCHECK, profile_->faceTracking.enabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(faceMarkers_, BM_SETCHECK, faceOverlay_ ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(effectsMaster_, BM_SETCHECK, profile_->effectsEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -533,6 +579,20 @@ void SettingsPanel::Refresh() {
         SendMessageW(effectSliders_[i], TBM_SETPOS, TRUE, effectStrength_[i]);
     }
     ShowEffectSliders();
+    RefreshFrame();
+}
+
+void SettingsPanel::RefreshFrame() {
+    if (!profile_) return;
+    for (auto& s : sliders_) SendMessageW(s.wnd, TBM_SETPOS, TRUE, static_cast<LPARAM>(std::lround(s.get(*profile_) / s.scale)));
+    {
+        int fov = 0;  // Custom unless the frame is one of the presets (square in picture units, no extra zoom)
+        const CropRect& c = profile_->crop;
+        for (size_t i = 0; i < std::size(kFovPresets); ++i)
+            if (std::abs(profile_->zoom - 1.0) < 1e-6 && std::abs(c.width - kFovPresets[i]) < 0.005 && std::abs(c.height - kFovPresets[i]) < 0.005)
+                fov = static_cast<int>(i) + 1;
+        SendMessageW(fov_.combo, CB_SETCURSEL, static_cast<WPARAM>(fov), 0);
+    }
 }
 
 // Effect rows: a strength slider appears under an effect while it's on; with the master switch
@@ -574,6 +634,15 @@ bool SettingsPanel::OnScroll(HWND control) {
                 profile_->background.preset = BlurPreset::Custom;
                 SendMessageW(bgBlur_.combo, CB_SETCURSEL, static_cast<WPARAM>(BlurPreset::Custom), 0);
             }
+            Changed();
+        }
+        return true;
+    }
+    for (auto& s : frameSliders_) {
+        if (s.wnd != control) continue;
+        const double v = static_cast<double>(SendMessageW(s.wnd, TBM_GETPOS, 0, 0)) * s.scale;
+        if (v != s.get(*profile_)) {
+            s.set(*profile_, v);
             Changed();
         }
         return true;
@@ -642,6 +711,17 @@ bool SettingsPanel::OnCommand(HWND control, int code) {
             return true;  // view only
         case kIdSmoothMotion: profile_->smoothMotion = checked(smooth_); break;
         case kIdAutoFraming: profile_->autoFraming = checked(autoFraming_); break;
+        case kIdPrecise: profile_->framing.precise = checked(precise_); break;
+        case kIdGrid:
+            gridOn_ = checked(grid_);
+            break;  // view only, but the owner repaints the preview through onChange
+        case kIdFrameReset:
+            profile_->crop = CropRect{};
+            profile_->zoom = 1.0;
+            Refresh();
+            break;
+        case kIdFrameEdit:
+            return false;  // the owner opens the preview's frame editor
         case kIdFaceTracking: profile_->faceTracking.enabled = checked(face_); break;
         case kIdFaceMarkers: faceOverlay_ = checked(faceMarkers_); break;
         case kIdEffectsMaster:
@@ -683,6 +763,19 @@ bool SettingsPanel::OnChoice(int id, int sel) {
     switch (id) {
         case kIdGpu: profile_->processing = sel == 1 ? ProcessingMode::Gpu : sel == 2 ? ProcessingMode::Cpu : ProcessingMode::Auto; break;
         case kIdAntiFlicker: profile_->antiFlicker = static_cast<AntiFlicker>(std::clamp(sel, 0, 3)); break;
+        case kIdFov: {
+            if (sel <= 0 || sel > static_cast<int>(std::size(kFovPresets))) return true;  // Custom: nothing to apply
+            // Keep the frame's centre (clamped so the frame stays inside the picture).
+            const double size = kFovPresets[static_cast<size_t>(sel - 1)];
+            CropRect& c = profile_->crop;
+            const double cx = c.x + c.width / 2, cy = c.y + c.height / 2;
+            c.width = c.height = size;
+            c.x = std::clamp(cx - size / 2, 0.0, 1.0 - size);
+            c.y = std::clamp(cy - size / 2, 0.0, 1.0 - size);
+            profile_->zoom = 1.0;
+            Refresh();
+            break;
+        }
         case kIdBgMode: {
             const auto mode = static_cast<BackgroundMode>(std::clamp(sel, 0, 4));
             if (mode == BackgroundMode::Custom && bg.image.empty()) {

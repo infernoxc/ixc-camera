@@ -1,6 +1,7 @@
 #include "virtual_camera/source/frame_processor.h"
 
 #include "face/face_settings.h"
+#include "processing/yuy2.h"
 #include "profiles/active_profile.h"
 #include "segmentation/gpu/gpu_selfie_net.h"
 #include "virtual_camera/source/trace.h"
@@ -8,6 +9,7 @@
 #include <mferror.h>
 
 #include <algorithm>
+#include <optional>
 
 using Microsoft::WRL::ComPtr;
 
@@ -19,14 +21,16 @@ namespace {
 // planes: the UV plane follows the (possibly height-aligned) Y plane.
 class LockedNv12 {
 public:
-    LockedNv12(IMFMediaBuffer* buffer, UINT32 width, UINT32 height, bool write) {
+    LockedNv12(IMFMediaBuffer* buffer, UINT32 width, UINT32 height, bool write, LONG fallbackPitch = 0) {
         if (SUCCEEDED(buffer->QueryInterface(IID_PPV_ARGS(&b2d_))) &&
             SUCCEEDED(b2d_->Lock2DSize(write ? MF2DBuffer_LockFlags_Write : MF2DBuffer_LockFlags_Read, &scan0_, &pitch_, &start_, &length_))) {
             locked2d_ = true;
         } else if (SUCCEEDED(buffer->Lock(&start_, nullptr, &length_))) {
             buffer_ = buffer;
             scan0_ = start_;
-            pitch_ = static_cast<LONG>(width);
+            // A plain lock gives no pitch: use the type's stride (cameras with padded rows, e.g.
+            // 1366x768), else tightly packed rows.
+            pitch_ = fallbackPitch >= static_cast<LONG>(width) ? fallbackPitch : static_cast<LONG>(width);
         } else {
             return;
         }
@@ -59,6 +63,81 @@ private:
     LONG pitch_ = 0;
     DWORD length_ = 0;
     bool locked2d_ = false;
+    bool ok_ = false;
+};
+
+// Packed 4:2:2 (YUY2) buffer: two bytes per pixel, no second plane.
+class LockedPacked {
+public:
+    LockedPacked(IMFMediaBuffer* buffer, UINT32 width, UINT32 height, bool write, LONG fallbackPitch) {
+        if (SUCCEEDED(buffer->QueryInterface(IID_PPV_ARGS(&b2d_))) &&
+            SUCCEEDED(b2d_->Lock2DSize(write ? MF2DBuffer_LockFlags_Write : MF2DBuffer_LockFlags_Read, &scan0_, &pitch_, &start_, &length_))) {
+            locked2d_ = true;
+        } else if (SUCCEEDED(buffer->Lock(&start_, nullptr, &length_))) {
+            buffer_ = buffer;
+            scan0_ = start_;
+            pitch_ = fallbackPitch >= static_cast<LONG>(width * 2) ? fallbackPitch : static_cast<LONG>(width * 2);
+        } else {
+            return;
+        }
+        if (pitch_ < static_cast<LONG>(width * 2)) return;  // (a bottom-up buffer reports a negative pitch: not handled)
+        const size_t used = length_ - static_cast<size_t>(scan0_ - start_);
+        if (used < static_cast<size_t>(pitch_) * (height - 1) + static_cast<size_t>(width) * 2) return;
+        ok_ = true;
+    }
+    ~LockedPacked() {
+        if (locked2d_) b2d_->Unlock2D();
+        else if (buffer_) buffer_->Unlock();
+    }
+    LockedPacked(const LockedPacked&) = delete;
+    LockedPacked& operator=(const LockedPacked&) = delete;
+    bool ok() const { return ok_; }
+    BYTE* data() const { return scan0_; }
+    int pitch() const { return static_cast<int>(pitch_); }
+
+private:
+    ComPtr<IMF2DBuffer2> b2d_;
+    IMFMediaBuffer* buffer_ = nullptr;
+    BYTE* scan0_ = nullptr;
+    BYTE* start_ = nullptr;
+    LONG pitch_ = 0;
+    DWORD length_ = 0;
+    bool locked2d_ = false;
+    bool ok_ = false;
+};
+
+// CPU access to a sample's picture as NV12 planes, whatever the camera's format: NV12 is read in
+// place; YUY2 is converted into `scratch` (sized here, reused across frames) and the buffer is
+// unlocked again before returning.
+class InputPlanes {
+public:
+    InputPlanes(IMFMediaBuffer* buffer, UINT32 width, UINT32 height, bool yuy2, LONG stride, std::vector<std::uint8_t>& scratch) {
+        const int w = static_cast<int>(width & ~1u), h = static_cast<int>(height & ~1u);
+        if (!yuy2) {
+            nv12_.emplace(buffer, width, height, false, stride);
+            if (nv12_->ok()) {
+                planes_ = {nv12_->y(), nv12_->uv(), nv12_->pitch(), nv12_->pitch(), w, h};
+                ok_ = true;
+            }
+            return;
+        }
+        const size_t bytes = static_cast<size_t>(w) * h * 3 / 2;
+        if (scratch.size() != bytes) scratch.assign(bytes, 0);  // once per session
+        LockedPacked packed(buffer, width, height, false, stride);
+        if (!packed.ok()) return;
+        const processing::Nv12Frame frame{scratch.data(), scratch.data() + static_cast<size_t>(w) * h, w, w, w, h};
+        processing::Yuy2ToNv12(packed.data(), packed.pitch(), frame);
+        planes_ = {frame.y, frame.uv, w, w, w, h};
+        ok_ = true;
+    }
+    bool ok() const { return ok_; }
+    const processing::Nv12Planes& planes() const { return planes_; }
+    // Plane pointers for code that wants raw access (smooth motion reads luma).
+    int pitch() const { return planes_.yStride; }
+
+private:
+    std::optional<LockedNv12> nv12_;
+    processing::Nv12Planes planes_;
     bool ok_ = false;
 };
 
@@ -97,7 +176,12 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
         GUID sub{};
         width_ = height_ = 0;
         nv12_ = type && SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &sub)) && IsEqualGUID(sub, MFVideoFormat_NV12);
+        yuy2_ = type && !nv12_ && IsEqualGUID(sub, MFVideoFormat_YUY2);
         if (type) MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width_, &height_);
+        {
+            const LONG st = type ? static_cast<LONG>(MFGetAttributeUINT32(type, MF_MT_DEFAULT_STRIDE, 0)) : 0;
+            stride_ = st < 0 ? -st : st;  // bottom-up types report a negative stride
+        }
         fullRange_ = type && MFGetAttributeUINT32(type, MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235) == MFNominalRange_0_255;
         UINT32 n = 0, d = 1;
         nominalFps_ = type && SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &n, &d)) && d ? static_cast<double>(n) / d : 0;
@@ -107,6 +191,12 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
     }
     ks_ = ks;
     ReloadSettings();
+    {
+        // ReloadSettings keeps compiled settings when the profile file is unchanged, but this
+        // session can have another size, range or format than the last one: always compile for it.
+        std::lock_guard lock(mu_);
+        Recompile();
+    }
     {
         std::lock_guard lock(smoothMu_);
         std::lock_guard l2(mu_);
@@ -129,7 +219,8 @@ void FrameProcessor::BeginSession(IMFMediaType* type, IKsControl* ks) {
         }
     }
     IXC_TRACE("ProcessorSessionStart", TraceLoggingUInt32(width_, "width"), TraceLoggingUInt32(height_, "height"),
-              TraceLoggingBoolean(nv12_, "nv12"), TraceLoggingBoolean(fullRange_, "fullRange"),
+              TraceLoggingBoolean(nv12_, "nv12"), TraceLoggingBoolean(yuy2_, "yuy2"), TraceLoggingInt32(stride_, "stride"),
+              TraceLoggingBoolean(fullRange_, "fullRange"),
               TraceLoggingBoolean(wait_ != nullptr, "watching"));
 }
 
@@ -170,6 +261,11 @@ void FrameProcessor::EndSession() {
         type_.Reset();
         ++generation_;       // the next session decides CPU/GPU afresh
     }
+    {
+        std::lock_guard sc(scratchMu_);  // (never taken while holding mu_)
+        std::vector<std::uint8_t>().swap(inScratch_);  // an idle camera holds no YUY2 working copies
+        std::vector<std::uint8_t>().swap(outScratch_);
+    }
     const processing::AdaptiveNv12Processor::Stats ps = processor_.GetStats();
     processor_.ReleaseGpu();  // and no GPU device either
     if (wasActive) {
@@ -181,7 +277,7 @@ void FrameProcessor::EndSession() {
     }
     if (wasActive) {
         IXC_TRACE("ProcessorSessionEnd", TraceLoggingUInt64(c.processed, "processed"), TraceLoggingUInt64(c.passedThrough, "passedThrough"),
-                  TraceLoggingUInt64(c.poolExhausted, "poolExhausted"), TraceLoggingUInt64(c.errors, "errors"),
+                  TraceLoggingUInt64(c.poolExhausted, "poolExhausted"), TraceLoggingUInt64(c.errors, "errors"), TraceLoggingUInt64(c.sampleFailures, "sampleFailures"),
                   TraceLoggingUInt64(c.settingsReloads, "reloads"), TraceLoggingBoolean(c.inputIsGpuSurface, "gpuInput"),
                   TraceLoggingUInt64(c.processed ? c.processUsTotal / c.processed : 0, "avgUs"), TraceLoggingUInt64(c.processUsMax, "maxUs"));
         IXC_TRACE("SmoothMotion", TraceLoggingInt32(smoothExposure, "fixedExposureLog2s"), TraceLoggingFloat64(smoothEv, "compensationEv"),
@@ -224,7 +320,7 @@ void FrameProcessor::UpdateSegmentation() {
     float temporal = 0.5f, hair = 0.5f;
     {
         std::lock_guard lock(mu_);
-        want = effects_ && effects_->needsSegmentation && nv12_ && type_ != nullptr;
+        want = effects_ && effects_->needsSegmentation && Processable() && type_ != nullptr;
         mode = profile_.processing;
         temporal = static_cast<float>(profile_.background.temporal / 100.0);
         hair = static_cast<float>(profile_.background.hair / 100.0);
@@ -263,7 +359,7 @@ void FrameProcessor::UpdateFaceTracking() {
     {
         std::lock_guard lock(mu_);
         // Face-aware effects need the tracker even when "face tracking" itself isn't ticked.
-        want = (profile_.faceTracking.enabled || profile_.autoFraming || (effects_ && effects_->needsFaces)) && nv12_ && type_ != nullptr;
+        want = (profile_.faceTracking.enabled || profile_.autoFraming || (effects_ && effects_->needsFaces)) && Processable() && type_ != nullptr;
         cfg = face::EngineConfigFor(profile_);
     }
     if (want) {
@@ -310,7 +406,7 @@ void FrameProcessor::ReloadSettings() {
     if (!r.ok) next.image.sharpness = 0;  // no usable settings at all: pass the camera through unchanged
     // What compilation depends on, read under the lock; then compile outside it, so a frame never
     // waits for the LUTs and effect tables to be built.
-    bool nv12 = false, full = false;
+    bool processable = false, full = false;
     UINT32 w = 0, h = 0;
     double ev = 0;
     {
@@ -323,7 +419,7 @@ void FrameProcessor::ReloadSettings() {
             IXC_TRACE("SettingsRejectedKeptPrevious");
             return;
         }
-        nv12 = nv12_;
+        processable = Processable();
         w = width_;
         h = height_;
         full = fullRange_;
@@ -331,7 +427,7 @@ void FrameProcessor::ReloadSettings() {
     }
     std::shared_ptr<const processing::PipelineParams> params;
     std::shared_ptr<const effects::EffectConfig> fx;
-    if (nv12 && w && h) {
+    if (processable && w && h) {
         const Profile effective = processing::WithSmoothMotionGain(next, ev);
         params = std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, w, h, full));
         fx = effects::CompileEffects(effective, full, picture);
@@ -342,7 +438,7 @@ void FrameProcessor::ReloadSettings() {
     bgPicture_ = std::move(picture);
     ++counters_.settingsReloads;
     smoothSettingChanged_ = profile_.smoothMotion != smoothEnabled_;
-    if (params && nv12_ == nv12 && width_ == w && height_ == h && fullRange_ == full && compensationEv_ == ev) {
+    if (params && Processable() == processable && width_ == w && height_ == h && fullRange_ == full && compensationEv_ == ev) {
         // The compiled snapshot is swapped in whole: a frame uses either the old or the new one.
         ++generation_;
         params_ = std::move(params);
@@ -357,7 +453,7 @@ void FrameProcessor::ReloadSettings() {
 
 void FrameProcessor::Recompile() {
     ++generation_;  // new settings: the CPU/GPU decision is made again
-    if (!nv12_ || width_ == 0 || height_ == 0) {
+    if (!Processable() || width_ == 0 || height_ == 0) {
         effects_.reset();
         auto identity = std::make_shared<processing::PipelineParams>();
         params_ = std::move(identity);
@@ -416,25 +512,34 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         const double now = face::FaceEngine::NowMs();
         if (face_.WantsFrame(now)) {
             UINT32 w = 0, h = 0;
-            bool full = false;
+            bool full = false, yuy2 = false;
+            LONG stride = 0;
             double interval = 33.3;
             {
                 std::lock_guard l2(mu_);
                 w = width_;
                 h = height_;
                 full = fullRange_;
+                yuy2 = yuy2_;
+                stride = stride_;
                 interval = frameIntervalMs_;
             }
             ComPtr<IMFMediaBuffer> b;
+            bool unreadable = false;
             if (SUCCEEDED(input->GetBufferByIndex(0, &b))) {
-                LockedNv12 frame(b.Get(), w, h, false);
+                std::lock_guard sc(scratchMu_);
+                const InputPlanes frame(b.Get(), w, h, yuy2, stride, inScratch_);
                 if (frame.ok()) {
                     processing::YuvFormat fmt = processing::DefaultYuvFormat(h);
                     fmt.fullRange = full;
-                    const processing::Nv12Planes planes{frame.y(), frame.uv(), frame.pitch(), frame.pitch(), static_cast<int>(w & ~1u),
-                                                        static_cast<int>(h & ~1u)};
-                    face_.OnFrame(planes, fmt, now, interval);
+                    face_.OnFrame(frame.planes(), fmt, now, interval);  // (copies what it needs before returning)
+                } else {
+                    unreadable = true;
                 }
+            }
+            if (unreadable) {
+                std::lock_guard l2(mu_);
+                ++counters_.sampleFailures;  // tracking can't see this camera's frames: shown in the trace
             }
         }
     }
@@ -445,23 +550,32 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         const double now = seg::SegmentationEngine::NowMs();
         if (seg_.WantsFrame(now)) {
             UINT32 w = 0, h = 0;
-            bool full = false;
+            bool full = false, yuy2 = false;
+            LONG stride = 0;
             {
                 std::lock_guard l2(mu_);
                 w = width_;
                 h = height_;
                 full = fullRange_;
+                yuy2 = yuy2_;
+                stride = stride_;
             }
             ComPtr<IMFMediaBuffer> b;
+            bool unreadable = false;
             if (SUCCEEDED(input->GetBufferByIndex(0, &b))) {
-                LockedNv12 frame(b.Get(), w, h, false);
+                std::lock_guard sc(scratchMu_);
+                const InputPlanes frame(b.Get(), w, h, yuy2, stride, inScratch_);
                 if (frame.ok()) {
                     processing::YuvFormat fmt = processing::DefaultYuvFormat(h);
                     fmt.fullRange = full;
-                    const processing::Nv12Planes planes{frame.y(), frame.uv(), frame.pitch(), frame.pitch(), static_cast<int>(w & ~1u),
-                                                        static_cast<int>(h & ~1u)};
-                    seg_.OnFrame(planes, fmt, now);
+                    seg_.OnFrame(frame.planes(), fmt, now);
+                } else {
+                    unreadable = true;
                 }
+            }
+            if (unreadable) {
+                std::lock_guard l2(mu_);
+                ++counters_.sampleFailures;
             }
         }
     }
@@ -469,19 +583,24 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     std::shared_ptr<const processing::PipelineParams> params;
     ComPtr<IMFMediaType> type;
     UINT32 width = 0, height = 0;
-    bool nv12 = false;
+    bool processable = false, yuy2 = false;
+    LONG stride = 0;
     std::uint64_t generation = 0;
     std::shared_ptr<const effects::EffectConfig> fx;
     bool autoFraming = false;
+    face::FramerParams framing;
     {
         std::lock_guard lock(mu_);
         params = params_;
         generation = generation_;
         autoFraming = profile_.autoFraming;
+        framing = face::FramerParamsFor(profile_.framing.tightness, profile_.framing.speed, profile_.framing.maxZoom);
         type = type_;
         width = width_;
         height = height_;
-        nv12 = nv12_;
+        processable = Processable();
+        yuy2 = yuy2_;
+        stride = stride_;
         fx = effects_ && effects_->Active() ? effects_ : nullptr;
     }
     // Record once per session whether frames live in GPU memory (decides the GPU strategy).
@@ -507,8 +626,9 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     // Auto-framing: a per-frame copy of the parameters with the framed source rectangle (a stack
     // copy, no allocation). Its own generation key lets the CPU/GPU choice see the zoom.
     processing::PipelineParams framed;
-    if (autoFraming && nv12 && params) {
+    if (autoFraming && processable && params) {
         const face::ViewRect base{params->srcX, params->srcY, params->srcW, params->srcH};
+        framer_.SetParams(framing);
         const face::ViewRect v = framer_.Update(base, face::LargestFace(snap), face::FaceEngine::NowMs());
         if (framer_.Framing()) {
             framed = *params;
@@ -534,7 +654,7 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
         return ComPtr<IMFSample>(input);
     };
     if (!fx) renderer_.ReleaseBackground();  // no effects: hold no background buffers
-    if (!input || !params || (params->identity && !fx) || !nv12 || !type) return passThrough();
+    if (!input || !params || (params->identity && !fx) || !processable || !type) return passThrough();
 
     ComPtr<IMFVideoSampleAllocatorEx> allocator;
     HRESULT hr;
@@ -555,16 +675,33 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
     ComPtr<IMFMediaBuffer> inBuf, outBuf;
     bool ok = SUCCEEDED(input->GetBufferByIndex(0, &inBuf)) && SUCCEEDED(out->GetBufferByIndex(0, &outBuf));
     if (ok) {
-        LockedNv12 src(inBuf.Get(), width, height, false);
-        LockedNv12 dst(outBuf.Get(), width, height, true);
-        ok = src.ok() && dst.ok();
+        // YUY2 cameras are processed through NV12 working copies (scratchMu_ guards them).
+        std::unique_lock<std::mutex> scratch(scratchMu_, std::defer_lock);
+        if (yuy2) scratch.lock();
+        const InputPlanes src(inBuf.Get(), width, height, yuy2, stride, inScratch_);
+        std::optional<LockedNv12> dst;
+        processing::Nv12Frame o{};
+        ok = src.ok();
         if (ok) {
-            const processing::Nv12Planes in{src.y(), src.uv(), src.pitch(), src.pitch(), static_cast<int>(width), static_cast<int>(height)};
-            const processing::Nv12Frame o{dst.y(), dst.uv(), dst.pitch(), dst.pitch(), static_cast<int>(width), static_cast<int>(height)};
+            const int w = static_cast<int>(width) & ~1, h = static_cast<int>(height) & ~1;
+            if (yuy2) {
+                const size_t bytes = static_cast<size_t>(w) * h * 3 / 2;
+                if (outScratch_.size() != bytes) outScratch_.assign(bytes, 0);  // once per session
+                o = {outScratch_.data(), outScratch_.data() + static_cast<size_t>(w) * h, w, w, w, h};
+            } else {
+                dst.emplace(outBuf.Get(), width, height, true, stride);
+                ok = dst->ok();
+                if (ok) o = {dst->y(), dst->uv(), dst->pitch(), dst->pitch(), w, h};
+            }
+        }
+        if (ok) {
+            const processing::Nv12Planes& in = src.planes();
             if (params->identity) {
                 // Effects only: start from an exact copy of the camera frame.
-                for (UINT32 y = 0; y < height; ++y) memcpy(o.y + static_cast<size_t>(y) * o.yStride, in.y + static_cast<size_t>(y) * in.yStride, width);
-                for (UINT32 y = 0; y < height / 2; ++y) memcpy(o.uv + static_cast<size_t>(y) * o.uvStride, in.uv + static_cast<size_t>(y) * in.uvStride, width);
+                for (int y = 0; y < o.height; ++y)
+                    memcpy(o.y + static_cast<size_t>(y) * o.yStride, in.y + static_cast<size_t>(y) * in.yStride, static_cast<size_t>(o.width));
+                for (int y = 0; y < o.height / 2; ++y)
+                    memcpy(o.uv + static_cast<size_t>(y) * o.uvStride, in.uv + static_cast<size_t>(y) * in.uvStride, static_cast<size_t>(o.width));
             } else {
                 ok = processor_.Process(in, o, *params, generation);
             }
@@ -583,6 +720,11 @@ ComPtr<IMFSample> FrameProcessor::Process(IMFSample* input) {
                     ctx.map.mirror = params->mirror;
                 }
                 renderer_.Apply(o, *fx, ctx);
+            }
+            if (ok && yuy2) {
+                LockedPacked packed(outBuf.Get(), width, height, true, stride);
+                ok = packed.ok();
+                if (ok) processing::Nv12ToYuy2({o.y, o.uv, o.yStride, o.uvStride, o.width, o.height}, packed.data(), packed.pitch());
             }
         }
     }

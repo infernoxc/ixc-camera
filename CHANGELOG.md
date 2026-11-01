@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.15.0 — Frame editor, precise face tracking, every webcam
+
+### Added
+- **Frame editor** (Elgato-style). The **Frame** button above the preview (or *Framing › Edit frame*) shows the whole camera picture with the frame that apps receive drawn on top:
+  - drag inside it to move, drag a corner or scroll to resize (the shape always matches the output), double-click for the whole picture;
+  - the area outside the frame is dimmed; the frame's pixel size and zoom are shown;
+  - IXC Camera in other apps follows live while you drag; the frame is saved in the profile (`crop`).
+- **Framing section** in the navigation: Edit frame, **Field of view** presets (100/90/75/60/45%), Reset, a rule-of-thirds **Grid** (preview only), and the auto-framing controls: **Framing** (wide .. face close-up), **Follow speed** (cinematic .. instant), **Max zoom** (1-4x) and **Precise face tracking**. Settings are stored in the profile (`framing`).
+- **Precise face tracking** (on by default for auto-framing and face effects): detections 2-3x as often, on the larger detector input when the PC has the CPU and RAM for it, with lighter smoothing and a larger CPU budget. Faster, steadier following.
+- **Sharper background edges** (blur, picture and colour backgrounds): the person mask is refined at the full output resolution with a local two-colour model, so the cut follows the real outline (hair, shoulders, ears) instead of the network's coarse 512x288 edge. Only the uncertain edge band moves; similar colours or busy backgrounds keep the plain mask. *Hair refinement* sets how strongly.
+- Tests: framing settings, tightness/speed/zoom behaviour, precise cadence, edge refinement, YUY2 conversion.
+
+### Fixed
+- **Auto-framing, face tracking, blur and colour effects did nothing on many webcams in other apps.** The camera service only processed cameras that deliver NV12. Cameras that deliver **YUY2** (very common) were passed through untouched. They're now converted to NV12, processed, and converted back.
+- Cameras with **padded rows** (e.g. 1366x768) could be read with the wrong pitch when the driver gave no pitch; the type's stride is used.
+- A camera session that opened with a different size or range than the previous one, while the profile was unchanged, kept settings compiled for the previous session. Settings are now compiled for every new session.
+- Cameras that offer neither NV12 nor YUY2 (e.g. MJPG only) made IXC Camera fail; they are now exposed unprocessed, as a plain camera.
+- The service now counts frames its face/segmentation sampler couldn't read (`sampleFailures` in the trace), so such cases are visible.
+
+### Changed
+- `AutoFramer` takes `FramerParams` (framing tightness, speed, zoom, deadband); the defaults are the 0.10 behaviour.
+
 ## 0.14.2 — Settings reach other apps reliably
 
 ### Fixed

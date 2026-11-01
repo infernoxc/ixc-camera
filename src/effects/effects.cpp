@@ -521,6 +521,7 @@ std::shared_ptr<const EffectConfig> CompileEffects(const Profile& profile, bool 
     bc.falloff = static_cast<float>(b.falloff / 100.0);
     bc.feather = static_cast<float>(b.feather / 100.0);
     bc.protection = static_cast<float>(b.edgeProtection / 100.0);
+    bc.detail = static_cast<float>(b.hair / 100.0);
     bc.color = b.color;
     bc.fit = b.fit;
     bc.posX = static_cast<float>(b.posX);

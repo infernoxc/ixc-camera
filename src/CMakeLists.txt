@@ -33,6 +33,7 @@ target_link_libraries(ixc_camera PUBLIC ixc_core mfplat mf mfreadwrite mfuuid cf
 add_library(ixc_processing STATIC
     processing/color.cpp
     processing/image_pipeline.cpp
+    processing/yuy2.cpp
     processing/temporal_denoise.cpp
     processing/backend_selector.cpp)
 target_link_libraries(ixc_processing PUBLIC ixc_core)

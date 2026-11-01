@@ -112,6 +112,16 @@ struct FaceTrackingSettings {
     bool operator==(const FaceTrackingSettings&) const = default;
 };
 
+// Auto-framing behaviour (the "follow me" camera) and the face tracking that drives it.
+// The frame it moves inside is the profile's crop rectangle (the Frame editor in the app).
+struct FramingSettings {
+    double tightness = 50;  // 0 = wide (waist up) .. 50 = head and shoulders .. 100 = face close-up
+    double speed = 60;      // 0 = slow, cinematic .. 100 = follows at once
+    double maxZoom = 2.5;   // 1..4: how far it may zoom into the frame
+    bool precise = true;    // faster, more precise face detection (uses more CPU)
+    bool operator==(const FramingSettings&) const = default;
+};
+
 struct HotkeyBinding {
     std::string action;  // e.g. "effects.toggle"
     std::string keys;    // e.g. "Ctrl+Alt+F8"
@@ -144,6 +154,7 @@ struct Profile {
     // Keep the tracked face framed: zoom and pan smoothly inside the crop/zoom rectangle (uses
     // face tracking). See face/auto_framer.h.
     bool autoFraming = false;
+    FramingSettings framing;
     bool effectsEnabled = true;  // master switch (hotkey), keeps the effect list intact
     std::vector<HotkeyBinding> hotkeys;
 

@@ -18,6 +18,7 @@
 #include "processing/image_pipeline.h"
 #include "segmentation/gpu/gpu_selfie_net.h"
 
+#include <functional>
 #include <memory>
 
 #include <windows.h>
@@ -52,7 +53,11 @@ public:
     // when the settings actually change.
     void SetFaceTracking(const face::EngineConfig* config);
     // Auto-framing (needs face tracking running): the preview follows the face like IXC Camera.
-    void SetAutoFraming(bool on) { autoFraming_ = on; dirty_ = sample_ != nullptr; }
+    void SetAutoFraming(bool on, const face::FramerParams& params = {}) {
+        autoFraming_ = on;
+        framer_.SetParams(params);
+        dirty_ = sample_ != nullptr;
+    }
     // Draw the tracked faces over the preview (preview only; never sent to apps).
     void SetFaceOverlay(bool on);
     face::EngineStatus FaceStatus() const { return face_.Status(); }
@@ -75,12 +80,37 @@ public:
         dirty_ = sample_ != nullptr;
     }
 
+    // Frame editor (Elgato-style): the preview shows the whole camera picture (the owner gives a
+    // full-frame pipeline meanwhile) with the frame apps receive drawn on top. Drag inside to
+    // move it, drag a corner or scroll to resize it (keeps the output's shape), double-click for
+    // the whole picture. onChange gets the new frame in source coordinates, live while dragging.
+    void SetFrameEditing(bool on, std::function<void(const face::ViewRect&)> onChange = nullptr);
+    bool FrameEditing() const { return editFrame_; }
+    // The current frame (source coordinates, unmirrored), shape = the output aspect ratio.
+    void SetFrameRect(const face::ViewRect& r);
+    // Rule-of-thirds grid over the preview (never sent to apps).
+    void SetGrid(bool on) {
+        if (grid_ == on) return;
+        grid_ = on;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
     static constexpr UINT kFrameMessage = WM_APP + 10;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     void Paint(HDC dc, const RECT& client);
     void PaintFaces(HDC dc, int dx, int dy, int dw, int dh);
+    void PaintFrameEditor(HDC dc, int dx, int dy, int dw, int dh);
+    void PaintGrid(HDC dc, int x, int y, int w, int h);
+    // Frame editor input (client coordinates).
+    void OnEditorDown(int x, int y);
+    void OnEditorMove(int x, int y);
+    void OnEditorUp();
+    void OnEditorWheel(int delta);
+    int HitTest(int x, int y) const;  // -1 outside, 0 inside (move), 1..4 corners TL TR BL BR
+    face::ViewRect ShownFrame() const;  // frame_ as displayed (mirrored when the output is)
+    void SetShownFrame(face::ViewRect shown);
     bool ConvertHeldFrame(int dstW, int dstH);
 
     HWND hwnd_ = nullptr;
@@ -110,6 +140,18 @@ private:
     seg::SegmentationEngine seg_;  // started on demand by a background effect, stopped otherwise
     seg::SegMask segMask_;
     HPEN facePen_ = nullptr, landmarkPen_ = nullptr;
+
+    // Frame editor and grid.
+    bool editFrame_ = false;
+    bool grid_ = false;
+    face::ViewRect frame_;             // source coordinates
+    double frameAspect_ = 1.0;         // frame width/height in normalized units (1 = output aspect = camera aspect)
+    std::function<void(const face::ViewRect&)> onFrame_;
+    int drag_ = -1;                    // HitTest value of the active drag, -1 = none
+    POINT dragFrom_{};
+    face::ViewRect dragStart_;         // shown rectangle when the drag began
+    RECT shown_{};                     // where the picture was drawn (dx, dy, dx+dw, dy+dh)
+    std::vector<std::uint32_t> overlay_;  // dimmed copy for the editor (reused)
 };
 
 }  // namespace ixc::app

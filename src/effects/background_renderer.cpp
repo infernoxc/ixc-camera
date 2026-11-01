@@ -341,15 +341,14 @@ void BackgroundRenderer::Composite(const processing::Nv12Frame& f, const Backgro
     const bool picture = (cfg.mode == BackgroundMode::Replace || cfg.mode == BackgroundMode::Custom) && cfg.image;
     const bool solid = cfg.mode == BackgroundMode::Color;
     const Yuv colour = RgbToYuv(cfg.color, ctx.fullRange);
-    const face::OutputMapping& m = ctx.map;
-    const float W = static_cast<float>(f.width), H = static_cast<float>(f.height);
     const int amount = static_cast<int>(mix * 256 + 0.5f);
+    BuildAlpha(f, cfg, ctx);
 
     auto plane = [&](std::uint8_t* base, int stride, int width, int height, int channels, float scale, const std::uint8_t* low,
                      const std::uint8_t* plate) {
         const float pxPerLow = static_cast<float>(cell_) / scale;
         const bool blur = !picture && !solid;  // only the blur reads the 1/8-scale source
-        for (auto* v : {&colIdx_, &colW_, &maskCol_, &maskColW_})
+        for (auto* v : {&colIdx_, &colW_})
             if (v->size() < static_cast<size_t>(width)) v->resize(static_cast<size_t>(width));
         if (rowWeight_.size() < static_cast<size_t>(width)) rowWeight_.resize(static_cast<size_t>(width));
         if (blur && lowRow_.size() < static_cast<size_t>(lw_) * channels) lowRow_.resize(static_cast<size_t>(lw_) * channels);
@@ -359,23 +358,16 @@ void BackgroundRenderer::Composite(const processing::Nv12Frame& f, const Backgro
                 colIdx_[static_cast<size_t>(x)] = static_cast<int>(fx) * channels;
                 colW_[static_cast<size_t>(x)] = static_cast<int>((fx - static_cast<float>(static_cast<int>(fx))) * 256);
             }
-            const float o = (static_cast<float>(x) + 0.5f) * scale / W;
-            const float mx = std::clamp((m.x + (m.mirror ? 1 - o : o) * m.w) * seg::kMaskW - 0.5f, 0.0f, static_cast<float>(seg::kMaskW - 1) - 0.001f);
-            maskCol_[static_cast<size_t>(x)] = static_cast<int>(mx);
-            maskColW_[static_cast<size_t>(x)] = static_cast<int>((mx - static_cast<float>(static_cast<int>(mx))) * 256);
         }
         const std::uint8_t solidV[2] = {Clamp8(channels == 1 ? colour.y : colour.u), Clamp8(colour.v)};
+        const size_t aw = static_cast<size_t>(f.width);
         for (int y = 0; y < height; ++y) {
-            const float my = std::clamp((m.y + (static_cast<float>(y) + 0.5f) * scale / H * m.h) * seg::kMaskH - 0.5f, 0.0f,
-                                        static_cast<float>(seg::kMaskH - 1) - 0.001f);
-            const int my0 = static_cast<int>(my), wy = static_cast<int>((my - static_cast<float>(my0)) * 256);
-            const std::uint8_t* m0 = mask_.data() + static_cast<size_t>(my0) * seg::kMaskW;
-            const std::uint8_t* m1 = m0 + seg::kMaskW;
+            // Person alpha at full resolution (BuildAlpha); the chroma plane averages 2x2 of it.
+            const std::uint8_t* a0 = alpha_.data() + static_cast<size_t>(channels == 1 ? y : 2 * y) * aw;
+            const std::uint8_t* a1 = channels == 1 ? a0 : a0 + aw;
             bool any = false;
             for (int x = 0; x < width; ++x) {
-                const int c = maskCol_[static_cast<size_t>(x)], wx = maskColW_[static_cast<size_t>(x)];
-                const int top = m0[c] * (256 - wx) + m0[c + 1] * wx, bottom = m1[c] * (256 - wx) + m1[c + 1] * wx;
-                const int person = (top * (256 - wy) + bottom * wy) >> 16;  // 0..255
+                const int person = channels == 1 ? a0[x] : (a0[2 * x] + a0[2 * x + 1] + a1[2 * x] + a1[2 * x + 1] + 2) >> 2;  // 0..255
                 const int bg = ((255 - person) * amount) >> 8;
                 rowWeight_[static_cast<size_t>(x)] = static_cast<std::int16_t>(bg + (bg >> 7));  // 0..256
                 any |= bg != 0;
@@ -420,6 +412,144 @@ void BackgroundRenderer::Composite(const processing::Nv12Frame& f, const Backgro
     plane(f.uv, f.uvStride, f.width / 2, f.height / 2, 2, 2.0f, lowUV_.data(), plateUV_.data());
 }
 
+// Edge refinement: a local two-colour model at full resolution. The mask is resampled into the
+// output frame on a grid at least as fine as the mask (1/1 to 1/3 of the frame). In a ~33 px
+// window around each cell, the luma of the confident person pixels (mask near 1) and of the
+// confident background pixels (mask near 0) is averaged. Where both are present and clearly
+// differ, each uncertain pixel is classified by its own full-resolution luma between the two, so
+// the cut lands on the picture's real outline instead of the stretched 512x288 mask edge. Only
+// the uncertain band moves (never confident person or background), and where the two sides
+// look alike (similar colours, textured surroundings) the plain mask is kept. Buffers are kept
+// between frames.
+void BackgroundRenderer::BuildAlpha(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx) {
+    const int W = f.width, H = f.height;
+    const int cell = std::clamp(W / seg::kMaskW, 1, 4);  // 1920 -> 3, 1280 -> 2, <= 1023 -> 1
+    const int gw = std::max(2, W / cell), gh = std::max(2, H / cell);
+    const size_t n = static_cast<size_t>(gw) * gh;
+    constexpr size_t kPlanes = 8;
+    if (gw != gw_ || gh != gh_ || grid_.size() != n * kPlanes) {
+        gw_ = gw;
+        gh_ = gh;
+        grid_.assign(n * kPlanes, 0.0f);
+    }
+    if (alpha_.size() != static_cast<size_t>(W) * H) alpha_.assign(static_cast<size_t>(W) * H, 0);
+    float* Raw = grid_.data();  // mask at the cell (0..1)
+    float* WF = Raw + n;        // person weight, then mean person luma
+    float* WFI = WF + n;
+    float* WB = WFI + n;        // background weight, then mean background luma
+    float* WBI = WB + n;
+    float* tmp = WBI + n;
+    float* Conf = tmp + n;      // how far the colour model may move the edge (0..1)
+    const face::OutputMapping& m = ctx.map;
+
+    for (int gy = 0; gy < gh; ++gy) {
+        const int y0 = std::min(gy * cell, H - 1), y1 = std::min(y0 + cell, H);
+        const float oy = (static_cast<float>(gy * cell) + static_cast<float>(cell) * 0.5f) / static_cast<float>(H);
+        const float my = std::clamp((m.y + oy * m.h) * seg::kMaskH - 0.5f, 0.0f, static_cast<float>(seg::kMaskH - 1) - 0.001f);
+        const int my0 = static_cast<int>(my);
+        const float wy = my - static_cast<float>(my0);
+        const std::uint8_t* m0 = mask_.data() + static_cast<size_t>(my0) * seg::kMaskW;
+        const std::uint8_t* m1 = m0 + seg::kMaskW;
+        for (int gx = 0; gx < gw; ++gx) {
+            const int x0 = std::min(gx * cell, W - 1), x1 = std::min(x0 + cell, W);
+            int sum = 0;
+            for (int y = y0; y < y1; ++y) {
+                const std::uint8_t* row = f.y + static_cast<std::ptrdiff_t>(y) * f.yStride;
+                for (int x = x0; x < x1; ++x) sum += row[x];
+            }
+            const float iv = static_cast<float>(sum) / (255.0f * static_cast<float>((y1 - y0) * (x1 - x0)));
+            const float ox = (static_cast<float>(gx * cell) + static_cast<float>(cell) * 0.5f) / static_cast<float>(W);
+            const float mx = std::clamp((m.x + (m.mirror ? 1 - ox : ox) * m.w) * seg::kMaskW - 0.5f, 0.0f, static_cast<float>(seg::kMaskW - 1) - 0.001f);
+            const int mx0 = static_cast<int>(mx);
+            const float wx = mx - static_cast<float>(mx0);
+            const float top = m0[mx0] + (m0[mx0 + 1] - m0[mx0]) * wx, bottom = m1[mx0] + (m1[mx0 + 1] - m1[mx0]) * wx;
+            const float pv = (top + (bottom - top) * wy) / 255.0f;
+            const size_t k = static_cast<size_t>(gy) * gw + gx;
+            const float p2 = pv * pv, q = 1.0f - pv, q2 = q * q;
+            Raw[k] = pv;
+            WF[k] = p2 * p2;  // confident person counts most
+            WFI[k] = p2 * p2 * iv;
+            WB[k] = q2 * q2;
+            WBI[k] = q2 * q2 * iv;
+        }
+    }
+    // Window means (separable running sums, clamped at the borders, in place via tmp).
+    const int r = std::clamp((16 + cell / 2) / cell, 1, 16);  // ~33 px window
+    auto box = [&](float* p) {
+        for (int y = 0; y < gh; ++y) {
+            const float* s = p + static_cast<size_t>(y) * gw;
+            float* d = tmp + static_cast<size_t>(y) * gw;
+            float acc = 0;
+            for (int i = 0; i <= std::min(r, gw - 1); ++i) acc += s[i];
+            for (int x = 0; x < gw; ++x) {
+                const int a = std::max(0, x - r), b = std::min(gw - 1, x + r);
+                d[x] = acc / static_cast<float>(b - a + 1);
+                if (x + r + 1 < gw) acc += s[x + r + 1];
+                if (x - r >= 0) acc -= s[x - r];
+            }
+        }
+        for (int x = 0; x < gw; ++x) {
+            float acc = 0;
+            for (int i = 0; i <= std::min(r, gh - 1); ++i) acc += tmp[static_cast<size_t>(i) * gw + x];
+            for (int y = 0; y < gh; ++y) {
+                const int a = std::max(0, y - r), b = std::min(gh - 1, y + r);
+                p[static_cast<size_t>(y) * gw + x] = acc / static_cast<float>(b - a + 1);
+                if (y + r + 1 < gh) acc += tmp[static_cast<size_t>(y + r + 1) * gw + x];
+                if (y - r >= 0) acc -= tmp[static_cast<size_t>(y - r) * gw + x];
+            }
+        }
+    };
+    for (float* p : {WF, WFI, WB, WBI}) box(p);
+    // detail (Hair refinement): how strongly the colour model may move the edge.
+    const float strength = 0.5f + std::clamp(cfg.detail, 0.0f, 1.0f);
+    for (size_t k = 0; k < n; ++k) {
+        const float fl = WFI[k] / (WF[k] + 1e-6f), bl = WBI[k] / (WB[k] + 1e-6f);
+        const float both = Smoothstep(0.004f, 0.03f, std::min(WF[k], WB[k]));  // both sides present in the window
+        const float contrast = Smoothstep(0.05f, 0.14f, std::abs(fl - bl));     // ... and they differ clearly
+        WF[k] = fl;
+        WB[k] = bl;
+        Conf[k] = std::min(1.0f, both * contrast * strength);
+    }
+
+    // Full resolution: alpha = mask, moved toward the colour model's answer in the uncertain band.
+    if (maskCol_.size() < static_cast<size_t>(W)) maskCol_.resize(static_cast<size_t>(W));
+    if (maskColW_.size() < static_cast<size_t>(W)) maskColW_.resize(static_cast<size_t>(W));
+    const float inv = 1.0f / static_cast<float>(cell);
+    for (int x = 0; x < W; ++x) {
+        const float gx = std::clamp((static_cast<float>(x) + 0.5f) * inv - 0.5f, 0.0f, static_cast<float>(gw - 1) - 0.001f);
+        maskCol_[static_cast<size_t>(x)] = static_cast<int>(gx);
+        maskColW_[static_cast<size_t>(x)] = static_cast<int>((gx - static_cast<float>(static_cast<int>(gx))) * 256);
+    }
+    auto lerp2 = [](const float* r0, const float* r1, int c, float wx, float wy) {
+        const float t = r0[c] + (r0[c + 1] - r0[c]) * wx, b = r1[c] + (r1[c + 1] - r1[c]) * wx;
+        return t + (b - t) * wy;
+    };
+    for (int y = 0; y < H; ++y) {
+        const float gyf = std::clamp((static_cast<float>(y) + 0.5f) * inv - 0.5f, 0.0f, static_cast<float>(gh - 1) - 0.001f);
+        const int g0 = static_cast<int>(gyf);
+        const float wy = gyf - static_cast<float>(g0);
+        const size_t o0 = static_cast<size_t>(g0) * gw, o1 = o0 + gw;
+        const std::uint8_t* lum = f.y + static_cast<std::ptrdiff_t>(y) * f.yStride;
+        std::uint8_t* out = alpha_.data() + static_cast<size_t>(y) * W;
+        for (int x = 0; x < W; ++x) {
+            const int c = maskCol_[static_cast<size_t>(x)];
+            const float wx = static_cast<float>(maskColW_[static_cast<size_t>(x)]) * (1.0f / 256.0f);
+            float v = lerp2(Raw + o0, Raw + o1, c, wx, wy);
+            const float u = 1.0f - std::abs(2.0f * v - 1.0f);  // 0 = confident, 1 = undecided
+            if (u > 0.01f) {
+                const float conf = lerp2(Conf + o0, Conf + o1, c, wx, wy);
+                if (conf > 0.004f) {
+                    const float fl = lerp2(WF + o0, WF + o1, c, wx, wy), bl = lerp2(WB + o0, WB + o1, c, wx, wy);
+                    const float d = fl - bl;
+                    const float model = std::clamp((static_cast<float>(lum[x]) * (1.0f / 255.0f) - bl) / (std::abs(d) < 1e-3f ? 1e-3f : d), 0.0f, 1.0f);
+                    v += (model - v) * std::min(1.0f, conf * std::sqrt(u));
+                }
+            }
+            out[x] = static_cast<std::uint8_t>(std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
+        }
+    }
+}
+
 void BackgroundRenderer::Apply(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx) {
     const bool haveMask = ctx.mask && ctx.mask->generation != 0 && ctx.mask->value.size() == static_cast<size_t>(seg::kMaskW) * seg::kMaskH;
     // Fades in over ~8 frames once masks arrive. If they stop (segmentation paused or failed), the
@@ -446,7 +576,7 @@ void BackgroundRenderer::Apply(const processing::Nv12Frame& f, const BackgroundC
 size_t BackgroundRenderer::ScratchBytes() const {
     return mask_.capacity() + target_.capacity() + smooth_.capacity() + lowY_.capacity() + lowUV_.capacity() + work_.capacity() * sizeof(float) + plateY_.capacity() + plateUV_.capacity() +
            (colIdx_.capacity() + colW_.capacity() + maskCol_.capacity() + maskColW_.capacity()) * sizeof(int) +
-           (rowWeight_.capacity() + lowRow_.capacity()) * sizeof(std::int16_t);
+           (rowWeight_.capacity() + lowRow_.capacity()) * sizeof(std::int16_t) + grid_.capacity() * sizeof(float) + alpha_.capacity();
 }
 
 }  // namespace ixc::effects

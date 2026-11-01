@@ -57,6 +57,34 @@ IXC_TEST(Profile_RoundTripPreservesEverything) {
     IXC_CHECK_EQ(ProfileToJson(r.profile), text);
 }
 
+// 0.15: framing settings and the frame (crop) round-trip and are clamped; older profiles without
+// them load with the defaults.
+IXC_TEST(Profile_FramingSettingsRoundTripAndClamp) {
+    Profile p;
+    p.autoFraming = true;
+    p.framing.tightness = 80;
+    p.framing.speed = 25;
+    p.framing.maxZoom = 3.5;
+    p.framing.precise = false;
+    p.crop = {0.1, 0.2, 0.6, 0.5};
+    const ProfileLoadResult r = ProfileFromJson(ProfileToJson(p));
+    IXC_CHECK(r.ok);
+    IXC_CHECK(r.profile.framing == p.framing);
+    IXC_CHECK(r.profile.crop == p.crop);
+    IXC_CHECK(r.warnings.empty());
+
+    const ProfileLoadResult bad = ProfileFromJson(R"({"schemaVersion":1,"framing":{"tightness":500,"speed":-3,"maxZoom":20,"precise":true}})");
+    IXC_CHECK(bad.ok);
+    IXC_CHECK_EQ(bad.profile.framing.tightness, 100.0);
+    IXC_CHECK_EQ(bad.profile.framing.speed, 0.0);
+    IXC_CHECK_EQ(bad.profile.framing.maxZoom, 4.0);
+    IXC_CHECK(!bad.warnings.empty());
+
+    const ProfileLoadResult old = ProfileFromJson(R"({"schemaVersion":1,"autoFraming":true})");
+    IXC_CHECK(old.ok);
+    IXC_CHECK(old.profile.framing == FramingSettings{});
+}
+
 IXC_TEST(Profile_DefaultIsValidWithoutWarnings) {
     Profile p;
     IXC_CHECK(Validate(p).empty());

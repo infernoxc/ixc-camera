@@ -29,6 +29,7 @@
 
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace ixc::vcam {
 
@@ -55,6 +56,7 @@ public:
         unsigned long long settingsReloads = 0;
         unsigned long long processUsTotal = 0;  // time spent processing (µs), for real-pipeline cost
         unsigned long long processUsMax = 0;
+        unsigned long long sampleFailures = 0;  // frames the face/segmentation sampler could not read
         bool inputIsGpuSurface = false;         // frames arrive as DXGI (GPU) buffers
         bool inputKnown = false;
     };
@@ -74,6 +76,10 @@ private:
     UINT32 width_ = 0, height_ = 0;
     bool fullRange_ = false;
     bool nv12_ = false;
+    bool yuy2_ = false;       // packed 4:2:2 camera: processed through NV12 scratch buffers
+    LONG stride_ = 0;         // |MF_MT_DEFAULT_STRIDE| of the type (0 = unknown), for plain buffer locks
+    // processable: the picture can be handled (NV12 directly, YUY2 via conversion).
+    bool Processable() const { return nv12_ || yuy2_; }
     Counters counters_;
 
     processing::AdaptiveNv12Processor processor_;  // CPU-first; GPU only where measured to help
@@ -93,6 +99,10 @@ private:
     double compensationEv_ = 0;   // under mu_: added to the profile's exposure
     bool smoothEnabled_ = false;  // under mu_
     bool smoothSettingChanged_ = false;  // under mu_
+    // YUY2 cameras: NV12 working copies of the input and of the result (sized once per session,
+    // released at its end). scratchMu_ serializes their use.
+    std::mutex scratchMu_;
+    std::vector<std::uint8_t> inScratch_, outScratch_;
     std::mutex reloadMu_;                // serializes ReloadSettings (overlapping change notifications)
 
     // Face tracking (off unless the profile enables it: then no thread, no memory).

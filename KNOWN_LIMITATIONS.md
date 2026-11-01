@@ -73,3 +73,8 @@
 - Effects add their processing time to the latency (all effects at 1080p: +8–9 ms).
 - Blush, Beauty and the stickers follow the largest face only.
 - Stickers are flat (2D): they tilt with the head but don't turn with it in 3D. They're anchored to five landmarks, so when the head turns far to the side they slide a little. Hands in front of the face are drawn over.
+
+## Cameras (0.15)
+- **Formats:** NV12 cameras are processed directly; YUY2 cameras are processed through a conversion (a little more CPU; chroma loses its vertical detail only where effects run; with nothing active the frame is passed through untouched). Cameras that offer neither (e.g. MJPG only) work as a plain camera without effects.
+- **Frame editor:** edits the crop rectangle in the camera picture; it never makes the output larger than the camera's own resolution (digital zoom, like any digital framing).
+- **Camera hardware controls** (focus, hardware exposure, white balance) are not offered yet.

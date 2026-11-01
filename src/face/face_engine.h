@@ -36,6 +36,7 @@ struct EngineConfig {
     float minConfidence = 0.5f;
     bool forcePortable = false;      // benchmarks/tests: use the non-AVX2 build
     bool allowLargeInput = true;     // 320x180 for small faces (fast CPUs with >= 4 GB RAM only)
+    bool precise = false;            // faster, more precise tracking (see PreciseCadence)
 };
 
 enum class EngineState { Off, Starting, Searching, Tracking, TooSlow, Unavailable };

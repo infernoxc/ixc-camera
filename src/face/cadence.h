@@ -27,7 +27,12 @@ struct CadenceConfig {
     double largeMaxMediumMs = 6;    // Large allowed only when Medium costs less than this
     bool allowLarge = true;         // false on low-RAM PCs: Large costs ~6 MB of detector memory
     int fixedIntervalFrames = 0;    // user override (profile): detect every N frames; 0 = adaptive
+    bool preferLarge = false;       // precise mode: 320x180 whenever the CPU affords it (not only for small faces)
 };
+
+// Precise mode (profile framing.precise): detections 2-3x as often, on the larger input when the
+// CPU allows, within a larger budget. Faster, steadier auto-framing and face effects.
+CadenceConfig PreciseCadence(CadenceConfig base);
 
 class Cadence {
 public:

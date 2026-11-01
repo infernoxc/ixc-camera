@@ -20,6 +20,17 @@
 
 namespace ixc::face {
 
+// How the framer frames (from the profile's FramingSettings, see FramerParamsFor).
+struct FramerParams {
+    double faceHeightFraction = 0.30;  // face height / view height
+    double faceCentreFromTop = 0.40;   // face centre, fraction of the view height from the top
+    double maxZoom = 2.5;              // vs. the base view
+    double timeConstantMs = 700;       // easing towards the target
+    double deadband = 1.0;             // 1 = default comfortable zone; smaller = re-centres sooner
+};
+// tightness 0..100 (wide .. close-up), speed 0..100 (slow .. instant), maxZoom 1..4.
+FramerParams FramerParamsFor(double tightness, double speed, double maxZoom);
+
 struct ViewRect {
     double x = 0, y = 0, w = 1, h = 1;
     bool operator==(const ViewRect&) const = default;
@@ -33,7 +44,14 @@ public:
     static constexpr double kTimeConstantMs = 700;
     static constexpr double kLostFaceMs = 2000;
 
-    void Reset() { *this = AutoFramer(); }
+    void Reset() {
+        const FramerParams keep = params_;
+        *this = AutoFramer();
+        params_ = keep;
+    }
+    // New behaviour; the current view eases to the new target (no jump).
+    void SetParams(const FramerParams& p) { params_ = p; }
+    const FramerParams& Params() const { return params_; }
 
     // Per frame. base: the view the user's settings produce. face: the largest tracked face
     // (nullptr when none). Returns the view to show this frame (inside base).
@@ -47,6 +65,7 @@ public:
 private:
     ViewRect TargetFor(const ViewRect& base, const RectF& face) const;
 
+    FramerParams params_;
     bool started_ = false;
     bool framing_ = false;
     ViewRect current_, target_, lastBase_;
