@@ -43,7 +43,7 @@ app opens "IXC Camera (Windows Virtual Camera)"
   → Activate::ActivateObject
        asks for MF_VIRTUALCAMERA_ASSOCIATED_CAMERA_SOURCES (build 22621+): Frame Server hands over
        the physical camera it already manages (fallback: open by stored symbolic link)
-  → MediaSource wraps it: one colour stream, NV12 types only, camera controls (IKsControl) forwarded
+  → MediaSource wraps it: one colour stream, NV12 (else YUY2) types, camera controls (IKsControl) forwarded
   → app selects a mode → Start → physical stream starts → each frame passes MediaStream::ProcessSample
        (identity today; the image pipeline plugs in here)
   → app stops → physical stream stops; the service drops back to 0% CPU
@@ -52,7 +52,7 @@ app opens "IXC Camera (Windows Virtual Camera)"
 Decisions, verified on the dev machine:
 - **Registration**: `MFCreateVirtualCamera(SoftwareCameraSource, Lifetime_System, Access_AllUsers, "IXC Camera", CLSID)`, then `AddDeviceSourceInfo(<physical link>)` and `Start`. This is done once by the installer (admin). No IXC process runs afterwards. Removal calls `Remove()`.
 - **Why wrap through Frame Server**: the physical webcam stays managed by Windows, and switching between the physical camera and IXC Camera is instant and reliable (tested). IXC never opens the device exclusively on its own.
-- **Why NV12 only**: every exposed mode must be processable by IXC effects. MJPG is decoded by Windows anyway.
+- **Formats**: NV12 modes are processed directly; if a camera has no NV12 modes, its YUY2 modes are exposed and each frame is converted to NV12, processed and converted back (`processing/yuy2.*`). A camera with neither is exposed unprocessed. MJPG is decoded by Windows anyway.
 - **Stream published as selected**: apps relying on the default selection (Source Reader) otherwise start with no stream. This was found and fixed during testing.
 - **No file logging in the service**: TraceLogging provider `IXC.Camera.Source` ({6880FEE1-8B41-4322-ACF6-E6C1BF585B50}), captured with `scripts/trace-vcam.ps1`.
 - **Footprint**: `%ProgramFiles%\IXC Camera\`, `HKLM\Software\Classes\CLSID\{3011A045-BC7A-469D-86D0-2800938E32BF}`, `HKLM\Software\IXC Camera` (records the wrapped webcam, since Windows doesn't expose it). Nothing else.

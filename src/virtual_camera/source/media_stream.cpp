@@ -45,7 +45,7 @@ HRESULT FilterProcessableTypes(IMFStreamDescriptor* devDescriptor, std::vector<C
     hr = handler->GetMediaTypeCount(&count);
     if (FAILED(hr)) return hr;
 
-    std::vector<ComPtr<IMFMediaType>> yuy2;
+    std::vector<ComPtr<IMFMediaType>> yuy2, other;
     for (DWORD i = 0; i < count && i < 1024; ++i) {
         ComPtr<IMFMediaType> t;
         if (FAILED(handler->GetMediaTypeByIndex(i, &t))) continue;
@@ -60,8 +60,13 @@ HRESULT FilterProcessableTypes(IMFStreamDescriptor* devDescriptor, std::vector<C
         if (FAILED(MFCreateMediaType(&copy)) || FAILED(t->CopyAllItems(copy.Get()))) continue;
         if (IsEqualGUID(sub, MFVideoFormat_NV12)) out.push_back(copy);
         else if (IsEqualGUID(sub, MFVideoFormat_YUY2)) yuy2.push_back(copy);
+        else other.push_back(copy);
     }
+    // NV12 is processed directly, YUY2 through a conversion (frame_processor). A camera that offers
+    // neither (e.g. MJPG only) is still exposed, unprocessed: it works as a plain camera instead of
+    // failing, and Windows converts its frames for the app.
     if (out.empty()) out = std::move(yuy2);
+    if (out.empty()) out = std::move(other);
     return out.empty() ? MF_E_INVALIDMEDIATYPE : S_OK;
 } catch (const std::bad_alloc&) {
     return E_OUTOFMEMORY;

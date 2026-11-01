@@ -394,6 +394,9 @@ std::vector<std::string> Validate(Profile& p) {
 
     ClampI(p.faceTracking.maxFaces, 1, kMaxTrackedFaces, "faceTracking.maxFaces", w);
     ClampI(p.faceTracking.detectionIntervalFrames, 0, 120, "faceTracking.detectionIntervalFrames", w);
+    ClampD(p.framing.tightness, 0, 100, 50, "framing.tightness", w);
+    ClampD(p.framing.speed, 0, 100, 60, "framing.speed", w);
+    ClampD(p.framing.maxZoom, 1, 4, 2.5, "framing.maxZoom", w);
 
     std::vector<HotkeyBinding> hotkeys;
     for (auto& h : p.hotkeys) {
@@ -440,7 +443,7 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
     static constexpr const char* kKnown[] = {"schemaVersion", "name", "sourceCameraId", "width", "height", "fpsNumerator",
                                              "fpsDenominator", "mirror", "zoom", "crop", "image", "effects",
                                              "faceTracking", "performanceTier", "gpu", "processing", "smoothMotion", "autoFraming", "effectsEnabled",
-                                             "hotkeys", "background", "antiFlicker"};
+                                             "hotkeys", "background", "antiFlicker", "framing"};
     for (const auto& [k, v] : doc.AsObject()) {
         if (std::find(std::begin(kKnown), std::end(kKnown), k) == std::end(kKnown)) {
             w.push_back("unknown field \"" + k.substr(0, 64) + "\" ignored");
@@ -506,6 +509,18 @@ ProfileLoadResult ProfileFromJson(std::string_view text) {
         }
     }
     MigrateRetiredEffects(p, hasBackground, w);
+
+    if (const json::Value* fr = r.Get("framing")) {
+        if (fr->IsObject()) {
+            Reader f(*fr, "framing", w);
+            f.Num("tightness", p.framing.tightness);
+            f.Num("speed", p.framing.speed);
+            f.Num("maxZoom", p.framing.maxZoom);
+            f.Bool("precise", p.framing.precise);
+        } else {
+            r.TypeWarning("framing", "an object");
+        }
+    }
 
     if (const json::Value* ft = r.Get("faceTracking")) {
         if (ft->IsObject()) {
@@ -608,6 +623,10 @@ std::string ProfileToJson(const Profile& p) {
         {"smoothMotion", p.smoothMotion},
         {"antiFlicker", std::string(ToString(p.antiFlicker))},
         {"autoFraming", p.autoFraming},
+        {"framing", json::Object{{"tightness", p.framing.tightness},
+                                 {"speed", p.framing.speed},
+                                 {"maxZoom", p.framing.maxZoom},
+                                 {"precise", p.framing.precise}}},
         {"effectsEnabled", p.effectsEnabled},
         {"hotkeys", std::move(hotkeys)},
     };

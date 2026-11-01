@@ -15,8 +15,12 @@
 //        Replace/Custom - a picture "plate" at frame size (cover or fit, position, scale), built
 //                  once per picture/size/setting and reused every frame.
 //        Color   - a constant colour.
-//   3. Compositing: the mask, upsampled through the crop/zoom/mirror mapping, blends source and
-//      frame per pixel. Rows that are all person are skipped.
+//   3. Edge refinement (0.15): the mask is brought to the output frame at 1/4 resolution through
+//      the crop/zoom/mirror mapping, then a fast guided filter uses the frame's own luma to snap
+//      the edge to the real outline at full resolution (hair, shoulders, ears), instead of a
+//      stretched 512x288 mask. Inside flat regions it changes nothing.
+//   4. Compositing: the full-resolution alpha blends source and frame per pixel. Rows that are
+//      all person are skipped.
 // Memory: scratch at 1/8 scale (tens of KB), the 512x288 mask copy, and the plate (frame size,
 // only for pictures). Nothing is allocated per frame once sizes are stable.
 
@@ -40,6 +44,7 @@ struct BackgroundConfig {
     float falloff = 0.5f;     // 0..1: distance over which the blur grows to full strength
     float feather = 0.35f;    // 0..1: edge softness
     float protection = 0.6f;  // 0..1: face guard strength
+    float detail = 0.5f;      // 0..1: how closely edges snap to the picture's own edges (hair refinement)
     std::uint32_t color = 0x3A4A5C;
     BackgroundFit fit = BackgroundFit::Fill;
     float posX = 0.5f, posY = 0.5f, scale = 1.0f;
@@ -73,6 +78,13 @@ private:
     void BuildBlurSource(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx);
     void BuildPlate(const processing::Nv12Frame& f, const BackgroundConfig& cfg, bool fullRange);
     void Composite(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx, float mix);
+    void BuildAlpha(const processing::Nv12Frame& f, const BackgroundConfig& cfg, const BackgroundContext& ctx);
+
+  public:
+    // Exposed for tests: the full-resolution person alpha of the last frame (width x height).
+    const std::vector<std::uint8_t>& Alpha() const { return alpha_; }
+
+  private:
 
     float presence_ = 0;                       // 0..1 fade-in after the first mask
     std::vector<std::uint8_t> mask_;           // effective mask (shown; eases toward target_)
@@ -95,6 +107,10 @@ private:
     // Per-row compositing tables.
     std::vector<int> colIdx_, colW_, maskCol_, maskColW_;
     std::vector<std::int16_t> rowWeight_, lowRow_;
+    // Edge refinement: guide/mask/coefficient grids at 1/4 output resolution, full-res alpha.
+    int gw_ = 0, gh_ = 0;
+    std::vector<float> grid_;  // 8 planes of gw*gh: I, P, II, IP, then box results, then a, b
+    std::vector<std::uint8_t> alpha_;
 };
 
 }  // namespace ixc::effects

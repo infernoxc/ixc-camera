@@ -624,3 +624,45 @@ IXC_TEST(Sync_PreviewAndVirtualCameraCompileTheSameSettings) {
               ba.feather == bb.feather && ba.protection == bb.protection);
     IXC_CHECK(ba.mode == BackgroundMode::Blur && ba.bokeh && std::abs(ba.strength - 0.713f) < 1e-4f);
 }
+
+// 0.15 edge refinement: where the picture has a real edge at the outline (a dark shoulder against
+// a bright wall), the cut follows the picture's edge at full resolution even though the network's
+// mask edge is soft and a few pixels off. Flat or unrelated texture keeps the plain mask.
+IXC_TEST(Background_EdgeSnapsToThePictureOutline) {
+    constexpr int kW = 640, kH = 360;
+    // Picture: person (dark) left of x = 300, wall (bright) right of it.
+    Frame src(kW, kH);
+    for (int y = 0; y < kH; ++y)
+        for (int x = 0; x < kW; ++x) src.Y(x, y) = x < 300 ? 50 : 210;
+    // Mask: a soft ramp over x 0.455 .. 0.505 of the width (291..323 px), its middle 7 px right of
+    // the true edge: the network's usual soft, slightly misplaced edge.
+    seg::SegMask mask;
+    mask.generation = 1;
+    mask.value.assign(static_cast<size_t>(seg::kMaskW) * seg::kMaskH, 0);
+    for (int y = 0; y < seg::kMaskH; ++y)
+        for (int x = 0; x < seg::kMaskW; ++x) {
+            const float fx = (static_cast<float>(x) + 0.5f) / seg::kMaskW;
+            mask.value[static_cast<size_t>(y) * seg::kMaskW + x] = static_cast<std::uint8_t>(std::clamp((0.505f - fx) / 0.05f, 0.0f, 1.0f) * 255);
+        }
+    BackgroundContext ctx;
+    ctx.mask = &mask;
+    BackgroundConfig cfg = Mode(BackgroundMode::Color);
+    cfg.feather = 1.0f;  // keep the soft mask (the refinement, not the feather curve, must sharpen it)
+    cfg.detail = 0.6f;
+    BackgroundRenderer r;
+    Render(r, src, cfg, ctx);
+    const auto& a = r.Alpha();
+    IXC_REQUIRE(a.size() == static_cast<size_t>(kW) * kH);
+    auto at = [&](int x) { return static_cast<int>(a[static_cast<size_t>(kH / 2) * kW + x]); };
+    IXC_CHECK(at(296) > 215);  // person side of the real edge: kept
+    IXC_CHECK(at(304) < 40);   // wall side: background, though the network called it ~70% person
+    IXC_CHECK(at(308) < 40);
+    IXC_CHECK(at(100) > 250 && at(600) < 5);  // far from the edge: unchanged
+    // Same mask on a flat picture: no edge to follow, the plain (soft) mask is used.
+    Frame flat(kW, kH, 120);
+    BackgroundRenderer r2;
+    Render(r2, flat, cfg, ctx);
+    const auto& b = r2.Alpha();
+    const int mid = static_cast<int>(b[static_cast<size_t>(kH / 2) * kW + 304]);
+    IXC_CHECK(mid > 150 && mid < 200);  // the ramp stays a soft mix (~70% person here)
+}

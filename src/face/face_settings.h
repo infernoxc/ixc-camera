@@ -7,6 +7,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+
 namespace ixc::face {
 
 // CPU budget for detection, as a fraction of ONE core. Lower tiers leave more room for the
@@ -27,6 +29,12 @@ inline EngineConfig EngineConfigFor(const Profile& p) {
     c.maxFaces = p.faceTracking.maxFaces;
     c.fixedIntervalFrames = p.faceTracking.detectionIntervalFrames;
     c.cpuBudget = BudgetForTier(p.tier);
+    // Precise tracking (on by default) is for auto-framing and face effects; plain face tracking
+    // with neither stays light. Ultra-low keeps the light cadence regardless.
+    const bool faceEffects = p.effectsEnabled && std::any_of(p.effects.begin(), p.effects.end(), [](const EffectEntry& e) {
+                                 return e.id == "portrait.soft" || e.id == "beauty.basic" || e.id == "blush.tone";
+                             });
+    c.precise = p.framing.precise && (p.autoFraming || faceEffects) && p.tier != PerformanceTier::UltraLow;
     // The 320x180 input holds ~6 MB of detector buffers in the camera service: not on low-RAM PCs.
     MEMORYSTATUSEX m{sizeof(m)};
     c.allowLargeInput = !GlobalMemoryStatusEx(&m) || m.ullTotalPhys >= 4ull * 1024 * 1024 * 1024 - 256ull * 1024 * 1024;
@@ -35,7 +43,8 @@ inline EngineConfig EngineConfigFor(const Profile& p) {
 
 inline bool SameEngineConfig(const EngineConfig& a, const EngineConfig& b) {
     return a.maxFaces == b.maxFaces && a.fixedIntervalFrames == b.fixedIntervalFrames && a.cpuBudget == b.cpuBudget &&
-           a.minConfidence == b.minConfidence && a.forcePortable == b.forcePortable && a.allowLargeInput == b.allowLargeInput;
+           a.minConfidence == b.minConfidence && a.forcePortable == b.forcePortable && a.allowLargeInput == b.allowLargeInput &&
+           a.precise == b.precise;
 }
 
 }  // namespace ixc::face

@@ -7,6 +7,19 @@ namespace ixc::face {
 int InputWidth(InputSize s) { return s == InputSize::Small ? 160 : s == InputSize::Medium ? 240 : 320; }
 int InputHeight(InputSize s) { return s == InputSize::Small ? 90 : s == InputSize::Medium ? 135 : 180; }
 
+CadenceConfig PreciseCadence(CadenceConfig c) {
+    c.budget = std::max(c.budget, 0.30);
+    c.maxHz = 30;
+    c.movingHz = 24;
+    c.stableHz = 12;
+    c.searchHz = 12;
+    c.idleHz = 5;
+    c.minHz = 3;
+    c.largeMaxMediumMs = 12;
+    c.preferLarge = c.allowLarge;
+    return c;
+}
+
 void Cadence::Reset(double nowMs) {
     size_ = InputSize::Medium;
     cost_ = mediumCost_ = 0;
@@ -44,9 +57,9 @@ void Cadence::OnDetection(double costMs, double nowMs, int faces, float smallest
     // Larger input for small or undetected faces, only on fast CPUs.
     const bool fast = mediumCost_ > 0 && mediumCost_ < cfg_.largeMaxMediumMs;
     const bool wantLarge = (faces > 0 && smallestFace < 0.12f) || (faces == 0 && nowMs - lastFaceMs_ > 2000);
-    if (size_ == InputSize::Medium && fast && wantLarge && cfg_.allowLarge) {
+    if (size_ == InputSize::Medium && fast && (wantLarge || cfg_.preferLarge) && cfg_.allowLarge) {
         Resize(InputSize::Large);
-    } else if (size_ == InputSize::Large && faces > 0 && smallestFace > 0.2f) {
+    } else if (size_ == InputSize::Large && !cfg_.preferLarge && faces > 0 && smallestFace > 0.2f) {
         Resize(InputSize::Medium);
     }
 }

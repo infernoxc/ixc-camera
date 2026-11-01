@@ -61,11 +61,20 @@ enum PanelId : int {
     kIdUpdateCheck = 330,  // Updates section (handled by the main window)
     kIdUpdateInstall,
     kIdUpdateSkip,
+    kIdFrameEdit = 340,    // Framing section: "Edit frame" (handled by the main window)
+    kIdFrameReset,
+    kIdFov,
+    kIdGrid,
+    kIdPrecise,
+    kIdFrameSlider0 = 350,  // tightness, speed, max zoom 350..352
 };
 
 // The inspector shows one section at a time (chosen in the main window's navigation rail).
-enum class PanelSection { Adjust, Effects, Background, Profiles, Settings, Updates };
-inline constexpr int kPanelSections = 6;
+enum class PanelSection { Adjust, Framing, Effects, Background, Profiles, Settings, Updates };
+inline constexpr int kPanelSections = 7;
+
+// Field-of-view presets of the Framing section (share of the camera picture shown).
+inline constexpr double kFovPresets[] = {1.0, 0.9, 0.75, 0.6, 0.45};
 
 class SettingsPanel {
 public:
@@ -85,6 +94,12 @@ public:
     bool OnScroll(HWND control);
 
     bool FaceOverlay() const { return faceOverlay_; }
+    // Framing section: rule-of-thirds grid over the preview (view only), and the Edit frame
+    // button's look while the preview's frame editor is open.
+    bool Grid() const { return gridOn_; }
+    void SetFrameEditing(bool on);
+    // Only the frame controls (digital zoom, field of view) <- profile: cheap, for live dragging.
+    void RefreshFrame();
     void SetFaceOverlay(bool on);
     // Live state texts (second line of the switches).
     void SetFaceTrackingState(const std::wstring& text);
@@ -147,6 +162,11 @@ private:
     std::vector<HWND> effectToggles_, effectSliders_;
     std::vector<int> effectStrength_;  // last strength per effect (restored when switched back on)
     HWND smooth_ = nullptr, face_ = nullptr, faceMarkers_ = nullptr, autoFraming_ = nullptr;
+    // Framing
+    HWND frameEdit_ = nullptr, frameReset_ = nullptr, grid_ = nullptr, precise_ = nullptr;
+    Choice fov_;
+    std::vector<Slider> frameSliders_;
+    bool gridOn_ = false;
     Choice processing_, antiFlicker_;
     HWND diagnostics_ = nullptr, diagText_ = nullptr;
     bool diagnosticsOn_ = false;

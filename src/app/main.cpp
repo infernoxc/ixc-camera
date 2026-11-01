@@ -79,7 +79,8 @@ enum ControlId : int {
     kIdPerf = 109,
     kIdRefresh = 110,
     kIdUpdatePill = 111,   // header "Update available" (opens the Updates section)
-    kIdNav0 = 120,         // navigation rail: one per app::PanelSection, 120..125
+    kIdFrameButton = 112,  // toolbar: open/close the preview's frame editor
+    kIdNav0 = 120,         // navigation rail: one per app::PanelSection, 120..126
     kIdQuick0 = 130,       // bottom bar: background None/Blur/Image/Colour 130..133, effects 134
     // Settings column controls: app::PanelId (settings_panel.h), 200 and up.
 };
@@ -93,7 +94,7 @@ using app::kIdVcamUse;
 using app::PanelSection;
 
 // Navigation rail entries, in app::PanelSection order.
-constexpr const wchar_t* kNavLabels[app::kPanelSections] = {L"Camera", L"Effects", L"Background", L"Profiles", L"Settings", L"Updates"};
+constexpr const wchar_t* kNavLabels[app::kPanelSections] = {L"Camera", L"Framing", L"Effects", L"Background", L"Profiles", L"Settings", L"Updates"};
 // Bottom quick bar: background shortcuts (modes the renderer supports) and the effects switch.
 constexpr BackgroundMode kQuickModes[] = {BackgroundMode::Original, BackgroundMode::Blur, BackgroundMode::Replace, BackgroundMode::Color};
 constexpr const wchar_t* kQuickLabels[] = {L"None", L"Blur", L"Image", L"Colour"};
@@ -172,6 +173,9 @@ private:
     SettingsSync sync_;
     // Navigation, quick bar, updates (0.14).
     void SelectSection(PanelSection s);
+    void SetFrameEditing(bool on);
+    bool frameEditing_ = false;
+    HWND frameButton_ = nullptr;
     void RefreshQuickBar();
     void OnQuick(int index);
     void OnUpdateChecked(const app::UpdateCheckResult& r);
@@ -322,6 +326,7 @@ void MainWindow::CreateControls() {
     format_ = combo(kIdFormat);
     startStop_ = CreateButton(hwnd_, kIdStartStop, L"Start preview", ButtonStyle::Primary, &fonts_, theme::kBg);
     refresh_ = CreateButton(hwnd_, kIdRefresh, L"Refresh", ButtonStyle::Secondary, &fonts_, theme::kBg);
+    frameButton_ = CreateButton(hwnd_, kIdFrameButton, L"Frame", ButtonStyle::Secondary, &fonts_, theme::kBg);
     updatePill_ = CreateButton(hwnd_, kIdUpdatePill, L"Update available", ButtonStyle::Primary, &fonts_, theme::kBg);
     ShowWindow(updatePill_, SW_HIDE);
     for (int i = 0; i < kPanelSections; ++i)
@@ -381,8 +386,8 @@ void MainWindow::Layout() {
     const int left = railW + pad, right = w - panelW - Scale(4);
     int y = headerH + Scale(8);
     // Toolbar: camera, format, refresh, start/stop.
-    const int buttonW = Scale(150), refreshW = Scale(84);
-    const int comboSpace = std::max(Scale(200), right - left - buttonW - refreshW - 3 * gap);
+    const int buttonW = Scale(150), refreshW = Scale(84), frameW = Scale(84);
+    const int comboSpace = std::max(Scale(200), right - left - buttonW - refreshW - frameW - 4 * gap);
     const int cameraW = comboSpace * 55 / 100;
     RECT cr{};
     GetWindowRect(camera_, &cr);  // a combo box sizes its own edit height; centre it on the row
@@ -390,6 +395,7 @@ void MainWindow::Layout() {
     place(camera_, left, comboTop, cameraW, Scale(400));
     place(format_, left + cameraW + gap, comboTop, comboSpace - cameraW - gap, Scale(400));
     place(refresh_, right - buttonW - gap - refreshW, y, refreshW, rowH);
+    place(frameButton_, right - buttonW - 2 * gap - refreshW - frameW, y, frameW, rowH);
     place(startStop_, right - buttonW, y, buttonW, rowH);
     y += rowH + gap;
 
@@ -1159,12 +1165,25 @@ void MainWindow::UpdatePipeline() {
     // (and raises temporal denoise to match).
     smoothEv_ = session_->SmoothCompensationEv();
     const Profile effective = processing::WithSmoothMotionGain(profile_, smoothEv_);
-    preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(effective, l.width, l.height, fullRange)));
+    const processing::PipelineParams params = processing::CompileParams(effective, l.width, l.height, fullRange);
+    if (frameEditing_) {
+        // Frame editor: the preview shows the whole camera picture with the frame on top.
+        Profile whole = effective;
+        whole.crop = CropRect{};
+        whole.zoom = 1.0;
+        preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(processing::CompileParams(whole, l.width, l.height, fullRange)));
+        preview_.SetFrameRect({params.srcX, params.srcY, params.srcW, params.srcH});
+    } else {
+        preview_.SetPipeline(std::make_shared<const processing::PipelineParams>(params));
+    }
+    preview_.SetGrid(panel_.Grid());
     auto fx = effects::CompileEffects(effective, fullRange, bgSource_.Resolve(profile_.background, BackgroundsDirectory()));
     const bool effectsNeedFaces = fx->needsFaces;
     preview_.SetEffects(fx->Active() ? std::move(fx) : nullptr);
     // Face tracking follows the profile, or face-aware effects (off = no thread, no memory).
-    preview_.SetAutoFraming(profile_.autoFraming);
+    // (Not while editing the frame: the editor shows the whole picture.)
+    preview_.SetAutoFraming(profile_.autoFraming && !frameEditing_,
+                            face::FramerParamsFor(profile_.framing.tightness, profile_.framing.speed, profile_.framing.maxZoom));
     preview_.SetProcessingMode(profile_.processing, static_cast<float>(profile_.background.temporal / 100.0),
                                static_cast<float>(profile_.background.hair / 100.0));
     if (profile_.faceTracking.enabled || profile_.autoFraming || effectsNeedFaces) {
@@ -1187,6 +1206,7 @@ void MainWindow::StopPreview(const wchar_t* placeholder) {
     KillTimer(hwnd_, kStatusTimer);
     if (session_) session_->Stop();  // releases the physical camera
     previewing_ = false;
+    if (frameEditing_) SetFrameEditing(false);  // the editor needs the live picture
     preview_.Clear(placeholder);
     SetWindowTextW(startStop_, L"Start preview");
     SetWindowTextW(status_, L"Preview stopped  ·  the camera is released");
@@ -1280,6 +1300,31 @@ void MainWindow::SelectSection(PanelSection s) {
     for (int i = 0; i < app::kPanelSections; ++i)
         app::SetButtonStyle(nav_[i], i == static_cast<int>(s) ? app::ButtonStyle::NavSelected : app::ButtonStyle::Nav);
     panel_.SetSection(s);
+}
+
+// Frame editor: drag the frame on the preview; IXC Camera follows live (coalesced publishing).
+void MainWindow::SetFrameEditing(bool on) {
+    if (on && !previewing_) {
+        if (cameras_.empty()) return;
+        StartPreview();
+        if (!previewing_) return;
+    }
+    frameEditing_ = on;
+    panel_.SetFrameEditing(on);
+    app::SetButtonStyle(frameButton_, on ? app::ButtonStyle::Primary : app::ButtonStyle::Secondary);
+    SetWindowTextW(frameButton_, on ? L"Done" : L"Frame");
+    if (on) {
+        SelectSection(PanelSection::Framing);
+        preview_.SetFrameEditing(true, [this](const face::ViewRect& r) {
+            profile_.crop = CropRect{r.x, r.y, r.w, r.h};
+            profile_.zoom = 1.0;
+            panel_.RefreshFrame();
+            OnPictureChanged();
+        });
+    } else {
+        preview_.SetFrameEditing(false);
+    }
+    UpdatePipeline();
 }
 
 void MainWindow::RefreshQuickBar() {
@@ -1508,6 +1553,10 @@ LRESULT MainWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 case kIdPrivacy:
                     ShellExecuteW(hwnd_, L"open", L"ms-settings:privacy-webcam", nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                case kIdFrameButton:
+                case app::kIdFrameEdit:
+                    SetFrameEditing(!frameEditing_);
                     return 0;
                 case kIdRefresh:
                     RefreshCameras();

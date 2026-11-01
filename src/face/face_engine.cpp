@@ -54,11 +54,20 @@ bool FaceEngine::Start(const EngineConfig& config) {
     cc.budget = std::clamp(config.cpuBudget, 0.02, 0.5);
     cc.fixedIntervalFrames = std::max(0, config.fixedIntervalFrames);
     cc.allowLarge = config.allowLargeInput;
+    if (config.precise) cc = PreciseCadence(cc);
     {
         std::lock_guard lock(mu_);
         stop_ = false;
         pending_ = false;
-        tracker_.Reset();
+        // Precise: lighter smoothing of still faces (less lag behind small moves); the velocity
+        // prediction between the more frequent detections keeps it steady.
+        TrackerConfig tc;
+        if (config.precise) {
+            tc.alphaStill = 0.5f;
+            tc.maxMissed = 4;  // missed detections come faster: same time before a face is dropped
+            tc.maxPredictMs = 150;
+        }
+        tracker_ = Tracker(tc);
         cadence_ = Cadence(cc);
         cadence_.Reset(NowMs());
         status_ = {};

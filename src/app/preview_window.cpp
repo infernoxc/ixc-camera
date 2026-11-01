@@ -5,7 +5,9 @@
 #include <mfapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cwchar>
+#include <windowsx.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -97,6 +99,7 @@ bool PreviewWindow::RegisterClass(HINSTANCE instance) {
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;  // painted entirely in WM_PAINT (avoids flicker)
+    wc.style = CS_DBLCLKS;       // double-click in the frame editor: whole picture
     wc.lpszClassName = kClass;
     return RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
@@ -284,13 +287,34 @@ void PreviewWindow::Paint(HDC dc, const RECT& rc) {
             bi.bmiHeader.biPlanes = 1;
             bi.bmiHeader.biBitCount = 32;
             bi.bmiHeader.biCompression = BI_RGB;
+            shown_ = {dx, dy, dx + dw, dy + dh};
+            const std::uint32_t* pixels = bgra_.data();
+            if (editFrame_) {
+                // Outside the frame: dimmed to ~40% (a reused copy; the converted frame stays clean).
+                if (overlay_.size() != bgra_.size()) overlay_.assign(bgra_.size(), 0);
+                const face::ViewRect f = ShownFrame();
+                const int fx0 = static_cast<int>(std::lround(f.x * dw)), fx1 = static_cast<int>(std::lround((f.x + f.w) * dw));
+                const int fy0 = static_cast<int>(std::lround(f.y * dh)), fy1 = static_cast<int>(std::lround((f.y + f.h) * dh));
+                for (int yy = 0; yy < dh; ++yy) {
+                    const std::uint32_t* src = bgra_.data() + static_cast<size_t>(yy) * dw;
+                    std::uint32_t* dst = overlay_.data() + static_cast<size_t>(yy) * dw;
+                    const bool rowIn = yy >= fy0 && yy < fy1;
+                    for (int xx = 0; xx < dw; ++xx) {
+                        const std::uint32_t px = src[xx];
+                        dst[xx] = rowIn && xx >= fx0 && xx < fx1 ? px : ((px >> 2) & 0x3F3F3Fu) + ((px >> 3) & 0x1F1F1Fu);
+                    }
+                }
+                pixels = overlay_.data();
+            }
             SetDIBitsToDevice(dc, dx, dy, static_cast<DWORD>(dw), static_cast<DWORD>(dh), 0, 0, 0, static_cast<UINT>(dh),
-                              bgra_.data(), &bi, DIB_RGB_COLORS);
+                              pixels, &bi, DIB_RGB_COLORS);
             RECT bars[4] = {{0, 0, cw, dy}, {0, dy + dh, cw, ch}, {0, dy, dx, dy + dh}, {dx + dw, dy, cw, dy + dh}};
             for (const auto& b : bars) {
                 if (b.right > b.left && b.bottom > b.top) FillRect(dc, &b, black);
             }
             if (faceOverlay_ && face_.Running()) PaintFaces(dc, dx, dy, dw, dh);
+            if (editFrame_) PaintFrameEditor(dc, dx, dy, dw, dh);
+            else if (grid_) PaintGrid(dc, dx, dy, dw, dh);
             drawn = true;
         }
     }
@@ -309,6 +333,180 @@ void PreviewWindow::Paint(HDC dc, const RECT& rc) {
     }
 }
 
+// ---- Frame editor ----------------------------------------------------------------------------------
+
+void PreviewWindow::SetFrameEditing(bool on, std::function<void(const face::ViewRect&)> onChange) {
+    editFrame_ = on;
+    onFrame_ = on ? std::move(onChange) : nullptr;
+    if (!on) {
+        drag_ = -1;
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        std::vector<std::uint32_t>().swap(overlay_);
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PreviewWindow::SetFrameRect(const face::ViewRect& r) {
+    if (drag_ >= 0 || r.w <= 0 || r.h <= 0) return;  // the user's drag wins over echoes of it
+    frame_ = r;
+    frameAspect_ = r.w / r.h;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+face::ViewRect PreviewWindow::ShownFrame() const {
+    face::ViewRect f = frame_;
+    if (pipeline_ && pipeline_->mirror) f.x = 1.0 - f.x - f.w;
+    return f;
+}
+
+void PreviewWindow::SetShownFrame(face::ViewRect r) {
+    // Shape: the output's; size: between the whole picture and a 4x zoom; position: inside.
+    const double hMax = std::min(1.0, 1.0 / frameAspect_);
+    const double cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    r.h = std::clamp(r.h, hMax / 4, hMax);
+    r.w = r.h * frameAspect_;
+    r.x = std::clamp(cx - r.w / 2, 0.0, std::max(0.0, 1.0 - r.w));
+    r.y = std::clamp(cy - r.h / 2, 0.0, std::max(0.0, 1.0 - r.h));
+    if (r.w >= 1.0 - 1e-9) r.x = 0;
+    if (r.h >= 1.0 - 1e-9) r.y = 0;
+    face::ViewRect src = r;
+    if (pipeline_ && pipeline_->mirror) src.x = 1.0 - r.x - r.w;
+    frame_ = src;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    if (onFrame_) onFrame_(frame_);
+}
+
+int PreviewWindow::HitTest(int x, int y) const {
+    const int dw = shown_.right - shown_.left, dh = shown_.bottom - shown_.top;
+    if (dw <= 0 || dh <= 0) return -1;
+    const face::ViewRect f = ShownFrame();
+    const int l = shown_.left + static_cast<int>(f.x * dw), r = shown_.left + static_cast<int>((f.x + f.w) * dw);
+    const int t = shown_.top + static_cast<int>(f.y * dh), b = shown_.top + static_cast<int>((f.y + f.h) * dh);
+    const int grab = MulDiv(14, static_cast<int>(GetDpiForWindow(hwnd_)), 96);
+    const auto within = [grab](int a, int c) { return std::abs(a - c) <= grab; };
+    if (within(x, l) && within(y, t)) return 1;
+    if (within(x, r) && within(y, t)) return 2;
+    if (within(x, l) && within(y, b)) return 3;
+    if (within(x, r) && within(y, b)) return 4;
+    return x >= l && x < r && y >= t && y < b ? 0 : -1;
+}
+
+void PreviewWindow::OnEditorDown(int x, int y) {
+    const int dw = shown_.right - shown_.left, dh = shown_.bottom - shown_.top;
+    if (dw <= 0 || dh <= 0) return;
+    int hit = HitTest(x, y);
+    if (hit < 0) {
+        // Outside the frame: centre it on the click, then keep dragging it from there.
+        face::ViewRect f = ShownFrame();
+        f.x = (x - shown_.left) / static_cast<double>(dw) - f.w / 2;
+        f.y = (y - shown_.top) / static_cast<double>(dh) - f.h / 2;
+        SetShownFrame(f);
+        hit = 0;
+    }
+    drag_ = hit;
+    dragFrom_ = {x, y};
+    dragStart_ = ShownFrame();
+    SetCapture(hwnd_);
+}
+
+void PreviewWindow::OnEditorMove(int x, int y) {
+    if (drag_ < 0) return;
+    const int dw = shown_.right - shown_.left, dh = shown_.bottom - shown_.top;
+    if (dw <= 0 || dh <= 0) return;
+    face::ViewRect f = dragStart_;
+    if (drag_ == 0) {
+        f.x += (x - dragFrom_.x) / static_cast<double>(dw);
+        f.y += (y - dragFrom_.y) / static_cast<double>(dh);
+        // Moving never resizes: clamp the position here (SetShownFrame keeps the centre).
+        f.x = std::clamp(f.x, 0.0, std::max(0.0, 1.0 - f.w));
+        f.y = std::clamp(f.y, 0.0, std::max(0.0, 1.0 - f.h));
+        SetShownFrame(f);
+        return;
+    }
+    // Corner: the opposite corner stays put; the size follows the pointer, keeping the shape.
+    const bool left = drag_ == 1 || drag_ == 3, top = drag_ == 1 || drag_ == 2;
+    const double ax = left ? dragStart_.x + dragStart_.w : dragStart_.x;
+    const double ay = top ? dragStart_.y + dragStart_.h : dragStart_.y;
+    const double mx = (x - shown_.left) / static_cast<double>(dw), my = (y - shown_.top) / static_cast<double>(dh);
+    const double hMax = std::min(1.0, 1.0 / frameAspect_);
+    double h = std::max(std::abs(my - ay), std::abs(mx - ax) / frameAspect_);
+    const double roomY = top ? ay : 1.0 - ay, roomX = left ? ax : 1.0 - ax;
+    h = std::clamp(h, hMax / 4, std::max(hMax / 4, std::min({hMax, roomY, roomX / frameAspect_})));
+    f.h = h;
+    f.w = h * frameAspect_;
+    f.x = left ? ax - f.w : ax;
+    f.y = top ? ay - f.h : ay;
+    SetShownFrame(f);
+}
+
+void PreviewWindow::OnEditorUp() {
+    if (drag_ < 0) return;
+    drag_ = -1;
+    if (GetCapture() == hwnd_) ReleaseCapture();
+}
+
+void PreviewWindow::OnEditorWheel(int delta) {
+    // Each notch: 10% tighter (wheel up) or wider, around the frame's centre.
+    face::ViewRect f = ShownFrame();
+    const double k = std::pow(0.9, delta / static_cast<double>(WHEEL_DELTA));
+    const double cx = f.x + f.w / 2, cy = f.y + f.h / 2;
+    f.h *= k;
+    f.w *= k;
+    f.x = cx - f.w / 2;
+    f.y = cy - f.h / 2;
+    SetShownFrame(f);
+}
+
+void PreviewWindow::PaintGrid(HDC dc, int x, int y, int w, int h) {
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+    const HGDIOBJ old = SelectObject(dc, pen);
+    for (int i = 1; i <= 2; ++i) {
+        MoveToEx(dc, x + w * i / 3, y, nullptr);
+        LineTo(dc, x + w * i / 3, y + h);
+        MoveToEx(dc, x, y + h * i / 3, nullptr);
+        LineTo(dc, x + w, y + h * i / 3);
+    }
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+void PreviewWindow::PaintFrameEditor(HDC dc, int dx, int dy, int dw, int dh) {
+    const face::ViewRect f = ShownFrame();
+    const int l = dx + static_cast<int>(std::lround(f.x * dw)), r = dx + static_cast<int>(std::lround((f.x + f.w) * dw));
+    const int t = dy + static_cast<int>(std::lround(f.y * dh)), b = dy + static_cast<int>(std::lround((f.y + f.h) * dh));
+    PaintGrid(dc, l, t, r - l, b - t);
+    const int dpi = static_cast<int>(GetDpiForWindow(hwnd_));
+    const int px2 = std::max(2, MulDiv(2, dpi, 96)), handle = MulDiv(5, dpi, 96);
+    HPEN border = CreatePen(PS_SOLID, px2, RGB(255, 255, 255));
+    const HGDIOBJ oldPen = SelectObject(dc, border);
+    const HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, l, t, r, b);
+    SelectObject(dc, GetStockObject(WHITE_BRUSH));
+    for (const POINT c : {POINT{l, t}, POINT{r, t}, POINT{l, b}, POINT{r, b}}) Rectangle(dc, c.x - handle, c.y - handle, c.x + handle, c.y + handle);
+    SelectObject(dc, oldBrush);
+    SelectObject(dc, oldPen);
+    DeleteObject(border);
+
+    // Labels: the frame's size and zoom; how to use the editor.
+    SetBkMode(dc, TRANSPARENT);
+    const HGDIOBJ oldFont = SelectObject(dc, reinterpret_cast<HFONT>(SendMessageW(GetParent(hwnd_), WM_GETFONT, 0, 0)));
+    wchar_t label[96];
+    swprintf_s(label, L"%u × %u  ·  %.2f× zoom", static_cast<unsigned>(std::lround(f.w * layout_.width)),
+               static_cast<unsigned>(std::lround(f.h * layout_.height)), f.h > 0 ? std::min(1.0, 1.0 / frameAspect_) / f.h : 1.0);
+    RECT lr{l + MulDiv(8, dpi, 96), t + MulDiv(6, dpi, 96), r - 4, t + MulDiv(30, dpi, 96)};
+    SetTextColor(dc, RGB(0, 0, 0));
+    OffsetRect(&lr, 1, 1);
+    DrawTextW(dc, label, -1, &lr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    OffsetRect(&lr, -1, -1);
+    SetTextColor(dc, RGB(255, 255, 255));
+    DrawTextW(dc, label, -1, &lr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const wchar_t* hint = L"Drag to move  ·  drag a corner or scroll to resize  ·  double-click: whole picture";
+    RECT hr{dx + 8, dy + dh - MulDiv(28, dpi, 96), dx + dw - 8, dy + dh - 6};
+    SetTextColor(dc, RGB(230, 230, 230));
+    DrawTextW(dc, hint, -1, &hr, DT_CENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, oldFont);
+}
+
 LRESULT CALLBACK PreviewWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<PreviewWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
@@ -319,6 +517,39 @@ LRESULT CALLBACK PreviewWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_LBUTTONDOWN:
+            if (self && self->editFrame_) self->OnEditorDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
+        case WM_LBUTTONDBLCLK:
+            if (self && self->editFrame_) {
+                self->SetShownFrame({0.5 - 5e8, 0.5 - 5e8, 1e9, 1e9});  // centred, clamped to the largest frame
+                return 0;
+            }
+            break;
+        case WM_MOUSEMOVE:
+            if (self && self->editFrame_) self->OnEditorMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            return 0;
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (self) self->OnEditorUp();
+            return 0;
+        case WM_MOUSEWHEEL:
+            if (self && self->editFrame_) {
+                self->OnEditorWheel(GET_WHEEL_DELTA_WPARAM(wp));
+                return 0;
+            }
+            break;
+        case WM_SETCURSOR:
+            if (self && self->editFrame_ && LOWORD(lp) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                const int hit = self->drag_ >= 0 ? self->drag_ : self->HitTest(pt.x, pt.y);
+                const wchar_t* c = hit == 0 ? IDC_SIZEALL : hit == 1 || hit == 4 ? IDC_SIZENWSE : hit == 2 || hit == 3 ? IDC_SIZENESW : IDC_CROSS;
+                SetCursor(LoadCursorW(nullptr, c));
+                return TRUE;
+            }
+            break;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(hwnd, &ps);
